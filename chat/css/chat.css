@@ -79,49 +79,7 @@
     color: var(--nui-shade2, #666);
 }
 
-/* Fix select styling */
-#model-select {
-    display: block;
-    width: 100%;
-}
 
-#model-select select {
-    width: 100%;
-    padding: 0.5rem;
-    border: 1px solid var(--nui-shade3, #ddd);
-    border-radius: 4px;
-    background: var(--nui-bg, #fff);
-    color: var(--nui-fg, #333);
-    font-size: 0.875rem;
-}
-
-#model-select select optgroup {
-    font-weight: 600;
-    color: var(--nui-fg, #333);
-}
-
-#model-select select option {
-    padding: 0.25rem;
-}
-
-/* Fix input styling */
-#max-tokens input,
-#system-prompt textarea {
-    width: 100%;
-    padding: 0.5rem;
-    border: 1px solid var(--nui-shade3, #ddd);
-    border-radius: 4px;
-    background: var(--nui-bg, #fff);
-    color: var(--nui-fg, #333);
-    font-size: 0.875rem;
-    box-sizing: border-box;
-}
-
-#system-prompt textarea {
-    resize: vertical;
-    min-height: 60px;
-    font-family: inherit;
-}
 
 /* Sidebar footer */
 .sidebar-footer {
