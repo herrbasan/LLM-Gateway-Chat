@@ -670,3 +670,64 @@
 }
 
 
+/* ============================================
+   App Layout & History (from index.html)
+   ============================================ */
+
+/* Prevent layout shifts by hiding app until upgraded and ready */
+body { margin: 0; padding: 0; overflow: hidden; height: 100vh; }
+nui-app:not(.nui-ready) { display: none; }
+
+.chat-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.chat-history-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background: var(--nui-shade6, #f0f0f0);
+    border: 1px solid var(--nui-shade3, #ddd);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: all 0.2s;
+}
+
+.chat-history-item:hover {
+    background: var(--nui-shade5, #e0e0e0);
+}
+
+.chat-history-item.active {
+    border-color: var(--nui-color-primary, #0066cc);
+    background: var(--nui-shade7, #fff);
+    font-weight: 500;
+}
+
+.chat-history-item-title {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 0.5rem;
+}
+
+.chat-history-item-delete {
+    background: none;
+    border: none;
+    color: var(--nui-shade2, #666);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+}
+
+.chat-history-item-delete:hover {
+    background: var(--nui-shade3, #ddd);
+    color: var(--nui-color-danger, #cc0000);
+}

@@ -7,8 +7,12 @@ import { StreamingHandler } from './streaming.js';
 import { renderMarkdown, parseThinking, renderThinking } from './markdown.js';
 import { imageStore } from './image-store.js';
 
-// Gateway URL from config or default
-const GATEWAY_URL = window.CHAT_CONFIG?.gatewayUrl || 'http://localhost:3400';
+// Config values with defaults
+const CONFIG = window.CHAT_CONFIG || {};
+const GATEWAY_URL = CONFIG.gatewayUrl || 'http://localhost:3400';
+const DEFAULT_MODEL = CONFIG.defaultModel || '';
+const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
+const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || 2048;
 
 // State
 // Storage wrapper for Chat History
@@ -79,6 +83,9 @@ const elements = {
 async function init() {
     console.log('[Chat] Initializing...');
     
+    // Apply default config values
+    applyDefaultConfig();
+    
     // Setup event listeners first
     setupEventListeners();
     
@@ -94,6 +101,25 @@ async function init() {
     checkGatewayStatus();
     
     console.log('[Chat] Ready');
+}
+
+function applyDefaultConfig() {
+    // Set default temperature
+    if (elements.temperature) {
+        elements.temperature.value = DEFAULT_TEMPERATURE;
+        elements.temperature.setAttribute('value', DEFAULT_TEMPERATURE);
+        if (elements.tempValue) {
+            elements.tempValue.textContent = DEFAULT_TEMPERATURE;
+        }
+    }
+    
+    // Set default max tokens
+    if (elements.maxTokens) {
+        const maxTokensInput = elements.maxTokens.querySelector('input');
+        if (maxTokensInput) {
+            maxTokensInput.value = DEFAULT_MAX_TOKENS;
+        }
+    }
 }
 
 function waitForNUI() {
@@ -147,6 +173,12 @@ function populateModelSelect() {
         return;
     }
     
+    // Check if default model exists
+    const defaultModelExists = DEFAULT_MODEL && chatModels.some(m => m.id === DEFAULT_MODEL);
+    if (DEFAULT_MODEL && !defaultModelExists) {
+        console.warn(`[Chat] Configured default model "${DEFAULT_MODEL}" not found`);
+    }
+    
     // Build items array for NUI setItems API
     const items = [{ value: '', label: 'Select model...' }];
     
@@ -174,6 +206,13 @@ function populateModelSelect() {
     // Use NUI API to update options
     if (elements.modelSelect.setItems) {
         elements.modelSelect.setItems(items);
+        
+        // Set default model if configured
+        if (defaultModelExists) {
+            currentModel = DEFAULT_MODEL;
+            elements.modelSelect.setValues([DEFAULT_MODEL]);
+            console.log('[Chat] Selected default model:', DEFAULT_MODEL);
+        }
         
         // Bind change event via NUI
         elements.modelSelect.addEventListener('nui-change', (e) => {
@@ -335,8 +374,8 @@ async function streamResponse(exchangeId) {
     
     const exchange = conversation.getExchange(exchangeId);
     const systemPrompt = elements.systemPrompt?.querySelector('textarea')?.value || '';
-    const temperature = parseFloat(elements.temperature?.value) || 0.7;
-    const maxTokens = parseInt(elements.maxTokens?.value) || 2048;
+    const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
+    const maxTokens = parseInt(elements.maxTokens?.value) || DEFAULT_MAX_TOKENS;
     
     // Get or create assistant message element
     let assistantEl = elements.messages?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
