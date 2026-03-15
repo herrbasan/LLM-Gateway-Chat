@@ -173,10 +173,22 @@ function populateModelSelect() {
         return;
     }
     
-    // Check if default model exists
-    const defaultModelExists = DEFAULT_MODEL && chatModels.some(m => m.id === DEFAULT_MODEL);
-    if (DEFAULT_MODEL && !defaultModelExists) {
-        console.warn(`[Chat] Configured default model "${DEFAULT_MODEL}" not found`);
+    // Determine which model to select
+    let modelToSelect = null;
+    
+    if (DEFAULT_MODEL) {
+        // Use configured default if it exists
+        const defaultModelExists = chatModels.some(m => m.id === DEFAULT_MODEL);
+        if (defaultModelExists) {
+            modelToSelect = DEFAULT_MODEL;
+        } else {
+            console.warn(`[Chat] Configured default model "${DEFAULT_MODEL}" not found, using first available`);
+        }
+    }
+    
+    // If no default configured or not found, auto-select first model
+    if (!modelToSelect) {
+        modelToSelect = chatModels[0].id;
     }
     
     // Build items array for NUI setItems API
@@ -207,11 +219,11 @@ function populateModelSelect() {
     if (elements.modelSelect.setItems) {
         elements.modelSelect.setItems(items);
         
-        // Set default model if configured
-        if (defaultModelExists) {
-            currentModel = DEFAULT_MODEL;
-            elements.modelSelect.setValues([DEFAULT_MODEL]);
-            console.log('[Chat] Selected default model:', DEFAULT_MODEL);
+        // Select the model (default or first available)
+        if (modelToSelect) {
+            currentModel = modelToSelect;
+            elements.modelSelect.setValues([modelToSelect]);
+            console.log('[Chat] Selected model:', modelToSelect);
         }
         
         // Bind change event via NUI
@@ -222,12 +234,12 @@ function populateModelSelect() {
     } else {
         // Fallback if NUI not loaded yet
         console.warn('[Chat] NUI select not ready, using fallback');
-        populateModelSelectFallback(chatModels);
+        populateModelSelectFallback(chatModels, modelToSelect);
     }
 }
 
 // Fallback for when NUI is not ready
-function populateModelSelectFallback(chatModels) {
+function populateModelSelectFallback(chatModels, modelToSelect) {
     const select = elements.modelSelect.querySelector('select');
     if (!select) return;
     
@@ -253,6 +265,13 @@ function populateModelSelectFallback(chatModels) {
         }
         
         select.appendChild(optgroup);
+    }
+    
+    // Select the model (default or first available)
+    if (modelToSelect) {
+        currentModel = modelToSelect;
+        select.value = modelToSelect;
+        console.log('[Chat] Selected model:', modelToSelect);
     }
     
     select.addEventListener('change', (e) => {
