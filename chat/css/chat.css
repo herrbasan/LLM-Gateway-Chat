@@ -105,6 +105,7 @@
 }
 
 /* Fix input styling */
+#temperature input,
 #max-tokens input,
 #system-prompt textarea {
     width: 100%;
