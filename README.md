@@ -21,14 +21,15 @@ Install the "Live Server" extension and right-click on `chat/index.html` → "Op
 
 ## Configuration
 
-Edit `chat/index.html` and change the Gateway URL:
+Edit `chat/js/config.js` and configure your Gateway URL:
 
-```html
-<script>
-    window.CHAT_CONFIG = {
-        gatewayUrl: 'http://localhost:3400',  // Your LLM Gateway URL
-    };
-</script>
+```javascript
+window.CHAT_CONFIG = {
+    gatewayUrl: 'http://localhost:3400',  // Your LLM Gateway URL
+    defaultModel: '',                      // Optional: Auto-select this model
+    defaultTemperature: 0.7,               // Default temperature (0-2)
+    defaultMaxTokens: 2048,                // Default max tokens
+};
 ```
 
 ## Features
@@ -66,6 +67,50 @@ update-vendor.bat
 ```
 
 This copies the latest vendor files from `WebAdmin/public/shared` to `ChatStandalone/shared`.
+
+## Development Guidelines
+
+### NUI Components
+
+This project uses the **NUI Web Components** library (`nui_wc2`). When adding UI elements:
+
+- **Use NUI components** whenever possible (`<nui-input>`, `<nui-select>`, `<nui-button>`, etc.)
+- **Avoid custom HTML elements** like native `<input>` or `<select>` without the NUI wrapper
+- **Don't add custom CSS** for basic styling - NUI handles it through the theme system
+- **Use NUI theme variables** for colors (e.g., `--nui-shade2`, `--nui-accent`, `--nui-bg`)
+
+Example - Correct:
+```html
+<nui-input id="temperature">
+    <input type="number" min="0" max="2" step="0.1">
+</nui-input>
+```
+
+Example - Avoid:
+```html
+<input type="number" id="temperature" class="custom-styled-input">
+```
+
+### NUI Theme Variables
+
+Leverage NUI's CSS custom properties for consistent theming:
+
+```css
+/* Use NUI theme variables */
+.my-element {
+    background: var(--nui-bg);
+    color: var(--nui-fg);
+    border: 1px solid var(--nui-shade3);
+}
+```
+
+Common theme variables:
+- `--nui-bg` / `--nui-fg` - Background and foreground colors
+- `--nui-shade2` through `--nui-shade7` - Shade variations
+- `--nui-accent` - Primary accent color
+- `--nui-color-primary` / `--nui-color-danger` - Semantic colors
+
+The theme automatically supports light/dark modes based on system preferences.
 
 ## CORS
 
