@@ -222,7 +222,7 @@ function populateModelSelect() {
         // Select the model (default or first available)
         if (modelToSelect) {
             currentModel = modelToSelect;
-            elements.modelSelect.setValues([modelToSelect]);
+            elements.modelSelect.setValue(modelToSelect);
             console.log('[Chat] Selected model:', modelToSelect);
         }
         
