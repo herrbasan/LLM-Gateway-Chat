@@ -58,7 +58,6 @@ let attachedImages = []; // Array of {dataUrl, name, type}
 const elements = {
     modelSelect: document.getElementById('model-select'),
     temperature: document.getElementById('temperature'),
-    tempValue: document.getElementById('temp-value'),
     maxTokens: document.getElementById('max-tokens'),
     systemPrompt: document.getElementById('system-prompt'),
     messages: document.getElementById('messages'),
@@ -106,10 +105,9 @@ async function init() {
 function applyDefaultConfig() {
     // Set default temperature
     if (elements.temperature) {
-        elements.temperature.value = DEFAULT_TEMPERATURE;
-        elements.temperature.setAttribute('value', DEFAULT_TEMPERATURE);
-        if (elements.tempValue) {
-            elements.tempValue.textContent = DEFAULT_TEMPERATURE;
+        const tempInput = elements.temperature.querySelector('input');
+        if (tempInput) {
+            tempInput.value = DEFAULT_TEMPERATURE;
         }
     }
     
@@ -289,11 +287,6 @@ function setupEventListeners() {
     elements.modelSelect?.addEventListener('change', (e) => {
         currentModel = e.target.value;
         console.log('[Chat] Selected model:', currentModel);
-    });
-    
-    // Temperature slider
-    elements.temperature?.addEventListener('input', (e) => {
-        elements.tempValue.textContent = e.target.value;
     });
     
     // Send message

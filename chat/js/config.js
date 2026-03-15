@@ -5,7 +5,7 @@
 
 window.CHAT_CONFIG = {
     // LLM Gateway URL - change this to match your gateway server
-    gatewayUrl: 'http://localhost:3400',
+    gatewayUrl: 'http://192.168.0.100:3400',
     
     // Optional: Default model to select (leave empty to auto-select first available)
     defaultModel: '',

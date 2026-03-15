@@ -78,13 +78,10 @@
                 
                 <!-- Options -->
                 <div class="sidebar-section">
-                    <label style="display:flex; justify-content:space-between; font-weight: 600; font-size: 0.875rem; margin-bottom: 0.5rem;">
-                        <span>Temperature</span>
-                        <span id="temp-value">0.7</span>
-                    </label>
-                    <nui-slider id="temperature" min="0" max="2" step="0.1" value="0.7">
-                        <input type="range">
-                    </nui-slider>
+                    <label style="font-weight: 600; font-size: 0.875rem; display: block; margin-bottom: 0.5rem;">Temperature</label>
+                    <nui-input id="temperature">
+                        <input type="number" min="0" max="2" step="0.1" value="0.7">
+                    </nui-input>
                 </div>
                 
                 <div class="sidebar-section">
