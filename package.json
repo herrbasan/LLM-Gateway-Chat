@@ -1,0 +1,11 @@
+{
+  "name": "chat-standalone",
+  "version": "1.0.0",
+  "description": "Standalone LLM Gateway Chat client",
+  "scripts": {
+    "start": "npx serve -l 8080",
+    "start:python": "python start.py"
+  },
+  "keywords": ["llm", "chat", "gateway"],
+  "license": "MIT"
+}

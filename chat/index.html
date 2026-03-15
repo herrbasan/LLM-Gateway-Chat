@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>LLM Gateway Chat</title>
+    
+    <!-- NUI Theme -->
+    <link rel="stylesheet" href="../nui_wc2/NUI/css/nui-theme.css">
+    <link rel="stylesheet" href="../nui_wc2/NUI/css/modules/nui-syntax-highlight.css">
+    
+    <!-- Vendor -->
+    <link rel="stylesheet" href="../shared/vendor/prism.css">
+    
+    <!-- Chat Styles -->
+    <link rel="stylesheet" href="css/chat.css">
+    
+    <style>
+        /* Prevent layout shifts by hiding app until upgraded and ready */
+        body { margin: 0; padding: 0; overflow: hidden; height: 100vh; }
+        nui-app:not(.nui-ready) { display: none; }
+        
+        .chat-history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .chat-history-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0.75rem;
+            background: var(--nui-shade6, #f0f0f0);
+            border: 1px solid var(--nui-shade3, #ddd);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+        
+        .chat-history-item:hover {
+            background: var(--nui-shade5, #e0e0e0);
+        }
+        
+        .chat-history-item.active {
+            border-color: var(--nui-color-primary, #0066cc);
+            background: var(--nui-shade7, #fff);
+            font-weight: 500;
+        }
+
+        .chat-history-item-title {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-right: 0.5rem;
+        }
+
+        .chat-history-item-delete {
+            background: none;
+            border: none;
+            color: var(--nui-shade2, #666);
+            cursor: pointer;
+            padding: 0.25rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+        }
+
+        .chat-history-item-delete:hover {
+            background: var(--nui-shade3, #ddd);
+            color: var(--nui-color-danger, #cc0000);
+        }
+    </style>
+</head>
+<body>
+    <nui-app nui-vars-sidebar_width="16rem" nui-vars-sidebar-right_width="20rem" nui-vars-sidebar_force-breakpoint="75rem" nui-vars-sidebar-right_force-breakpoint="90rem">
+        <nui-app-header>
+            <div slot="left">
+                <nui-button data-action="toggle-sidebar">
+                    <button type="button" aria-label="Toggle navigation menu">
+                        <nui-icon name="menu"></nui-icon>
+                    </button>
+                </nui-button>
+                <h1 style="margin:0; font-size:1.2rem; font-weight:600;">LLM Gateway Chat</h1>
+            </div>
+            <div slot="center">
+                <div class="gateway-status" id="gateway-status" style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem;">
+                    <span class="status-dot"></span> <span id="gateway-status-text">Gateway</span>
+                </div>
+            </div>
+            <div slot="right">
+                <nui-button data-action="toggle-theme" id="theme-toggle">
+                    <button type="button" aria-label="Toggle light/dark theme">
+                        <nui-icon name="brightness"></nui-icon>
+                    </button>
+                </nui-button>
+                <nui-button data-action="toggle-sidebar:right">
+                    <button type="button" aria-label="Settings">
+                        <nui-icon name="settings"></nui-icon>
+                    </button>
+                </nui-button>
+            </div>
+        </nui-app-header>
+
+        <nui-sidebar>
+            <div style="display: flex; flex-direction: column; height: 100%; overflow: hidden; box-sizing: border-box;">
+                <div style="padding: 1rem; flex-shrink: 0;">
+                    <nui-button id="new-chat-btn" type="primary" style="width: 100%;">
+                        <button type="button"><nui-icon name="add"></nui-icon> New Chat</button>
+                    </nui-button>
+                </div>
+
+                <h3 style="margin: 0.5rem 1rem; font-size: 0.875rem; color: var(--nui-shade2); text-transform: uppercase; flex-shrink: 0;">History</h3>
+                <div class="chat-history-list" id="chat-history-list" style="padding: 0 1rem 1rem; flex: 1; overflow-y: auto;">
+                    <!-- Chat history items injected here -->
+                </div>
+            </div>
+        </nui-sidebar>
+
+        <nui-sidebar position="right">
+            <div class="sidebar-content" style="padding: 1rem; display: flex; flex-direction: column; gap: 1.5rem; height: 100%; box-sizing: border-box; overflow-y: auto;">
+                <h3 style="margin: 0; font-size: 1.1rem;">Configuration</h3>
+                
+                <!-- Model Selection -->
+                <div class="sidebar-section">
+                    <label style="font-weight: 600; font-size: 0.875rem; display: block; margin-bottom: 0.5rem;">Model</label>
+                    <nui-select id="model-select" searchable data-label="Select model...">
+                        <select>
+                            <option value=">Loading models...</option>
+                        </select>
+                    </nui-select>
+                </div>
+                
+                <!-- Options -->
+                <div class="sidebar-section">
+                    <label style="display:flex; justify-content:space-between; font-weight: 600; font-size: 0.875rem; margin-bottom: 0.5rem;">
+                        <span>Temperature</span>
+                        <span id="temp-value">0.7</span>
+                    </label>
+                    <nui-slider id="temperature" min="0" max="2" step="0.1" value="0.7">
+                        <input type="range">
+                    </nui-slider>
+                </div>
+                
+                <div class="sidebar-section">
+                    <label style="font-weight: 600; font-size: 0.875rem; display: block; margin-bottom: 0.5rem;">Max Tokens</label>
+                    <nui-input id="max-tokens">
+                        <input type="number" min="1" max="8192" value="2048">
+                    </nui-input>
+                </div>
+                
+                <div class="sidebar-section">
+                    <label style="font-weight: 600; font-size: 0.875rem; display: block; margin-bottom: 0.5rem;">System Prompt</label>
+                    <nui-textarea id="system-prompt">
+                        <textarea rows="4" placeholder="Optional system instructions..."></textarea>
+                    </nui-textarea>
+                </div>
+            </div>
+        </nui-sidebar>
+
+        <nui-content>
+            <nui-main style="height: 100%; display: flex; flex-direction: column; overflow: hidden; position: relative;">
+                <!-- Main Chat Area -->
+                <div class="chat-main" style="flex: 1; display: flex; flex-direction: column; overflow: hidden; width: 100%; height: 100%; margin: 0; padding: 0;">
+                    
+                    <!-- Messages Area -->
+                    <div class="chat-messages" id="messages" style="flex: 1; overflow-y: auto; padding: 1rem 2rem; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 1rem;">
+                        <div class="welcome-message">
+                            <h2>Welcome to LLM Gateway Chat</h2>
+                            <p>Select a model and start chatting</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Input Area -->
+                    <footer class="chat-input-area" style="flex-shrink: 0; border-top: 1px solid var(--nui-shade3); padding: 1rem 2rem 2rem; background: var(--nui-shade6); box-sizing: border-box; width: 100%;">
+                        <div class="attachment-preview" id="attachment-preview"></div>
+                        <div class="input-row" style="display: flex; gap: 0.5rem; align-items: flex-end; width: 100%; box-sizing: border-box;">
+                            <nui-textarea id="message-input" class="chat-input" style="flex: 1; min-width: 0;">
+                                <textarea rows="1" placeholder="Type a message... (Shift+Enter for new line)"></textarea>
+                            </nui-textarea>
+                            <nui-button id="attach-btn" class="icon-only" title="Attach Image">
+                                <button type="button"><nui-icon name="image"></nui-icon></button>
+                            </nui-button>
+                            <nui-button id="send-btn" type="primary" title="Send">
+                                <button type="button"><nui-icon name="send"></nui-icon></button>
+                            </nui-button>
+                        </div>
+                        <input type="file" id="file-input" accept="image/*" multiple hidden>
+                    </footer>
+                </div>
+            </nui-main>
+        </nui-content>
+    </nui-app>
+
+    <!-- Config - Edit this to point to your Gateway -->
+    <script>
+        window.CHAT_CONFIG = {
+            gatewayUrl: 'http://192.168.0.100:3400',  // Change this to your LLM Gateway URL
+        };
+    </script>
+    
+    <!-- Scripts -->
+    <script src="../shared/vendor/prism.js"></script>
+    <script src="../shared/vendor/markdown-it.js"></script>
+    <script src="../shared/vendor/purify.js"></script>
+    <script src="../shared/vendor/markdown-it-prism.js"></script>
+    <script src="../nui_wc2/NUI/nui.js" type="module"></script>
+    <script src="js/chat.js" type="module"></script>
+    <script>
+        // NUI specific interactions for app shell
+        document.addEventListener('click', (e) => {
+            const actionEl = e.target.closest('[data-action]');
+            if (!actionEl) return;
+            
+            const action = actionEl.dataset.action;
+            const app = document.querySelector('nui-app');
+            
+            switch (action) {
+                case 'toggle-sidebar':
+                    e.preventDefault();
+                    if(app) app.toggleSideNav();
+                    break;
+                case 'toggle-sidebar:right':
+                    e.preventDefault();
+                    if(app) app.toggleSideNav('right');
+                    break;
+            }
+        });
+    </script>
+</body>
+</html>
+
+
