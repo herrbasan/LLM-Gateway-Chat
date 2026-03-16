@@ -1,47 +1,52 @@
-# ChatStandalone
+# LLM Gateway Chat
 
-Standalone LLM Gateway Chat client. A pure frontend application that connects to any LLM Gateway instance.
+LLM Gateway Chat is a lightweight, pure frontend vanilla JavaScript client designed to interface directly with an LLM Gateway backend. Built with a focus on performance, reliability, and local execution, it leverages the NUI Web Components library for a consistent, responsive UI supporting both desktop and mobile layouts.
 
-## Quick Start
+This application runs entirely in the browser without any build steps or external network dependencies for its vendor libraries, ensuring a robust and self-contained frontend experience.
 
-### Option 1: Python
-```bash
-cd ChatStandalone
-python -m http.server 8080
-```
+## Usage
 
-### Option 2: Node.js (npx)
-```bash
-cd ChatStandalone
-npx serve -l 8080
-```
+### 1. Prerequisites
+You need a running instance of the LLM Gateway backend to attach this client to.
 
-### Option 3: VS Code Live Server
-Install the "Live Server" extension and right-click on `chat/index.html` → "Open with Live Server"
-
-## Configuration
-
-Edit `chat/js/config.js` and configure your Gateway URL:
+### 2. Configuration
+Before launching, configure the application to connect to your gateway by editing `chat/js/config.js`:
 
 ```javascript
 window.CHAT_CONFIG = {
-    gatewayUrl: 'http://localhost:3400',  // Your LLM Gateway URL
+    gatewayUrl: 'http://localhost:3400',   // Target LLM Gateway URL
     defaultModel: '',                      // Optional: Auto-select this model
     defaultTemperature: 0.7,               // Default temperature (0-2)
     defaultMaxTokens: 2048,                // Default max tokens
 };
 ```
 
-## Features
+### 3. Running the Client
+Since this is a pure web frontend, you can serve it using any simple static HTTP server. Serve the directory at the root of this project.
 
-- Connects to any LLM Gateway instance
-- Multiple chat sessions with history
-- Image attachments (vision)
-- Markdown rendering with code highlighting
-- Thinking/Reasoning blocks
-- Streaming responses
-- Light/Dark theme
-- Responsive design
+**Option 1: Node.js (npx serve)**
+```bash
+npx serve -l 8080
+```
+
+**Option 2: Python**
+```bash
+python -m http.server 8080
+```
+
+**Option 3: VS Code Live Server / Five Server**
+Open the workspace in VS Code and start your preferred live server extension targeting `chat/index.html`.
+
+Once the server is running, navigate to the provided local URL (e.g., `http://localhost:8080/chat/index.html`) in your browser to start chatting.
+
+## Key Features
+
+- **Direct Gateway Integration:** Interfaces seamlessly with the LLM Gateway backend.
+- **Multiple Chat Sessions:** Maintains chat history across multiple separate conversational threads using `localStorage`.
+- **Vision Support:** Attach and process images via IndexedDB.
+- **Markdown & Code:** Full markdown rendering with syntax highlighting and easy code copying.
+- **Streaming & Thinking Blocks:** Supports real-time prompt streaming with support for expandable thinking/reasoning blocks used by advanced models.
+- **Vanilla Tech Stack:** Pure HTML, CSS, and JS with locally vendored dependencies (DOMPurify, marked, Prism) and the NUI components module. No npm build pipelines.
 
 ## Storage
 
@@ -67,50 +72,6 @@ update-vendor.bat
 ```
 
 This copies the latest vendor files from `WebAdmin/public/shared` to `ChatStandalone/shared`.
-
-## Development Guidelines
-
-### NUI Components
-
-This project uses the **NUI Web Components** library (`nui_wc2`). When adding UI elements:
-
-- **Use NUI components** whenever possible (`<nui-input>`, `<nui-select>`, `<nui-button>`, etc.)
-- **Avoid custom HTML elements** like native `<input>` or `<select>` without the NUI wrapper
-- **Don't add custom CSS** for basic styling - NUI handles it through the theme system
-- **Use NUI theme variables** for colors (e.g., `--nui-shade2`, `--nui-accent`, `--nui-bg`)
-
-Example - Correct:
-```html
-<nui-input id="temperature">
-    <input type="number" min="0" max="2" step="0.1">
-</nui-input>
-```
-
-Example - Avoid:
-```html
-<input type="number" id="temperature" class="custom-styled-input">
-```
-
-### NUI Theme Variables
-
-Leverage NUI's CSS custom properties for consistent theming:
-
-```css
-/* Use NUI theme variables */
-.my-element {
-    background: var(--nui-bg);
-    color: var(--nui-fg);
-    border: 1px solid var(--nui-shade3);
-}
-```
-
-Common theme variables:
-- `--nui-bg` / `--nui-fg` - Background and foreground colors
-- `--nui-shade2` through `--nui-shade7` - Shade variations
-- `--nui-accent` - Primary accent color
-- `--nui-color-primary` / `--nui-color-danger` - Semantic colors
-
-The theme automatically supports light/dark modes based on system preferences.
 
 ## CORS
 
