@@ -654,7 +654,12 @@ function showThinkingIndicator(el, thinking) {
     thinkEl.querySelector('.thinking-content').textContent = thinking;
 }
 
-
+window.toggleThinking = function(id) {
+    const el = document.getElementById(id);
+    if (el) {
+        el.classList.toggle('collapsed');
+    }
+};
 
 function showCompactionIndicator(el, data) {
     const contentDiv = el.querySelector('.message-content');
