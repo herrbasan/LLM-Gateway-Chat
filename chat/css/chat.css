@@ -236,6 +236,25 @@
     margin: 0.25rem 0;
 }
 
+.message-content hr {
+    margin: 1.5rem 0;
+    border: none;
+    border-top: thin solid light-dark(#828282, #626262);
+}
+
+.message-content hr.hr-asterisk {
+    border-top-style: dotted;
+    border-top-width: 2px;
+}
+
+.message-content hr.hr-dash {
+    border-top-style: dashed;
+}
+
+.message-content hr.hr-underscore {
+    border-top-width: 2px;
+}
+
 .message-content blockquote {
     border-left: 3px solid var(--nui-accent, #186ac3);
     margin: 0.75rem 0;

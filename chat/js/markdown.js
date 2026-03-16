@@ -28,6 +28,25 @@ if (window.markdownitPrism) {
     md.use(window.markdownitPrism);
 }
 
+// Override markdown-it table renderers to wrap in nui-table
+md.renderer.rules.table_open = function (tokens, idx, options, env, self) {
+    return '<nui-table>\n' + self.renderToken(tokens, idx, options);
+};
+md.renderer.rules.table_close = function (tokens, idx, options, env, self) {
+    return self.renderToken(tokens, idx, options) + '\n</nui-table>\n';
+};
+
+// Override hr to add class based on markup
+md.renderer.rules.hr = function (tokens, idx, options, env, self) {
+    const token = tokens[idx];
+    let className = 'hr-default';
+    if (token.markup.includes('*')) className = 'hr-asterisk';
+    else if (token.markup.includes('-')) className = 'hr-dash';
+    else if (token.markup.includes('_')) className = 'hr-underscore';
+    
+    return `<hr class="${className}">\n`;
+};
+
 // Add copy button to code blocks
 md.renderer.rules.fence = function (tokens, idx, options, env, self) {
     const token = tokens[idx];
@@ -51,14 +70,16 @@ md.renderer.rules.fence = function (tokens, idx, options, env, self) {
     return `
         <div class="code-block">
             <div class="code-header">
-                <span class="code-lang">${lang || 'text'}</span>
-                <button class="code-copy" onclick="copyCode('${codeId}')" title="Copy code">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                    Copy
-                </button>
+                <nui-badge variant="primary">${lang || 'text'}</nui-badge>
+                <nui-button variant="outline" size="small">
+                    <button class="code-copy" onclick="copyCode('${codeId}')" title="Copy code">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                        Copy
+                    </button>
+                </nui-button>
             </div>
             <pre class="${langClass}"><code id="${codeId}" class="${langClass}">${highlighted}</code></pre>
         </div>
@@ -109,11 +130,13 @@ export function renderMarkdown(content) {
                 'ul', 'ol', 'li',
                 'a', 'img',
                 'table', 'thead', 'tbody', 'tr', 'th', 'td',
-                'hr', 'div', 'span', 'button', 'svg', 'path', 'rect', 'polyline'
+                'hr', 'div', 'span', 'button', 'svg', 'path', 'rect', 'polyline',
+                'nui-table', 'nui-button', 'nui-accordion', 'details', 'summary', 'nui-badge'
             ],
             ALLOWED_ATTR: [
                 'href', 'title', 'src', 'alt', 'class', 'id',
-                'onclick', 'width', 'height', 'viewBox', 'fill', 'stroke', 'stroke-width'
+                'onclick', 'width', 'height', 'viewBox', 'fill', 'stroke', 'stroke-width',
+                'variant', 'size', 'open'
             ]
         });
     }
@@ -149,28 +172,17 @@ export function renderThinking(thinking, isStreaming = false) {
     const thinkingId = 'thinking-' + Math.random().toString(36).substr(2, 9);
     
     return `
-        <div class="thinking-block ${isStreaming ? 'streaming' : ''}" id="${thinkingId}">
-            <div class="thinking-header" onclick="toggleThinking('${thinkingId}')">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.5rem;"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"></path><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"></path></svg>
-                <span class="thinking-title">${isStreaming ? 'Thinking...' : 'Thinking'}</span>
-                <span class="thinking-toggle">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="6 9 12 15 18 9"></polyline>
-                    </svg>
-                </span>
-            </div>
-            <div class="thinking-content">
-                ${escapeHtml(thinking)}
-            </div>
-        </div>
+        <nui-accordion class="thinking-block ${isStreaming ? 'streaming' : ''}" id="${thinkingId}">
+            <details ${isStreaming ? 'open' : ''}>
+                <summary class="thinking-header">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.5rem;"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"></path><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"></path></svg>
+                    <span class="thinking-title">${isStreaming ? 'Thinking...' : 'Thoughts'}</span>
+                </summary>
+                <div class="accordion-content thinking-content">
+                    ${escapeHtml(thinking)}
+                </div>
+            </details>
+        </nui-accordion>
     `;
 }
-
-// Toggle thinking block visibility
-window.toggleThinking = function(thinkingId) {
-    const el = document.getElementById(thinkingId);
-    if (el) {
-        el.classList.toggle('collapsed');
-    }
-};
 
