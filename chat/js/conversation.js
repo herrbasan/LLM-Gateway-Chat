@@ -87,21 +87,26 @@ export class Conversation {
         // Content accumulates in memory and is persisted when setAssistantComplete() is called.
     }
 
-    setAssistantComplete(exchangeId) {
+    setAssistantComplete(exchangeId, usage = null, contextInfo = null) {
         const exchange = this.getExchange(exchangeId);
         if (!exchange) return;
-        
+
         // Prevent multiple completions logic from double-pushing
         if (exchange.assistant.isComplete) return;
 
         exchange.assistant.isStreaming = false;
         exchange.assistant.isComplete = true;
 
+        if (usage) exchange.assistant.usage = usage;
+        if (contextInfo) exchange.assistant.context = contextInfo;
+
         // Save this version only if it's unique to prevent accidental double-pushes
         if (!exchange.assistant.versions.some(v => v.content === exchange.assistant.content)) {
             exchange.assistant.versions.push({
                 content: exchange.assistant.content,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                usage: usage,
+                context: contextInfo
             });
             // Update current version to point to the latest
             exchange.assistant.currentVersion = exchange.assistant.versions.length - 1;

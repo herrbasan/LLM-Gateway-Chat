@@ -1,0 +1,514 @@
+
+diff --git a/chat/js/chat.js b/chat/js/chat.js
+index d778ef0..8fdd90b 100644
+--- a/chat/js/chat.js
++++ b/chat/js/chat.js
+@@ -3,7 +3,7 @@
+ // ============================================
+
+ import { Conversation } from './conversation.js';
+-import { StreamingHandler } from './streaming.js';
++import { GatewayClient } from './client-sdk.js';
+ import { renderMarkdown, parseThinking, renderThinking } from './markdown.js'; 
+ import { imageStore } from './image-store.js';
+
+@@ -47,7 +47,7 @@ if (currentChatId === 'default' && localStorage.getItem('chat-
+conversation') &&                                                                // Async initialization - load images from IndexedDB
+ await conversation.load();
+
+-let streamer = new StreamingHandler(GATEWAY_URL);
++let client = new GatewayClient({ baseUrl: GATEWAY_URL });
+ let models = [];
+ let currentModel = '';
+ let isStreaming = false;
+@@ -72,7 +72,11 @@ const elements = {
+     sidebar: document.getElementById('sidebar'),
+     sidebarToggle: document.getElementById('sidebar-toggle'),
+     sidebarToggleMobile: document.getElementById('sidebar-toggle-mobile'),     
+-    gatewayStatus: document.querySelector('.status-dot')
++    gatewayStatus: document.querySelector('.status-dot'),
++    overallContextProgressWrap: document.getElementById('overall-context-progre
+ss-wrap'),                                                                      +    overallContextProgress: document.getElementById('overall-context-progress')
+,                                                                               +    overallContextTooltip: document.getElementById('overall-context-tooltip'), 
++    stopButton: document.getElementById('stop-btn') // Added safe fallback     
+ };
+
+ // ============================================
+@@ -147,12 +151,10 @@ function waitForNUI() {
+
+ async function loadModels() {
+     try {
+-        const response = await fetch(`${GATEWAY_URL}/v1/models`);
+-        const data = await response.json();
+-
++        const data = await client.getModels();
+         models = data.data || [];
+         populateModelSelect();
+-
++
+         console.log('[Chat] Loaded models:', models.length);
+     } catch (error) {
+         console.error('[Chat] Failed to load models:', error);
+@@ -174,7 +176,15 @@ function populateModelSelect() {
+     // Determine which model to select
+     let modelToSelect = null;
+
+-    if (DEFAULT_MODEL) {
++    // Highest priority: Used model saved in chat history
++    const curChatInfo = chatHistory.find(c => c.id === currentChatId);
++    if (curChatInfo && curChatInfo.model) {
++        if (chatModels.some(m => m.id === curChatInfo.model)) {
++            modelToSelect = curChatInfo.model;
++        }
++    }
++
++    if (!modelToSelect && DEFAULT_MODEL) {
+         // Use configured default if it exists
+         const defaultModelExists = chatModels.some(m => m.id === DEFAULT_MODEL)
+;                                                                                        if (defaultModelExists) {
+@@ -228,6 +238,7 @@ function populateModelSelect() {
+         elements.modelSelect.addEventListener('nui-change', (e) => {
+             currentModel = e.detail.values[0] || '';
+             console.log('[Chat] Selected model:', currentModel);
++            updateOverallContext();
+         });
+     } else {
+         // Fallback if NUI not loaded yet
+@@ -275,6 +286,7 @@ function populateModelSelectFallback(chatModels, modelToSele
+ct) {                                                                                select.addEventListener('change', (e) => {
+         currentModel = e.target.value;
+         console.log('[Chat] Selected model:', currentModel);
++        updateOverallContext();
+     });
+ }
+
+@@ -289,8 +301,14 @@ function setupEventListeners() {
+         console.log('[Chat] Selected model:', currentModel);
+     });
+
+-    // Send message
+-    elements.sendBtn?.addEventListener('click', sendMessage);
++    // Send message / Toggle Stop
++    elements.sendBtn?.addEventListener('click', (e) => {
++        if (isStreaming) {
++            abortStream();
++        } else {
++            sendMessage();
++        }
++    });
+     elements.messageInput?.addEventListener('keydown', (e) => {
+         if (e.key === 'Enter' && !e.shiftKey) {
+             e.preventDefault();
+@@ -362,7 +380,10 @@ async function sendMessage() {
+
+     // Add user message to conversation
+     currentExchangeId = await conversation.addExchange(content, [...attachedIma
+ges]);                                                                          -
++
++    // Track the used model for this chat
++    updateChatModel(currentChatId, currentModel);
++
+     // Update chat title if it's the first message
+     if (conversation.length === 1 && content) {
+         updateChatTitle(currentChatId, content);
+@@ -422,9 +443,13 @@ async function streamResponse(exchangeId) {
+         let lastRender = 0;
+         const RENDER_INTERVAL = 50; // Render at most every 50ms
+
+-        for await (const event of streamer.streamChat(requestBody)) {
++        for await (const event of client.streamChatIterable(requestBody)) {    
+             switch (event.type) {
+                 case 'delta':
++                    // Hide progress status once text generation begins        
++                    const statusEl = assistantEl.querySelector('.progress-statu
+s');                                                                            +                    if (statusEl) statusEl.style.display = 'none';
++
+                     contentBuffer += event.content;
+                     conversation.updateAssistantResponse(exchangeId, event.cont
+ent);                                                                           
+@@ -468,10 +493,31 @@ async function streamResponse(exchangeId) {
+                 case 'done':
+                     // Ensure final content is rendered
+                     updateAssistantContent(assistantEl, contentBuffer);        
+-                    conversation.setAssistantComplete(exchangeId);
+-                    finalizeAssistantElement(assistantEl, exchangeId);
++                    conversation.setAssistantComplete(exchangeId, event.usage, 
+event.context);                                                                 +                    finalizeAssistantElement(assistantEl, exchangeId, event.usa
+ge, event.context);                                                                                  scrollToBottom();
+                     break;
++                case 'progress':
++                    if (event.data?.phase === 'context_stats') {
++                        updateUsageDisplay(assistantEl, event.data.context);   
++                    } else if (event.data) {
++                        const statusEl = assistantEl.querySelector('.progress-s
+tatus');                                                                        +                        if (statusEl) {
++                            let statusText = event.data.message || event.data.s
+tatus;                                                                          +                            if (!statusText && event.data.phase) {
++                                // Default format if no explicit message is pro
+vided: "Uploading..." -> "Uploading"                                            +                                statusText = event.data.phase.charAt(0).toUpper
+Case() + event.data.phase.slice(1);                                             +                                if (event.data.progress !== undefined) {       
++                                    statusText += ` (${event.data.progress}%)`;
++                                }
++                            }
++                            if (statusText) {
++                                statusEl.style.display = 'block';
++                                statusEl.textContent = statusText;
++                            }
++                        }
++                    }
++                    break;
+             }
+
+             // Only scroll on delta if user is near bottom
+@@ -505,13 +551,16 @@ function renderConversation() {
+                 <p>Select a model and start chatting</p>
+             </div>
+         `;
++        updateOverallContext(); // Clear context indicator for new chat        
+         return;
+     }
+-
++
+     for (const exchange of conversation.getAll()) {
+         renderExchange(exchange);
+     }
+-
++
++    updateOverallContext(); // Call this when loading historical conversation  
++
+     scrollToBottom();
+ }
+
+@@ -520,28 +569,41 @@ function renderExchange(exchange) {
+     const userEl = document.createElement('div');
+     userEl.className = 'chat-message user';
+     userEl.dataset.exchangeId = exchange.id;
+-
++
+     let userContent = escapeHtml(exchange.user.content);
+-
++
+     // Add attachment previews
+     if (exchange.user.attachments?.length > 0) {
+-        userContent += '<div class="message-attachments">';
++        userContent += '<div class="message-attachments"><nui-lightbox loop>'; 
+         for (const att of exchange.user.attachments) {
+             // Use blobUrl for loaded images, dataUrl for new attachments      
+             const displayUrl = att.blobUrl || att.dataUrl || '';
+             const dataUrl = att.getDataUrl ? att.getDataUrl() : att.dataUrl;   
+-            userContent += `<img src="${displayUrl}" alt="${att.name}" data-ful
+l-src="${dataUrl}" class="chat-attachment">`;                                   +            userContent += `<img src="${displayUrl}" alt="${att.name}" data-lig
+htbox-src="${dataUrl}" class="chat-attachment" style="cursor: pointer;">`;               }
+-        userContent += '</div>';
++        userContent += '</nui-lightbox></div>';
+     }
+
+     userEl.innerHTML = `
+         <div class="message-header">You</div>
+         <div class="message-content">${userContent}</div>
+     `;
+-
++
+     elements.messages?.appendChild(userEl);
+-
++
++    // Initialize Lightbox declarative handlers for attached images
++    if (exchange.user.attachments?.length > 0) {
++        const lightbox = userEl.querySelector('nui-lightbox');
++        if (lightbox) {
++            const imgs = lightbox.querySelectorAll('img');
++            imgs.forEach((img, i) => {
++                img.addEventListener('click', () => {
++                    lightbox.open([], i);
++                });
++            });
++        }
++    }
++
+     // Assistant message (if exists)
+     if (exchange.assistant.content || exchange.assistant.isStreaming) {        
+         const assistantEl = createAssistantElement(exchange.id);
+@@ -559,12 +621,16 @@ function createAssistantElement(exchangeId) {
+     el.className = 'chat-message assistant';
+     el.dataset.exchangeId = exchangeId;
+     el.innerHTML = `
+-        <div class="message-header">
+-            Assistant
++        <div class="message-header" style="display: flex; align-items: center;"
+>                                                                               +            <span>Assistant</span>
+             <span class="streaming-indicator" style="display: inline-block; mar
+gin-left: 8px;">                                                                                 <span class="dot">.</span><span class="dot">.</span><span class
+="dot">.</span>                                                                              </span>
++            <span class="context-usage-display" style="display: none; margin-le
+ft: auto; font-size: 0.9em; color: var(--color-shade5, #888); font-weight: normal;">                                                                            +                Context: <span class="usage-values">--</span>
++            </span>
+         </div>
++        <div class="progress-status" style="display: none; font-size: 0.85em; c
+olor: var(--nui-accent, var(--color-highlight, #007bff)); margin-bottom: 8px; font-style: italic;"></div>                                                                <div class="message-content"></div>
+         <div class="message-actions" style="display: none;">
+             <button class="action-btn regenerate" title="Regenerate">↻</button>
+@@ -582,6 +648,120 @@ function createAssistantElement(exchangeId) {
+     return el;
+ }
+
++function updateUsageDisplay(el, contextData) {
++    if (!el || !contextData) return;
++    const displaySpan = el.querySelector('.context-usage-display');
++    const valueSpan = el.querySelector('.usage-values');
++    if (!displaySpan || !valueSpan) return;
++
++    if (contextData.used_tokens !== undefined) {
++        displaySpan.style.display = 'inline-block';
++        const isEstimate = contextData.isEstimate;
++        let text = `${isEstimate ? '~' : ''}${contextData.used_tokens.toLocaleS
+tring()}`;                                                                      +        
++        let windowSize = contextData.window_size;
++        if (!windowSize) {
++            const modelConfig = models.find(m => m.id === currentModel);       
++            if (modelConfig && modelConfig.capabilities?.contextWindow) {      
++                windowSize = modelConfig.capabilities.contextWindow;
++            }
++        }
++
++        if (windowSize) {
++            text += ` / ${windowSize.toLocaleString()}`;
++        }
++        text += ' tokens';
++        valueSpan.textContent = text;
++        updateOverallContext(contextData);
++    }
++}
++
++function updateOverallContext(contextData = null) {
++    if (!elements.overallContextProgressWrap) return;
++
++    if (!contextData) {
++        // Try to get from last conversation exchange
++        const lastEx = conversation.exchanges[conversation.exchanges.length - 1
+];                                                                              +        
++        let foundContext = lastEx?.assistant?.context;
++        let foundUsage = lastEx?.assistant?.usage;
++
++        // Fallback to version data if loading from history and surface variabl
+es are missing                                                                  +        if (!foundContext && !foundUsage && lastEx?.assistant?.versions?.length
+ > 0) {                                                                         +            const curVersion = lastEx.assistant.versions[lastEx.assistant.curre
+ntVersion || 0];                                                                +            if (curVersion) {
++                foundContext = curVersion.context;
++                foundUsage = curVersion.usage;
++            }
++        }
++
++        if (foundContext) {
++            contextData = foundContext;
++        } else if (foundUsage) {
++            contextData = { used_tokens: foundUsage.total_tokens };
++        } else {
++            // Rough estimation fallback based on the data we have in the conve
+rsation text                                                                    +            let textLength = 0;
++            const msgs = conversation.getMessagesForApi();
++            for (const m of msgs) {
++                if (typeof m.content === 'string') {
++                    textLength += m.content.length;
++                } else if (Array.isArray(m.content)) {
++                    for (const block of m.content) {
++                        if (block.type === 'text') textLength += block.text.len
+gth;                                                                            +                    }
++                }
++                textLength += m.role.length;
++            }
++            if (textLength > 0) {
++                // Heuristic: ~4 chars per token for English
++                contextData = { used_tokens: Math.ceil(textLength / 4), isEstim
+ate: true };                                                                    +            }
++        }
++    }
++
++    // Always display the wrapper so we can show 0% if no history exists yet   
++    elements.overallContextProgressWrap.style.display = 'flex';
++
++    const usedTokens = (contextData && contextData.used_tokens) ? contextData.u
+sed_tokens : 0;                                                                 +    const isEstimate = contextData && contextData.isEstimate;
++    
++    let text = `Context: ${isEstimate ? '~' : ''}${usedTokens.toLocaleString()}
+ tokens`;                                                                       +    let pct = 0;
++    let knownLimit = false;
++
++    const modelConfig = models.find(m => m.id === currentModel);
++
++    if (modelConfig && modelConfig.capabilities?.contextWindow) {
++        text += ` / ${modelConfig.capabilities.contextWindow.toLocaleString()}`
+;                                                                               +        pct = (usedTokens / modelConfig.capabilities.contextWindow) * 100;     
++        knownLimit = true;
++    } else if (contextData && contextData.window_size) {
++        // Fallback to backend reported window size if model list lacks it     
++        text += ` / ${contextData.window_size.toLocaleString()}`;
++        pct = (usedTokens / contextData.window_size) * 100;
++        knownLimit = true;
++    } else {
++        text += ` / Unknown`;
++    }
++
++    if (elements.overallContextProgress) {
++        elements.overallContextProgress.setAttribute('value', pct || 0);       
++        
++        // Dim the icon if we genuinely do not know the context limit, or if no
+ model is selected                                                              +        if (!knownLimit || !currentModel) {
++            elements.overallContextProgress.style.opacity = '0.3';
++            if (!knownLimit) text += " (Max size unknown)";
++        } else {
++            elements.overallContextProgress.style.opacity = '1';
++        }
++    }
++
++    if (elements.overallContextTooltip) {
++        elements.overallContextTooltip.textContent = text;
++    }
++}
++
+ function updateAssistantContent(el, content) {
+     const contentDiv = el.querySelector('.message-content');
+     if (!contentDiv) return;
+@@ -697,11 +877,41 @@ function showError(el, message) {
+     if (indicator) indicator.style.display = 'none';
+ }
+
+-function finalizeAssistantElement(el, exchangeId) {
++function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = n
+ull) {                                                                               // Hide streaming indicator
+     const indicator = el.querySelector('.streaming-indicator');
+     if (indicator) indicator.style.display = 'none';
+-
++
++    // Update static usage text if we have it
++    const exchange = conversation.getExchange(exchangeId);
++    let finalUsage = usage || exchange?.assistant?.usage;
++    let finalContext = contextInfo || exchange?.assistant?.context;
++    
++    // Fallback to the saved version data if we are loading from history       
++    if (!finalUsage && !finalContext && exchange?.assistant) {
++        const curVersion = exchange.assistant.versions?.[exchange.assistant.cur
+rentVersion || 0];                                                              +        if (curVersion) {
++             finalUsage = curVersion.usage;
++             finalContext = curVersion.context;
++        }
++    }
++
++    if (finalUsage || finalContext) {
++        // Build a display object
++        const displayData = {};
++        if (finalContext) {
++            displayData.used_tokens = finalContext.used_tokens;
++            displayData.window_size = finalContext.window_size;
++        } else if (finalUsage) {
++            displayData.used_tokens = finalUsage.total_tokens;
++        }
++        updateUsageDisplay(el, displayData);
++    } else if (exchange && exchange.assistant.content) {
++        // If we still lack explicit context stats, fallback to a heuristic est
+imation if it's rendered in history                                             +        const roughTokens = Math.ceil((exchange.user.content.length + exchange.
+assistant.content.length) / 4);                                                 +        updateUsageDisplay(el, { used_tokens: roughTokens, isEstimate: true });
++    }
++
+     // Show actions only if we have multiple versions or after regeneration    
+     const info = conversation.getVersionInfo(exchangeId);
+     const actions = el.querySelector('.message-actions');
+@@ -776,12 +986,13 @@ async function regenerate(exchangeId) {
+
+ function switchVersion(exchangeId, direction) {
+     const directionKey = direction === 'prev' ? 'prev' : 'next';
+-    if (conversation.switchVersion(exchangeId, directionKey)) {
++        if (conversation.switchVersion(exchangeId, directionKey)) {
+         const exchange = conversation.getExchange(exchangeId);
+         const el = document.querySelector(`.chat-message.assistant[data-exchang
+e-id="${exchangeId}"]`);                                                                 if (el) {
+             updateAssistantContent(el, exchange.assistant.content);
+             updateVersionControls(el, exchangeId);
++            finalizeAssistantElement(el, exchangeId);
+         }
+     }
+ }
+@@ -792,7 +1003,7 @@ function switchVersion(exchangeId, direction) {
+
+ function startNewChat() {
+     if (isStreaming) {
+-        streamer.abort();
++        client.abortCurrentIterableStream();
+     }
+
+     currentChatId = 'ex_' + Date.now();
+@@ -813,12 +1024,29 @@ function startNewChat() {
+
+ async function switchChat(chatId) {
+     if (isStreaming) {
+-        streamer.abort();
++        client.abortCurrentIterableStream();
+     }
+     currentChatId = chatId;
+     localStorage.setItem('current-chat-id', currentChatId);
+     conversation = new Conversation(`chat-conversation-${currentChatId}`);     
+     await conversation.load();
++
++    // Restore the model if saved in history
++    const chatInfo = chatHistory.find(c => c.id === currentChatId);
++    if (chatInfo && chatInfo.model && elements.modelSelect) {
++        // Ensure the model actually exists to avoid setting invalid state     
++        const modelExists = models.some(m => m.id === chatInfo.model);
++        if (modelExists) {
++            currentModel = chatInfo.model;
++            if (elements.modelSelect.setValue) {
++                elements.modelSelect.setValue(currentModel);
++            } else {
++                const select = elements.modelSelect.querySelector('select');   
++                if (select) select.value = currentModel;
++            }
++        }
++    }
++
+     renderHistoryList();
+     renderConversation();
+ }
+@@ -864,6 +1092,14 @@ function updateChatTitle(chatId, firstMessageContent) {   
+     }
+ }
+
++function updateChatModel(chatId, modelId) {
++    const chatInfo = chatHistory.find(c => c.id === chatId);
++    if (chatInfo && chatInfo.model !== modelId) {
++        chatInfo.model = modelId;
++        localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));        
++    }
++}
++
+ function renderHistoryList() {
+     if (!elements.chatHistoryList) return;
+
+@@ -914,17 +1150,7 @@ function updateSendButton() {
+             ? '<nui-icon name="stop"></nui-icon>'
+             : '<nui-icon name="send"></nui-icon>';
+     }
+-
+-    if (isStreaming) {
+-        elements.sendBtn?.addEventListener('click', abortStream, { once: true }
+);                                                                              -    }
+-}
+-
+-function abortStream() {
+-    streamer.abort();
+-}
+
+-// ============================================
+ // File Attachments
+ // ============================================
+ 
+@@ -980,9 +1206,8 @@ function clearAttachments() {
+
+ async function checkGatewayStatus() {
+     try {
+-        const response = await fetch(`${GATEWAY_URL}/health`);
+-        const data = await response.json();
+-
++        const data = await client.getHealth();
++
+         if (data.status === 'ok') {
+             elements.gatewayStatus?.classList.remove('offline');
+         } else {

@@ -3,8 +3,8 @@
 // ============================================
 
 import { Conversation } from './conversation.js';
-import { StreamingHandler } from './streaming.js';
-import { renderMarkdown, parseThinking, renderThinking } from './markdown.js';
+import { GatewayClient } from './client-sdk.js';
+import { renderMarkdown, parseThinking } from './markdown.js';
 import { imageStore } from './image-store.js';
 
 // Config values with defaults
@@ -47,7 +47,7 @@ if (currentChatId === 'default' && localStorage.getItem('chat-conversation') && 
 // Async initialization - load images from IndexedDB
 await conversation.load();
 
-let streamer = new StreamingHandler(GATEWAY_URL);
+let client = new GatewayClient({ baseUrl: GATEWAY_URL });
 let models = [];
 let currentModel = '';
 let isStreaming = false;
@@ -72,7 +72,11 @@ const elements = {
     sidebar: document.getElementById('sidebar'),
     sidebarToggle: document.getElementById('sidebar-toggle'),
     sidebarToggleMobile: document.getElementById('sidebar-toggle-mobile'),
-    gatewayStatus: document.querySelector('.status-dot')
+    gatewayStatus: document.querySelector('.status-dot'),
+    overallContextProgressWrap: document.getElementById('overall-context-progress-wrap'),
+    overallContextProgress: document.getElementById('overall-context-progress'),
+    overallContextTooltip: document.getElementById('overall-context-tooltip'),
+    stopButton: document.getElementById('stop-btn') // Added safe fallback
 };
 
 // ============================================
@@ -147,12 +151,10 @@ function waitForNUI() {
 
 async function loadModels() {
     try {
-        const response = await fetch(`${GATEWAY_URL}/v1/models`);
-        const data = await response.json();
-        
+        const data = await client.getModels();
         models = data.data || [];
         populateModelSelect();
-        
+
         console.log('[Chat] Loaded models:', models.length);
     } catch (error) {
         console.error('[Chat] Failed to load models:', error);
@@ -174,7 +176,15 @@ function populateModelSelect() {
     // Determine which model to select
     let modelToSelect = null;
     
-    if (DEFAULT_MODEL) {
+    // Highest priority: Used model saved in chat history
+    const curChatInfo = chatHistory.find(c => c.id === currentChatId);
+    if (curChatInfo && curChatInfo.model) {
+        if (chatModels.some(m => m.id === curChatInfo.model)) {
+            modelToSelect = curChatInfo.model;
+        }
+    }
+
+    if (!modelToSelect && DEFAULT_MODEL) {
         // Use configured default if it exists
         const defaultModelExists = chatModels.some(m => m.id === DEFAULT_MODEL);
         if (defaultModelExists) {
@@ -228,6 +238,7 @@ function populateModelSelect() {
         elements.modelSelect.addEventListener('nui-change', (e) => {
             currentModel = e.detail.values[0] || '';
             console.log('[Chat] Selected model:', currentModel);
+            updateOverallContext();
         });
     } else {
         // Fallback if NUI not loaded yet
@@ -275,6 +286,7 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
     select.addEventListener('change', (e) => {
         currentModel = e.target.value;
         console.log('[Chat] Selected model:', currentModel);
+        updateOverallContext();
     });
 }
 
@@ -289,8 +301,14 @@ function setupEventListeners() {
         console.log('[Chat] Selected model:', currentModel);
     });
     
-    // Send message
-    elements.sendBtn?.addEventListener('click', sendMessage);
+    // Send message / Toggle Stop
+    elements.sendBtn?.addEventListener('click', (e) => {
+        if (isStreaming) {
+            abortStream();
+        } else {
+            sendMessage();
+        }
+    });
     elements.messageInput?.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -362,7 +380,10 @@ async function sendMessage() {
     
     // Add user message to conversation
     currentExchangeId = await conversation.addExchange(content, [...attachedImages]);
-    
+
+    // Track the used model for this chat
+    updateChatModel(currentChatId, currentModel);
+
     // Update chat title if it's the first message
     if (conversation.length === 1 && content) {
         updateChatTitle(currentChatId, content);
@@ -422,9 +443,13 @@ async function streamResponse(exchangeId) {
         let lastRender = 0;
         const RENDER_INTERVAL = 50; // Render at most every 50ms
         
-        for await (const event of streamer.streamChat(requestBody)) {
+        for await (const event of client.streamChatIterable(requestBody)) {
             switch (event.type) {
                 case 'delta':
+                    // Hide progress status once text generation begins
+                    const statusEl = assistantEl.querySelector('.progress-status');
+                    if (statusEl) statusEl.style.display = 'none';
+
                     contentBuffer += event.content;
                     conversation.updateAssistantResponse(exchangeId, event.content);
                     
@@ -434,10 +459,12 @@ async function streamResponse(exchangeId) {
                         const now = performance.now();
                         const delay = Math.max(0, RENDER_INTERVAL - (now - lastRender));
                         
+                        const wasNearBottom = isNearBottom();
                         setTimeout(() => {
                             updateAssistantContent(assistantEl, contentBuffer);
                             lastRender = performance.now();
                             pendingUpdate = false;
+                            if (wasNearBottom) scrollToBottom();
                         }, delay);
                     }
                     break;
@@ -468,15 +495,32 @@ async function streamResponse(exchangeId) {
                 case 'done':
                     // Ensure final content is rendered
                     updateAssistantContent(assistantEl, contentBuffer);
-                    conversation.setAssistantComplete(exchangeId);
-                    finalizeAssistantElement(assistantEl, exchangeId);
+                    conversation.setAssistantComplete(exchangeId, event.usage, event.context);
+                    finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context);
                     scrollToBottom();
                     break;
-            }
-            
-            // Only scroll on delta if user is near bottom
-            if (event.type === 'delta' && isNearBottom()) {
-                scrollToBottom();
+                case 'progress':
+                    if (event.data?.phase === 'context_stats') {
+                        updateUsageDisplay(assistantEl, event.data.context);
+                    } else if (event.data) {
+                        const statusEl = assistantEl.querySelector('.progress-status');
+                        if (statusEl) {
+                            let statusText = event.data.message || event.data.status;
+                            if (!statusText && event.data.phase) {
+                                // Default format if no explicit message is provided: "Uploading..." -> "Uploading"
+                                statusText = event.data.phase.charAt(0).toUpperCase() + event.data.phase.slice(1);
+                                if (event.data.progress !== undefined) {
+                                    statusText += ` (${event.data.progress}%)`;
+                                }
+                            }
+                            if (statusText) {
+                                statusEl.style.display = 'block';
+                                statusEl.textContent = statusText;
+                            }
+                        }
+                    }
+                    if (isNearBottom()) scrollToBottom();
+                    break;
             }
         }
         
@@ -505,13 +549,16 @@ function renderConversation() {
                 <p>Select a model and start chatting</p>
             </div>
         `;
+        updateOverallContext(); // Clear context indicator for new chat
         return;
     }
-    
+
     for (const exchange of conversation.getAll()) {
         renderExchange(exchange);
     }
-    
+
+    updateOverallContext(); // Call this when loading historical conversation
+
     scrollToBottom();
 }
 
@@ -520,28 +567,41 @@ function renderExchange(exchange) {
     const userEl = document.createElement('div');
     userEl.className = 'chat-message user';
     userEl.dataset.exchangeId = exchange.id;
-    
+
     let userContent = escapeHtml(exchange.user.content);
-    
+
     // Add attachment previews
     if (exchange.user.attachments?.length > 0) {
-        userContent += '<div class="message-attachments">';
+        userContent += '<div class="message-attachments"><nui-lightbox loop>';
         for (const att of exchange.user.attachments) {
             // Use blobUrl for loaded images, dataUrl for new attachments
             const displayUrl = att.blobUrl || att.dataUrl || '';
             const dataUrl = att.getDataUrl ? att.getDataUrl() : att.dataUrl;
-            userContent += `<img src="${displayUrl}" alt="${att.name}" data-full-src="${dataUrl}" class="chat-attachment">`;
+            userContent += `<img src="${displayUrl}" alt="${att.name}" data-lightbox-src="${dataUrl}" class="chat-attachment" style="cursor: pointer;">`;
         }
-        userContent += '</div>';
+        userContent += '</nui-lightbox></div>';
     }
     
     userEl.innerHTML = `
         <div class="message-header">You</div>
         <div class="message-content">${userContent}</div>
     `;
-    
+
     elements.messages?.appendChild(userEl);
-    
+
+    // Initialize Lightbox declarative handlers for attached images
+    if (exchange.user.attachments?.length > 0) {
+        const lightbox = userEl.querySelector('nui-lightbox');
+        if (lightbox) {
+            const imgs = lightbox.querySelectorAll('img');
+            imgs.forEach((img, i) => {
+                img.addEventListener('click', () => {
+                    lightbox.open([], i);
+                });
+            });
+        }
+    }
+
     // Assistant message (if exists)
     if (exchange.assistant.content || exchange.assistant.isStreaming) {
         const assistantEl = createAssistantElement(exchange.id);
@@ -559,12 +619,16 @@ function createAssistantElement(exchangeId) {
     el.className = 'chat-message assistant';
     el.dataset.exchangeId = exchangeId;
     el.innerHTML = `
-        <div class="message-header">
-            Assistant
+        <div class="message-header" style="display: flex; align-items: center;">
+            <span>Assistant</span>
             <span class="streaming-indicator" style="display: inline-block; margin-left: 8px;">
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
+            <span class="context-usage-display" style="display: none; margin-left: auto; font-size: 0.9em; color: var(--color-shade5, #888); font-weight: normal;">
+                Context: <span class="usage-values">--</span>
+            </span>
         </div>
+        <div class="progress-status" style="display: none; font-size: 0.85em; color: var(--nui-accent, var(--color-highlight, #007bff)); margin-bottom: 8px; font-style: italic;"></div>
         <div class="message-content"></div>
         <div class="message-actions" style="display: none;">
             <button class="action-btn regenerate" title="Regenerate">↻</button>
@@ -582,6 +646,127 @@ function createAssistantElement(exchangeId) {
     return el;
 }
 
+function updateUsageDisplay(el, contextData) {
+    if (!el || !contextData) return;
+    const displaySpan = el.querySelector('.context-usage-display');
+    const valueSpan = el.querySelector('.usage-values');
+    if (!displaySpan || !valueSpan) return;
+
+    if (contextData.used_tokens !== undefined) {
+        displaySpan.style.display = 'inline-block';
+        const isEstimate = contextData.isEstimate;
+        let text = `${isEstimate ? '~' : ''}${contextData.used_tokens.toLocaleString()}`;
+        
+        let windowSize = contextData.window_size;
+        if (!windowSize) {
+            const modelConfig = models.find(m => m.id === currentModel);
+            if (modelConfig && modelConfig.capabilities?.contextWindow) {
+                windowSize = modelConfig.capabilities.contextWindow;
+            }
+        }
+
+        if (windowSize) {
+            text += ` / ${windowSize.toLocaleString()}`;
+        }
+        text += ' tokens';
+        valueSpan.textContent = text;
+        updateOverallContext(contextData);
+    }
+}
+
+function updateOverallContext(contextData = null) {
+    if (!elements.overallContextProgressWrap) return;
+
+    if (!contextData) {
+        // Try to get from last conversation exchange
+        const lastEx = conversation.exchanges[conversation.exchanges.length - 1];
+        
+        let foundContext = lastEx?.assistant?.context;
+        let foundUsage = lastEx?.assistant?.usage;
+
+        // Fallback to version data if loading from history and surface variables are missing
+        if (!foundContext && !foundUsage && lastEx?.assistant?.versions?.length > 0) {
+            const curVersion = lastEx.assistant.versions[lastEx.assistant.currentVersion || 0];
+            if (curVersion) {
+                foundContext = curVersion.context;
+                foundUsage = curVersion.usage;
+            }
+        }
+
+        if (foundContext) {
+            contextData = foundContext;
+        } else if (foundUsage) {
+            contextData = { used_tokens: foundUsage.total_tokens };
+        } else {
+            // Rough estimation fallback based on the data we have in the conversation text
+            let textLength = 0;
+            const msgs = conversation.getMessagesForApi();
+            for (const m of msgs) {
+                if (typeof m.content === 'string') {
+                    textLength += m.content.length;
+                } else if (Array.isArray(m.content)) {
+                    for (const block of m.content) {
+                        if (block.type === 'text') textLength += block.text.length;
+                    }
+                }
+                textLength += m.role.length;
+            }
+            if (textLength > 0) {
+                // Heuristic: ~4 chars per token for English
+                contextData = { used_tokens: Math.ceil(textLength / 4), isEstimate: true };
+            }
+        }
+    }
+
+    // Always display the wrapper so we can show 0% if no history exists yet
+    elements.overallContextProgressWrap.style.display = 'flex';
+
+    const usedTokens = (contextData && contextData.used_tokens) ? contextData.used_tokens : 0;
+    const isEstimate = contextData && contextData.isEstimate;
+    
+    let text = `Context: ${isEstimate ? '~' : ''}${usedTokens.toLocaleString()} tokens`;
+    let pct = 0;
+    let knownLimit = false;
+
+    const modelConfig = models.find(m => m.id === currentModel);
+
+    if (modelConfig && modelConfig.capabilities?.contextWindow) {
+        text += ` / ${modelConfig.capabilities.contextWindow.toLocaleString()}`;
+        pct = Math.min(100, Math.max(0, (usedTokens / modelConfig.capabilities.contextWindow) * 100));
+        knownLimit = true;
+    } else if (contextData && contextData.window_size) {
+        // Fallback to backend reported window size if model list lacks it
+        text += ` / ${contextData.window_size.toLocaleString()}`;
+        pct = Math.min(100, Math.max(0, (usedTokens / contextData.window_size) * 100));
+        knownLimit = true;
+    } else {
+        text += ` / Unknown`;
+    }
+
+    if (elements.overallContextProgress) {
+        elements.overallContextProgress.setAttribute('value', pct || 0);
+        
+        // Dim the icon if we genuinely do not know the context limit, or if no model is selected
+        if (!knownLimit || !currentModel) {
+            elements.overallContextProgress.style.opacity = '0.3';
+            elements.overallContextProgress.removeAttribute('variant');
+            if (!knownLimit) text += " (Max size unknown)";
+        } else {
+            elements.overallContextProgress.style.opacity = '1';
+            // Change variant to warning/orange if context is full
+            if (pct >= 100) {
+                elements.overallContextProgress.setAttribute('variant', 'warning');
+            } else {
+                elements.overallContextProgress.removeAttribute('variant');
+            }
+        }
+    }
+
+    if (elements.overallContextTooltip) {
+        elements.overallContextTooltip.textContent = text;
+    }
+}
+
 function updateAssistantContent(el, content) {
     const contentDiv = el.querySelector('.message-content');
     if (!contentDiv) return;
@@ -589,6 +774,16 @@ function updateAssistantContent(el, content) {
     // Skip if content hasn't changed (prevents redundant renders during streaming)
     if (contentDiv.dataset.lastContent === content) return;
     contentDiv.dataset.lastContent = content;
+    
+    // Check if thinking-content is currently scrolled to bottom to maintain it
+    let thinkingScrollTop = 0;
+    let thinkingWasAtBottom = true;
+    const oldThinkingContent = contentDiv.querySelector('.thinking-content');
+    if (oldThinkingContent) {
+        thinkingScrollTop = oldThinkingContent.scrollTop;
+        const tolerance = 10;
+        thinkingWasAtBottom = Math.abs(oldThinkingContent.scrollHeight - oldThinkingContent.scrollTop - oldThinkingContent.clientHeight) <= tolerance;
+    }
     
     // Parse thinking and answer
     const parsed = parseThinking(content);
@@ -599,14 +794,16 @@ function updateAssistantContent(el, content) {
     if (parsed.thinking !== null) {
         const existingBlock = contentDiv.querySelector('.thinking-block');
         const isCollapsed = existingBlock ? existingBlock.classList.contains('collapsed') : true;
-        const thinkingClass = isCollapsed ? 'collapsed' : '';
+        let thinkingClass = isCollapsed ? 'collapsed' : '';
+        if (parsed.isStreaming) thinkingClass += ' streaming';
+        
         const thinkingId = 'thinking-' + el.dataset.exchangeId;
         
         html += `
             <div class="thinking-block ${thinkingClass}" id="${thinkingId}">
                 <div class="thinking-header" onclick="toggleThinking('${thinkingId}')">
                     <nui-icon name="lightbulb_2" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><use href="/nui_wc2/NUI/assets/material-icons-sprite.svg#image"></use></svg></nui-icon>
-                    <span class="thinking-title">Thinking</span>
+                    <span class="thinking-title">${parsed.isStreaming ? 'Thinking...' : 'Thoughts'}</span>
                     <span class="thinking-toggle">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="6 9 12 15 18 9"></polyline>
@@ -624,34 +821,16 @@ function updateAssistantContent(el, content) {
     }
     
     contentDiv.innerHTML = html;
-}
 
-function showThinkingIndicator(el, thinking) {
-    const contentDiv = el.querySelector('.message-content');
-    if (!contentDiv) return;
-    
-    let thinkEl = contentDiv.querySelector('.thinking-block');
-    if (!thinkEl) {
-        const thinkingId = 'thinking-' + el.dataset.exchangeId;
-        thinkEl = document.createElement('div');
-        thinkEl.id = thinkingId;
-        thinkEl.className = 'thinking-block streaming collapsed';
-        thinkEl.innerHTML = `
-            <div class="thinking-header" onclick="toggleThinking('${thinkingId}')">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.5rem;"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"></path><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"></path></svg>
-                <span class="thinking-title">Thinking...</span>
-                <span class="thinking-toggle">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="6 9 12 15 18 9"></polyline>
-                    </svg>
-                </span>
-            </div>
-            <div class="thinking-content"></div>
-        `;
-        contentDiv.insertBefore(thinkEl, contentDiv.firstChild);
+    // Restore thinking-content scroll position
+    const newThinkingContent = contentDiv.querySelector('.thinking-content');
+    if (newThinkingContent) {
+        if (thinkingWasAtBottom) {
+            newThinkingContent.scrollTop = newThinkingContent.scrollHeight;
+        } else {
+            newThinkingContent.scrollTop = thinkingScrollTop;
+        }
     }
-    
-    thinkEl.querySelector('.thinking-content').textContent = thinking;
 }
 
 window.toggleThinking = function(id) {
@@ -697,11 +876,41 @@ function showError(el, message) {
     if (indicator) indicator.style.display = 'none';
 }
 
-function finalizeAssistantElement(el, exchangeId) {
+function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null) {
     // Hide streaming indicator
     const indicator = el.querySelector('.streaming-indicator');
     if (indicator) indicator.style.display = 'none';
+
+    // Update static usage text if we have it
+    const exchange = conversation.getExchange(exchangeId);
+    let finalUsage = usage || exchange?.assistant?.usage;
+    let finalContext = contextInfo || exchange?.assistant?.context;
     
+    // Fallback to the saved version data if we are loading from history
+    if (!finalUsage && !finalContext && exchange?.assistant) {
+        const curVersion = exchange.assistant.versions?.[exchange.assistant.currentVersion || 0];
+        if (curVersion) {
+             finalUsage = curVersion.usage;
+             finalContext = curVersion.context;
+        }
+    }
+
+    if (finalUsage || finalContext) {
+        // Build a display object
+        const displayData = {};
+        if (finalContext) {
+            displayData.used_tokens = finalContext.used_tokens;
+            displayData.window_size = finalContext.window_size;
+        } else if (finalUsage) {
+            displayData.used_tokens = finalUsage.total_tokens;
+        }
+        updateUsageDisplay(el, displayData);
+    } else if (exchange && exchange.assistant.content) {
+        // If we still lack explicit context stats, fallback to a heuristic estimation if it's rendered in history
+        const roughTokens = Math.ceil((exchange.user.content.length + exchange.assistant.content.length) / 4);
+        updateUsageDisplay(el, { used_tokens: roughTokens, isEstimate: true });
+    }
+
     // Show actions only if we have multiple versions or after regeneration
     const info = conversation.getVersionInfo(exchangeId);
     const actions = el.querySelector('.message-actions');
@@ -776,12 +985,13 @@ async function regenerate(exchangeId) {
 
 function switchVersion(exchangeId, direction) {
     const directionKey = direction === 'prev' ? 'prev' : 'next';
-    if (conversation.switchVersion(exchangeId, directionKey)) {
+        if (conversation.switchVersion(exchangeId, directionKey)) {
         const exchange = conversation.getExchange(exchangeId);
         const el = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
         if (el) {
             updateAssistantContent(el, exchange.assistant.content);
             updateVersionControls(el, exchangeId);
+            finalizeAssistantElement(el, exchangeId);
         }
     }
 }
@@ -792,7 +1002,7 @@ function switchVersion(exchangeId, direction) {
 
 function startNewChat() {
     if (isStreaming) {
-        streamer.abort();
+        client.abortCurrentIterableStream();
     }
     
     currentChatId = 'ex_' + Date.now();
@@ -813,12 +1023,29 @@ function startNewChat() {
 
 async function switchChat(chatId) {
     if (isStreaming) {
-        streamer.abort();
+        client.abortCurrentIterableStream();
     }
     currentChatId = chatId;
     localStorage.setItem('current-chat-id', currentChatId);
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     await conversation.load();
+
+    // Restore the model if saved in history
+    const chatInfo = chatHistory.find(c => c.id === currentChatId);
+    if (chatInfo && chatInfo.model && elements.modelSelect) {
+        // Ensure the model actually exists to avoid setting invalid state
+        const modelExists = models.some(m => m.id === chatInfo.model);
+        if (modelExists) {
+            currentModel = chatInfo.model;
+            if (elements.modelSelect.setValue) {
+                elements.modelSelect.setValue(currentModel);
+            } else {
+                const select = elements.modelSelect.querySelector('select');
+                if (select) select.value = currentModel;
+            }
+        }
+    }
+
     renderHistoryList();
     renderConversation();
 }
@@ -855,12 +1082,80 @@ async function deleteChat(chatId, e) {
     }
 }
 
+function exportChatAsJson(chatId, btn) {
+    const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
+    if (!chatDataString) return;
+    
+    // Format JSON with 2 spaces for readability
+    try {
+        const formattedJson = JSON.stringify(JSON.parse(chatDataString), null, 2);
+        navigator.clipboard.writeText(formattedJson).then(() => {
+            if (btn) {
+                const originalHtml = btn.innerHTML;
+                btn.innerHTML = '<nui-icon name="check"></nui-icon>';
+                setTimeout(() => {
+                    btn.innerHTML = originalHtml;
+                }, 2000);
+            }
+        }).catch(err => {
+            console.error('Failed to copy JSON to clipboard', err);
+        });
+    } catch (e) {
+        console.error('Failed to parse chat data', e);
+    }
+}
+
+function exportChatAsMarkdown(chatId) {
+    const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
+    if (!chatDataString) return;
+    
+    try {
+        const exchanges = JSON.parse(chatDataString);
+        let md = "";
+        
+        const chatInfo = chatHistory.find(c => c.id === chatId);
+        if (chatInfo) {
+            md += `# ${chatInfo.title || 'Chat'}\n\n`;
+            md += `*Model: ${chatInfo.model || 'Unknown'} | Date: ${new Date(chatInfo.timestamp).toLocaleString()}*\n\n---\n\n`;
+        }
+
+        for (const ex of exchanges) {
+            md += `### User\n\n${ex.user.content}\n\n`;
+            if (ex.assistant && ex.assistant.content) {
+                md += `### Assistant\n\n${ex.assistant.content}\n\n`;
+            }
+            md += `---\n\n`;
+        }
+
+        const blob = new Blob([md], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        
+        const title = chatInfo && chatInfo.title ? chatInfo.title.replace(/[^a-z0-9]/gi, '_').toLowerCase() : 'chat';
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `chat_${title}_${chatId}.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        console.error("Failed to export markdown", e);
+    }
+}
+
 function updateChatTitle(chatId, firstMessageContent) {
     const chatInfo = chatHistory.find(c => c.id === chatId);
     if (chatInfo && (chatInfo.title === 'New Chat' || chatInfo.title === 'Old Chat')) {
         chatInfo.title = firstMessageContent.substring(0, 30) + (firstMessageContent.length > 30 ? '...' : '');
         localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
         renderHistoryList();
+    }
+}
+
+function updateChatModel(chatId, modelId) {
+    const chatInfo = chatHistory.find(c => c.id === chatId);
+    if (chatInfo && chatInfo.model !== modelId) {
+        chatInfo.model = modelId;
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
     }
 }
 
@@ -891,14 +1186,39 @@ function renderHistoryList() {
         titleSpan.textContent = chat.title || 'New Chat';
         titleSpan.title = chat.title;
         
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'chat-history-item-actions';
+        
+        const exportJsonBtn = document.createElement('button');
+        exportJsonBtn.className = 'chat-history-item-action';
+        exportJsonBtn.innerHTML = '<nui-icon name="content_copy"></nui-icon>';
+        exportJsonBtn.title = 'Copy JSON to clipboard';
+        exportJsonBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            exportChatAsJson(chat.id, exportJsonBtn);
+        });
+
+        const exportMdBtn = document.createElement('button');
+        exportMdBtn.className = 'chat-history-item-action';
+        exportMdBtn.innerHTML = '<nui-icon name="save"></nui-icon>';
+        exportMdBtn.title = 'Export Markdown';
+        exportMdBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            exportChatAsMarkdown(chat.id);
+        });
+
         const delBtn = document.createElement('button');
-        delBtn.className = 'chat-history-item-delete';
+        delBtn.className = 'chat-history-item-action chat-history-item-delete';
         delBtn.innerHTML = '<nui-icon name="close"></nui-icon>';
         delBtn.title = 'Delete chat';
         delBtn.addEventListener('click', (e) => deleteChat(chat.id, e));
         
+        actionsDiv.appendChild(exportJsonBtn);
+        actionsDiv.appendChild(exportMdBtn);
+        actionsDiv.appendChild(delBtn);
+
         item.appendChild(titleSpan);
-        item.appendChild(delBtn);
+        item.appendChild(actionsDiv);
         
         item.addEventListener('click', () => switchChat(chat.id));
         elements.chatHistoryList.appendChild(item);
@@ -910,18 +1230,14 @@ function renderHistoryList() {
 function updateSendButton() {
     const btn = elements.sendBtn?.querySelector('button');
     if (btn) {
-        btn.innerHTML = isStreaming 
-            ? '<nui-icon name="stop"></nui-icon>' 
+        btn.innerHTML = isStreaming
+            ? '<nui-icon name="close"></nui-icon>'
             : '<nui-icon name="send"></nui-icon>';
-    }
-    
-    if (isStreaming) {
-        elements.sendBtn?.addEventListener('click', abortStream, { once: true });
     }
 }
 
 function abortStream() {
-    streamer.abort();
+    client.abortCurrentIterableStream();
 }
 
 // ============================================
@@ -930,7 +1246,7 @@ function abortStream() {
 
 function handleFileSelect(e) {
     const files = Array.from(e.target.files || []);
-    
+
     for (const file of files) {
         if (!file.type.startsWith('image/')) continue;
         
@@ -980,9 +1296,8 @@ function clearAttachments() {
 
 async function checkGatewayStatus() {
     try {
-        const response = await fetch(`${GATEWAY_URL}/health`);
-        const data = await response.json();
-        
+        const data = await client.getHealth();
+
         if (data.status === 'ok') {
             elements.gatewayStatus?.classList.remove('offline');
         } else {

@@ -526,11 +526,16 @@
 }
 
 .thinking-block.collapsed .thinking-content {
-    max-height: 70px;
-    overflow-y: hidden;
+    max-height: 140px;
+    overflow-y: auto;
     padding-bottom: 0;
-    -webkit-mask-image: linear-gradient(to bottom, black 20px, transparent 65px);
-    mask-image: linear-gradient(to bottom, black 20px, transparent 65px);
+    -webkit-mask-image: linear-gradient(to bottom, black 90px, transparent 135px);
+    mask-image: linear-gradient(to bottom, black 90px, transparent 135px);
+}
+
+.thinking-block.collapsed .thinking-content::-webkit-scrollbar {
+    width: 0px; 
+    background: transparent; 
 }
 
 /* Compaction Indicator */
@@ -692,7 +697,13 @@ nui-app:not(.nui-ready) { display: none; }
     margin-right: 0.5rem;
 }
 
-.chat-history-item-delete {
+.chat-history-item-actions {
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
+}
+
+.chat-history-item-action {
     background: none;
     border: none;
     color: var(--nui-shade2, #666);
@@ -704,7 +715,10 @@ nui-app:not(.nui-ready) { display: none; }
     border-radius: 4px;
 }
 
-.chat-history-item-delete:hover {
+.chat-history-item-action:hover {
     background: var(--nui-shade3, #ddd);
+}
+
+.chat-history-item-delete:hover {
     color: var(--nui-color-danger, #cc0000);
 }

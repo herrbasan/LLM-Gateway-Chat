@@ -143,43 +143,31 @@ export function renderMarkdown(content) {
 
 // Parse thinking blocks from content
 export function parseThinking(content) {
-    const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
-    if (thinkMatch) {
-        return {
-            thinking: thinkMatch[1].trim(),
-            answer: content.replace(/<think>[\s\S]*?<\/think>/, '').trim()
-        };
-    }
-    // Check if we're inside a thinking block (streaming)
-    if (content.includes('<think>') && !content.includes('</think>')) {
-        const partial = content.match(/<think>([\s\S]*)$/);
-        if (partial) {
-            return {
-                thinking: partial[1].trim(),
-                answer: null,
-                isStreaming: true
-            };
-        }
-    }
-    return { thinking: null, answer: content };
-}
+    let thinking = [];
+    let answer = content;
+    let isStreaming = false;
 
-// Render thinking block HTML
-export function renderThinking(thinking, isStreaming = false) {
-    const thinkingId = 'thinking-' + Math.random().toString(36).substr(2, 9);
-    
-    return `
-        <nui-accordion class="thinking-block ${isStreaming ? 'streaming' : ''}" id="${thinkingId}">
-            <details ${isStreaming ? 'open' : ''}>
-                <summary class="thinking-header">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.5rem;"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"></path><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"></path></svg>
-                    <span class="thinking-title">${isStreaming ? 'Thinking...' : 'Thoughts'}</span>
-                </summary>
-                <div class="accordion-content thinking-content">
-                    ${escapeHtml(thinking)}
-                </div>
-            </details>
-        </nui-accordion>
-    `;
+    // Extract all closed <think> blocks
+    const thinkRegex = /<think>([\s\S]*?)<\/think>/g;
+    let match;
+    while ((match = thinkRegex.exec(content)) !== null) {
+        thinking.push(match[1].trim());
+    }
+    answer = answer.replace(thinkRegex, '');
+
+    // Extract unclosed <think> block (for streaming)
+    const unclosedRegex = /<think>([\s\S]*)$/;
+    const unclosedMatch = answer.match(unclosedRegex);
+    if (unclosedMatch) {
+        thinking.push(unclosedMatch[1].trim());
+        answer = answer.replace(unclosedRegex, '');
+        isStreaming = true;
+    }
+
+    return {
+        thinking: thinking.length > 0 ? thinking.join('\n\n') : null,
+        answer: answer.trim() || null,
+        isStreaming
+    };
 }
 

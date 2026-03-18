@@ -15,6 +15,7 @@
     
     <!-- Chat Styles -->
     <link rel="stylesheet" href="css/chat.css">
+    <link rel="stylesheet" href="../nui_wc2/NUI/css/modules/nui-lightbox.css">
     
 </head>
 <body>
@@ -28,10 +29,11 @@
                 </nui-button>
                 <h1 style="margin:0; font-size:1.2rem; font-weight:600;">LLM Gateway Chat</h1>
             </div>
-            <div slot="center">
+            <div slot="center" style="display: flex; flex-direction: column; align-items: center;">
                 <div class="gateway-status" id="gateway-status" style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem;">
                     <span class="status-dot"></span> <span id="gateway-status-text">Gateway</span>
                 </div>
+
             </div>
             <div slot="right">
                 <nui-button data-action="toggle-theme" id="theme-toggle">
@@ -116,8 +118,7 @@
                     <!-- Input Area -->
                     <footer class="chat-input-area" style="flex-shrink: 0; border-top: 1px solid var(--nui-shade3); padding: 1rem 2rem 2rem; background: var(--nui-shade6); box-sizing: border-box; width: 100%;">
                         <div class="attachment-preview" id="attachment-preview"></div>
-                        <div class="input-row" style="display: flex; gap: 0.5rem; align-items: flex-end; width: 100%; box-sizing: border-box;">
-                            <nui-textarea id="message-input" class="chat-input" style="flex: 1; min-width: 0;">
+                        <div class="input-row" style="display: flex; gap: 0.5rem; align-items: flex-end; width: 100%; box-sizing: border-box;">                              <div id="overall-context-progress-wrap" style="display: flex; align-items: center; justify-content: center; height: 38px; margin-bottom: 2px; cursor: help; padding: 0 8px;"><nui-progress id="overall-context-progress" type="circular" value="0" size="28px" hide-text></nui-progress></div><nui-tooltip id="overall-context-tooltip" style="white-space: nowrap; max-width: none;">Context Usage</nui-tooltip>                            <nui-textarea id="message-input" class="chat-input" style="flex: 1; min-width: 0;">
                                 <textarea rows="1" placeholder="Type a message... (Shift+Enter for new line)"></textarea>
                             </nui-textarea>
                             <nui-button id="attach-btn" class="icon-only" title="Attach Image">
@@ -143,6 +144,7 @@
     <script src="../shared/vendor/purify.js"></script>
     <script src="../shared/vendor/markdown-it-prism.js"></script>
     <script src="../nui_wc2/NUI/nui.js" type="module"></script>
+    <script src="../nui_wc2/NUI/lib/modules/nui-lightbox.js" type="module"></script>
     <script src="js/chat.js" type="module"></script>
     <script>
         // NUI specific interactions for app shell
@@ -167,5 +169,7 @@
     </script>
 </body>
 </html>
+
+
 
 
