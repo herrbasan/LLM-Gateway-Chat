@@ -628,13 +628,13 @@ function createAssistantElement(exchangeId) {
                 Context: <span class="usage-values">--</span>
             </span>
         </div>
-        <div class="progress-status" style="display: none; font-size: 0.85em; color: var(--nui-accent, var(--color-highlight, #007bff)); margin-bottom: 8px; font-style: italic;"></div>
+        <div class="progress-status" class="progress-status" style="display: none;"></div>
         <div class="message-content"></div>
-        <div class="message-actions" style="display: none;">
-            <button class="action-btn regenerate" title="Regenerate">↻</button>
-            <button class="action-btn prev-version" title="Previous version">←</button>
-            <span class="version-info"></span>
-            <button class="action-btn next-version" title="Next version">→</button>
+        <div class="message-actions" style="display: none; align-items: center; gap: 0.5rem;">
+            <nui-button class="action-btn regenerate" title="Regenerate"><button type="button"><nui-icon name="sync"></nui-icon></button></nui-button>
+            <nui-button class="action-btn prev-version" title="Previous version"><button type="button"><nui-icon name="arrow" style="transform: rotate(180deg)"></nui-icon></button></nui-button>
+            <span class="version-info" style="min-width: 3rem; text-align: center; color: var(--color-shade2); font-size: 0.75rem;"></span>
+            <nui-button class="action-btn next-version" title="Next version"><button type="button"><nui-icon name="arrow"></nui-icon></button></nui-button>
         </div>
     `;
     
@@ -1170,7 +1170,7 @@ function renderHistoryList() {
     if (chatHistory.length === 0) {
         const emptyMsg = document.createElement('div');
         emptyMsg.style.padding = '1rem';
-        emptyMsg.style.color = 'var(--nui-shade2)';
+        emptyMsg.style.color = 'var(--color-shade5)';
         emptyMsg.style.fontSize = '0.875rem';
         emptyMsg.textContent = 'No previous chats.';
         elements.chatHistoryList.appendChild(emptyMsg);
@@ -1189,27 +1189,28 @@ function renderHistoryList() {
         const actionsDiv = document.createElement('div');
         actionsDiv.className = 'chat-history-item-actions';
         
-        const exportJsonBtn = document.createElement('button');
+        const exportJsonBtn = document.createElement('nui-button');
         exportJsonBtn.className = 'chat-history-item-action';
-        exportJsonBtn.innerHTML = '<nui-icon name="content_copy"></nui-icon>';
+        exportJsonBtn.innerHTML = '<button type="button"><nui-icon name="content_copy"></nui-icon></button>';
         exportJsonBtn.title = 'Copy JSON to clipboard';
         exportJsonBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             exportChatAsJson(chat.id, exportJsonBtn);
         });
 
-        const exportMdBtn = document.createElement('button');
+        const exportMdBtn = document.createElement('nui-button');
         exportMdBtn.className = 'chat-history-item-action';
-        exportMdBtn.innerHTML = '<nui-icon name="save"></nui-icon>';
+        exportMdBtn.innerHTML = '<button type="button"><nui-icon name="save"></nui-icon></button>';
         exportMdBtn.title = 'Export Markdown';
         exportMdBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             exportChatAsMarkdown(chat.id);
         });
 
-        const delBtn = document.createElement('button');
+        const delBtn = document.createElement('nui-button');
+        delBtn.setAttribute('variant', 'danger');
         delBtn.className = 'chat-history-item-action chat-history-item-delete';
-        delBtn.innerHTML = '<nui-icon name="close"></nui-icon>';
+        delBtn.innerHTML = '<button type="button"><nui-icon name="close"></nui-icon></button>';
         delBtn.title = 'Delete chat';
         delBtn.addEventListener('click', (e) => deleteChat(chat.id, e));
         
