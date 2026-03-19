@@ -760,6 +760,7 @@ nui-app:not(.nui-ready) { display: none; }
 
 @media (max-width: 600px) {
     .app-title { font-size: 0.7rem; }
+    .message-timestamp { display: none; }
     .chat-input-area {
         padding: 0.5rem;
     }
