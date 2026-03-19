@@ -2,6 +2,18 @@
    LLM Gateway Chat Styles
    ============================================ */
 
+/* Prevent touch zoom */
+html, body {
+    touch-action: pan-x pan-y;
+    -webkit-text-size-adjust: none;
+    -ms-text-size-adjust: none;
+}
+
+/* Prevent double-tap zoom on interactive elements */
+button, input, textarea, select, a {
+    touch-action: manipulation;
+}
+
 /* Root theme variables - ensure NUI compatibility */
 :root {
     --sidebar-width: 24rem;
@@ -753,6 +765,9 @@ nui-app:not(.nui-ready) { display: none; }
     }
     .chat-input-area .input-row .context-progress-wrap{
         display: none;
+    }
+    .chat-input-area .input-row textarea {
+        margin: 0;
     }
 }
 
