@@ -12,7 +12,7 @@ const CONFIG = window.CHAT_CONFIG || {};
 const GATEWAY_URL = CONFIG.gatewayUrl || 'http://localhost:3400';
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
-const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || 2048;
+const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
 
 // State
 // Storage wrapper for Chat History
@@ -408,7 +408,8 @@ async function streamResponse(exchangeId) {
     const exchange = conversation.getExchange(exchangeId);
     const systemPrompt = elements.systemPrompt?.querySelector('textarea')?.value || '';
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
-    const maxTokens = parseInt(elements.maxTokens?.value) || DEFAULT_MAX_TOKENS;
+    const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
+    const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
     
     // Get or create assistant message element
     let assistantEl = elements.messages?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
@@ -425,9 +426,12 @@ async function streamResponse(exchangeId) {
             model: currentModel,
             messages,
             temperature,
-            max_tokens: maxTokens,
             stream: true
         };
+        
+        if (maxTokens) {
+            requestBody.max_tokens = maxTokens;
+        }
         
         // Add image processing if images attached
         if (exchange.user.attachments?.length > 0) {
@@ -670,6 +674,16 @@ function updateUsageDisplay(el, contextData) {
         }
         text += ' tokens';
         valueSpan.textContent = text;
+        
+        // Add full context info as tooltip for debugging
+        let debugText = [];
+        for (const [key, val] of Object.entries(contextData)) {
+            if (key !== 'isEstimate') {
+                debugText.push(`${key}: ${val}`);
+            }
+        }
+        displaySpan.title = debugText.length > 0 ? debugText.join('\n') : '';
+
         updateOverallContext(contextData);
     }
 }
@@ -741,6 +755,18 @@ function updateOverallContext(contextData = null) {
         knownLimit = true;
     } else {
         text += ` / Unknown`;
+    }
+
+    if (elements.overallContextProgressWrap) {
+        let debugText = [];
+        if (contextData) {
+            for (const [key, val] of Object.entries(contextData)) {
+                if (key !== 'isEstimate') {
+                    debugText.push(`${key}: ${val}`);
+                }
+            }
+        }
+        elements.overallContextProgressWrap.title = debugText.length > 0 ? debugText.join('\n') : '';
     }
 
     if (elements.overallContextProgress) {

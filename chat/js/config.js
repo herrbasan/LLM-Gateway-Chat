@@ -14,5 +14,5 @@ window.CHAT_CONFIG = {
     defaultTemperature: 0.7,
     
     // Optional: Default max tokens
-    defaultMaxTokens: 2048,
+    defaultMaxTokens: null,
 };
