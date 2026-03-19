@@ -724,7 +724,22 @@ nui-app:not(.nui-ready) { display: none; }
 .sidebar-layout { display: flex; flex-direction: column; height: 100%; padding: var(--nui-space);overflow-y: auto; box-sizing: border-box; }
 .sidebar-action-area { flex-shrink: 0; }
 .sidebar-action-area nui-button, .sidebar-action-area nui-button button { width: 100%; }
-.context-progress-wrap { display: flex; align-items: center; justify-content: center; height: 38px; margin-bottom: 2px; cursor: help; padding: 0 8px; }
+.context-progress-wrap { 
+    display: flex; 
+    align-items: center; 
+    justify-content: center; 
+    height: 38px; 
+    margin-bottom: 2px; 
+    cursor: help; 
+    padding: 0 8px; 
+}
+
+/* Responsive: hide context progress on small screens */
+@media (max-width: 600px) {
+    .context-progress-wrap {
+        display: none;
+    }
+}
 .context-tooltip { white-space: nowrap; max-width: none; }
 .progress-status { font-size: 0.85em; color: var(--color-highlight); margin-bottom: 8px; font-style: italic; }
 .chat-attachment { cursor: pointer; }

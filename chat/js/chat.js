@@ -883,8 +883,7 @@ function updateOverallContext(contextData = null) {
         }
     }
 
-    // Always display the wrapper so we can show 0% if no history exists yet
-    elements.overallContextProgressWrap.style.display = 'flex';
+    // The wrapper is always visible via CSS, context-progress-wrap class handles display
 
     const usedTokens = (contextData && contextData.used_tokens) ? contextData.used_tokens : 0;
     const isEstimate = contextData && contextData.isEstimate;
