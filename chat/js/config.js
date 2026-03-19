@@ -15,4 +15,7 @@ window.CHAT_CONFIG = {
     
     // Optional: Default max tokens
     defaultMaxTokens: null,
+    
+    // Optional: Add to system prompt to discourage LLM from generating timestamps
+    // timestampInstruction: 'Do not include timestamps in your responses.',
 };

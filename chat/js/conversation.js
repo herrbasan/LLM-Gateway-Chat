@@ -17,16 +17,46 @@ export class Conversation {
     }
 
     // ============================================
+    // Timestamp Formatting
+    // ============================================
+    
+    _formatTimestamp(date = new Date()) {
+        const pad = (n) => n.toString().padStart(2, '0');
+        return `[${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}@${pad(date.getHours())}:${pad(date.getMinutes())}]`;
+    }
+    
+    _prependTimestamp(content, timestamp) {
+        const ts = this._formatTimestamp(new Date(timestamp));
+        return `${ts} ${content}`;
+    }
+    
+    _stripExtraTimestamps(content) {
+        // Keep the first timestamp, remove any subsequent ones
+        const TIMESTAMP_REGEX_GLOBAL = /\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g;
+        let first = true;
+        return content.replace(TIMESTAMP_REGEX_GLOBAL, (match) => {
+            if (first) {
+                first = false;
+                return match;
+            }
+            return '';
+        });
+    }
+
+    // ============================================
     // Exchange Management
     // ============================================
 
     async addExchange(userContent, attachments = []) {
+        const timestamp = Date.now();
+        const contentWithTimestamp = this._prependTimestamp(userContent, timestamp);
+        
         const exchange = {
             id: this._generateId(),
-            timestamp: Date.now(),
+            timestamp: timestamp,
             user: {
                 role: 'user',
-                content: userContent,
+                content: contentWithTimestamp,
                 // Store only metadata in memory, not full dataUrl
                 attachments: attachments.map(att => ({
                     name: att.name,
@@ -116,10 +146,14 @@ export class Conversation {
         if (usage) exchange.assistant.usage = usage;
         if (contextInfo) exchange.assistant.context = contextInfo;
 
+        // Clean content - remove any duplicate timestamps the LLM may have generated
+        const cleanedContent = this._stripExtraTimestamps(exchange.assistant.content);
+        exchange.assistant.content = cleanedContent;
+
         // Save this version only if it's unique to prevent accidental double-pushes
-        if (!exchange.assistant.versions.some(v => v.content === exchange.assistant.content)) {
+        if (!exchange.assistant.versions.some(v => v.content === cleanedContent)) {
             exchange.assistant.versions.push({
-                content: exchange.assistant.content,
+                content: cleanedContent,
                 timestamp: Date.now(),
                 usage: usage,
                 context: contextInfo
@@ -148,10 +182,11 @@ export class Conversation {
         const exchange = this.getExchange(exchangeId);
         if (!exchange) return false;
         
-        // Save current as version if not already saved
-        if (exchange.assistant.content && !exchange.assistant.versions.find(v => v.content === exchange.assistant.content)) {
+        // Clean and save current as version if not already saved
+        const cleanedContent = this._stripExtraTimestamps(exchange.assistant.content);
+        if (cleanedContent && !exchange.assistant.versions.find(v => v.content === cleanedContent)) {
             exchange.assistant.versions.push({
-                content: exchange.assistant.content,
+                content: cleanedContent,
                 timestamp: Date.now()
             });
         }
@@ -226,12 +261,15 @@ export class Conversation {
                 ? exchange.user.attachments?.filter(att => att.getDataUrl || att.dataUrl) || []
                 : [];
                 
+            // Clean user content (in case of any timestamp duplication)
+            const cleanUserContent = this._stripExtraTimestamps(exchange.user.content);
+            
             if (validAttachments.length > 0) {
                 // Multimodal content - text first, then images
                 const content = [
                     {
                         type: 'text',
-                        text: exchange.user.content
+                        text: cleanUserContent
                     },
                     ...validAttachments.map(att => ({
                         type: 'image_url',
@@ -245,15 +283,17 @@ export class Conversation {
             } else {
                 messages.push({
                     role: 'user',
-                    content: exchange.user.content
+                    content: cleanUserContent
                 });
             }
             
             // Assistant message (only if complete)
             if (exchange.assistant.isComplete && exchange.assistant.content) {
+                // Clean assistant content (remove duplicate timestamps)
+                const cleanAssistantContent = this._stripExtraTimestamps(exchange.assistant.content);
                 messages.push({
                     role: 'assistant',
-                    content: exchange.assistant.content
+                    content: cleanAssistantContent
                 });
             }
         }

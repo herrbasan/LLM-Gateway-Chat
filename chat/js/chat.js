@@ -60,6 +60,9 @@ const elements = {
     temperature: document.getElementById('temperature'),
     maxTokens: document.getElementById('max-tokens'),
     systemPrompt: document.getElementById('system-prompt'),
+    userName: document.getElementById('user-name'),
+    userLocation: document.getElementById('user-location'),
+    userLanguage: document.getElementById('user-language'),
     messages: document.getElementById('messages'),
     messageInput: document.getElementById('message-input'),
     sendBtn: document.getElementById('send-btn'),
@@ -121,6 +124,29 @@ function applyDefaultConfig() {
         if (maxTokensInput) {
             maxTokensInput.value = DEFAULT_MAX_TOKENS;
         }
+    }
+    
+    // Load session metadata from localStorage (with defaults)
+    const savedName = localStorage.getItem('chat-user-name');
+    const savedLocation = localStorage.getItem('chat-user-location');
+    const savedLanguage = localStorage.getItem('chat-user-language');
+    
+    // Defaults: Herrbasan, Germany, English
+    const name = savedName !== null ? savedName : 'Herrbasan';
+    const location = savedLocation !== null ? savedLocation : 'Germany';
+    const language = savedLanguage !== null ? savedLanguage : 'English';
+    
+    if (elements.userName) {
+        const input = elements.userName.querySelector('input');
+        if (input) input.value = name;
+    }
+    if (elements.userLocation) {
+        const input = elements.userLocation.querySelector('input');
+        if (input) input.value = location;
+    }
+    if (elements.userLanguage) {
+        const input = elements.userLanguage.querySelector('input');
+        if (input) input.value = language;
     }
 }
 
@@ -301,6 +327,17 @@ function setupEventListeners() {
         console.log('[Chat] Selected model:', currentModel);
     });
     
+    // Session metadata - save to localStorage on change
+    elements.userName?.querySelector('input')?.addEventListener('change', (e) => {
+        localStorage.setItem('chat-user-name', e.target.value);
+    });
+    elements.userLocation?.querySelector('input')?.addEventListener('change', (e) => {
+        localStorage.setItem('chat-user-location', e.target.value);
+    });
+    elements.userLanguage?.querySelector('input')?.addEventListener('change', (e) => {
+        localStorage.setItem('chat-user-language', e.target.value);
+    });
+    
     // Send message / Toggle Stop
     elements.sendBtn?.addEventListener('click', (e) => {
         if (isStreaming) {
@@ -361,6 +398,36 @@ function autoResizeTextarea() {
 }
 
 // ============================================
+// Session Metadata
+// ============================================
+
+function buildMetadataPrefix() {
+    const name = elements.userName?.querySelector('input')?.value?.trim();
+    const location = elements.userLocation?.querySelector('input')?.value?.trim();
+    const language = elements.userLanguage?.querySelector('input')?.value?.trim();
+    
+    const parts = ['LLM Gateway Chat v1.0'];
+    if (name) parts.push(`User: "${name}"`);
+    if (location) parts.push(`Location: "${location}"`);
+    if (language) parts.push(`Language: "${language}"`);
+    
+    const header = parts.join(' | ');
+    const instruction = 'Do not include timestamps in your responses - they are added automatically by the chat system.';
+    
+    return `${header}\n${instruction}`;
+}
+
+function getSystemPromptWithMetadata() {
+    const userPrompt = elements.systemPrompt?.querySelector('textarea')?.value?.trim() || '';
+    const metadata = buildMetadataPrefix();
+    
+    if (userPrompt) {
+        return `${metadata}\n\n${userPrompt}`;
+    }
+    return metadata;
+}
+
+// ============================================
 // Message Sending
 // ============================================
 
@@ -406,7 +473,12 @@ async function streamResponse(exchangeId) {
     updateSendButton();
     
     const exchange = conversation.getExchange(exchangeId);
-    const systemPrompt = elements.systemPrompt?.querySelector('textarea')?.value || '';
+    
+    // Prepend timestamp to assistant response for LLM context
+    const assistantTimestamp = conversation._formatTimestamp();
+    const timestampWithSpace = assistantTimestamp + ' ';
+    conversation.updateAssistantResponse(exchangeId, timestampWithSpace);
+    const systemPrompt = getSystemPromptWithMetadata();
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
@@ -416,6 +488,20 @@ async function streamResponse(exchangeId) {
     if (!assistantEl) {
         assistantEl = createAssistantElement(exchangeId);
         elements.messages?.appendChild(assistantEl);
+    }
+    // Store timestamp info for stripping during rendering (reset on regeneration)
+    const tsLen = timestampWithSpace.length;
+    assistantEl.dataset.timestampLen = tsLen.toString();
+    assistantEl.dataset.timestampStripped = 'true';
+    // Update header with new timestamp
+    const headerEl = assistantEl.querySelector('.message-header');
+    if (headerEl) {
+        const tsEl = headerEl.querySelector('.message-timestamp');
+        if (tsEl) {
+            tsEl.textContent = assistantTimestamp.replace(/^\[|\]$/g, '').replace('@', ' @ ');
+        } else {
+            headerEl.innerHTML += ` <span class="message-timestamp">${assistantTimestamp.replace(/^\[|\]$/g, '').replace('@', ' @ ')}</span>`;
+        }
     }
     scrollToBottom();
     
@@ -465,7 +551,10 @@ async function streamResponse(exchangeId) {
                         
                         const wasNearBottom = isNearBottom();
                         setTimeout(() => {
-                            updateAssistantContent(assistantEl, contentBuffer);
+                            // Reconstruct full content with timestamp for proper stripping
+                            const tsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
+                            const fullContent = tsMatch ? tsMatch[0] + contentBuffer : contentBuffer;
+                            updateAssistantContent(assistantEl, fullContent);
                             lastRender = performance.now();
                             pendingUpdate = false;
                             if (wasNearBottom) scrollToBottom();
@@ -486,19 +575,42 @@ async function streamResponse(exchangeId) {
                     break;
                     
                 case 'error':
-                    updateAssistantContent(assistantEl, contentBuffer); // Render what we have
+                    // Reconstruct full content with timestamp for proper stripping
+                    const errorTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
+                    const errorFullContent = errorTsMatch ? errorTsMatch[0] + contentBuffer : contentBuffer;
+                    updateAssistantContent(assistantEl, errorFullContent);
                     showError(assistantEl, event.error);
                     conversation.setAssistantError(exchangeId, event.error);
                     break;
                     
                 case 'aborted':
-                    updateAssistantContent(assistantEl, contentBuffer); // Render what we have
+                    // Reconstruct full content with timestamp for proper stripping
+                    const abortTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
+                    const abortFullContent = abortTsMatch ? abortTsMatch[0] + contentBuffer : contentBuffer;
+                    updateAssistantContent(assistantEl, stripExtraTimestamps(abortFullContent));
                     showError(assistantEl, 'Stopped');
                     break;
                     
                 case 'done':
+                    // contentBuffer doesn't include our injected timestamp
+                    // Get the exchange to find the original timestamp we injected
+                    const ex = conversation.getExchange(exchangeId);
+                    const tsMatch = ex?.assistant?.content?.match(TIMESTAMP_REGEX);
+                    let finalContent;
+                    if (tsMatch) {
+                        // Reconstruct: original timestamp + content buffer (no LLM timestamp)
+                        finalContent = tsMatch[0] + contentBuffer;
+                    } else {
+                        finalContent = contentBuffer;
+                    }
+                    // Strip any extra timestamps LLM may have generated
+                    finalContent = stripExtraTimestamps(finalContent);
+                    // Update exchange with correct content
+                    if (ex) {
+                        ex.assistant.content = finalContent;
+                    }
                     // Ensure final content is rendered
-                    updateAssistantContent(assistantEl, contentBuffer);
+                    updateAssistantContent(assistantEl, finalContent);
                     conversation.setAssistantComplete(exchangeId, event.usage, event.context);
                     finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context);
                     scrollToBottom();
@@ -567,12 +679,16 @@ function renderConversation() {
 }
 
 function renderExchange(exchange) {
+    // Parse timestamps from content
+    const userParsed = parseTimestamp(exchange.user.content);
+    const userTimestamp = userParsed.timestamp || new Date(exchange.timestamp).toISOString().slice(0,16).replace('T',' @ ');
+    
     // User message
     const userEl = document.createElement('div');
     userEl.className = 'chat-message user';
     userEl.dataset.exchangeId = exchange.id;
 
-    let userContent = escapeHtml(exchange.user.content);
+    let userContent = escapeHtml(userParsed.cleanContent);
 
     // Add attachment previews
     if (exchange.user.attachments?.length > 0) {
@@ -587,7 +703,7 @@ function renderExchange(exchange) {
     }
     
     userEl.innerHTML = `
-        <div class="message-header">You</div>
+        <div class="message-header">You <span class="message-timestamp">${userTimestamp}</span></div>
         <div class="message-content">${userContent}</div>
         <div class="message-actions" style="display: flex; align-items: center; gap: 0.5rem; justify-content: flex-end;">
             <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
@@ -619,8 +735,20 @@ function renderExchange(exchange) {
 
     // Assistant message (if exists)
     if (exchange.assistant.content || exchange.assistant.isStreaming) {
-        const assistantEl = createAssistantElement(exchange.id);
-        updateAssistantContent(assistantEl, exchange.assistant.content);
+        // Clean up any duplicate timestamps from historical data
+        const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
+        const assistantParsed = parseTimestamp(cleanedContent);
+        const assistantTimestamp = assistantParsed.timestamp || '';
+        
+        const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+        // For historical messages, we already have the clean content
+        // Store expected length to prevent re-parsing issues
+        const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
+        if (tsLen > 0) {
+            assistantEl.dataset.timestampLen = tsLen.toString();
+            assistantEl.dataset.timestampStripped = 'true';
+        }
+        updateAssistantContent(assistantEl, assistantParsed.cleanContent);
         elements.messages?.appendChild(assistantEl);
         
         if (exchange.assistant.isComplete) {
@@ -629,13 +757,13 @@ function renderExchange(exchange) {
     }
 }
 
-function createAssistantElement(exchangeId) {
+function createAssistantElement(exchangeId, timestamp = '') {
     const el = document.createElement('div');
     el.className = 'chat-message assistant';
     el.dataset.exchangeId = exchangeId;
     el.innerHTML = `
         <div class="message-header" style="display: flex; align-items: center;">
-            <span>Assistant</span>
+            <span>Assistant</span>${timestamp ? ` <span class="message-timestamp">${timestamp}</span>` : ''}
             <span class="streaming-indicator" style="display: inline-block; margin-left: 8px;">
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
@@ -819,6 +947,24 @@ function updateOverallContext(contextData = null) {
 function updateAssistantContent(el, content) {
     const contentDiv = el.querySelector('.message-content');
     if (!contentDiv) return;
+    
+    // Strip the injected timestamp from visible content (shown in header)
+    // We know the exact format: [YYYY-MM-DD@HH:MM] with optional space
+    if (el.dataset.timestampLen && content.startsWith('[')) {
+        const len = parseInt(el.dataset.timestampLen);
+        if (content.length >= len) {
+            content = content.substring(len);
+        } else if (content.length < 20) {
+            // Not enough content yet, likely still building up timestamp
+            return;
+        }
+        // If content is between 17-19 chars and starts with '[', it might be partial timestamp
+        // Just strip what we can and continue
+    } else if (content.startsWith('[')) {
+        // Fallback: try to parse timestamp (for backwards compatibility)
+        const tsParsed = parseTimestamp(content);
+        content = tsParsed.cleanContent;
+    }
     
     // Skip if content hasn't changed (prevents redundant renders during streaming)
     if (contentDiv.dataset.lastContent === content) return;
@@ -1049,7 +1195,8 @@ async function startEditMode(exchangeId, role = 'user') {
     const exchange = conversation.getExchange(exchangeId);
     if (!exchange) return;
 
-    const currentContent = role === 'user' ? exchange.user.content : exchange.assistant.content;
+    const rawContent = role === 'user' ? exchange.user.content : exchange.assistant.content;
+    const currentContent = parseTimestamp(rawContent).cleanContent;
 
     const parsed = parseThinking(currentContent);
     const hasThinking = parsed.thinking !== null;
@@ -1132,8 +1279,9 @@ function commitEdit(exchangeId, role, newContent) {
     if (!exchange) return;
 
     if (role === 'user') {
-        // 1. Update content
-        exchange.user.content = newContent;
+        // 1. Update content with timestamp
+        const timestamp = conversation._formatTimestamp(new Date(exchange.timestamp));
+        exchange.user.content = `${timestamp} ${newContent}`;
         
         // 2. Truncate conversation
         conversation.truncateAfter(exchangeId);
@@ -1148,14 +1296,16 @@ function commitEdit(exchangeId, role, newContent) {
         currentExchangeId = exchangeId;
         streamResponse(exchangeId);
     } else {
-        // 1. Update content for assistant
-        exchange.assistant.content = newContent;
+        // 1. Update content for assistant with timestamp
+        const timestamp = conversation._formatTimestamp();
+        const contentWithTimestamp = `${timestamp} ${newContent}`;
+        exchange.assistant.content = contentWithTimestamp;
         
         // Update the current version to match
         if (exchange.assistant.versions && exchange.assistant.versions.length > 0) {
             const currentVersionObj = exchange.assistant.versions[exchange.assistant.currentVersion] || exchange.assistant.versions[0];
             if (currentVersionObj) {
-                currentVersionObj.content = newContent;
+                currentVersionObj.content = contentWithTimestamp;
             }
         }
         
@@ -1533,6 +1683,38 @@ function closeLightbox() {
 }
 
 window.openLightbox = openLightbox;
+
+// ============================================
+// Timestamp Parsing
+// ============================================
+
+const TIMESTAMP_REGEX = /^\[(\d{4})-(\d{2})-(\d{2})@(\d{2}):(\d{2})\]\s*/;
+const TIMESTAMP_REGEX_GLOBAL = /\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g;
+
+function parseTimestamp(content) {
+    if (!content) return { timestamp: null, cleanContent: content };
+    const match = content.match(TIMESTAMP_REGEX);
+    if (match) {
+        const [, year, month, day, hour, minute] = match;
+        return {
+            timestamp: `${year}-${month}-${day} @ ${hour}:${minute}`,
+            cleanContent: content.replace(TIMESTAMP_REGEX, '')
+        };
+    }
+    return { timestamp: null, cleanContent: content };
+}
+
+function stripExtraTimestamps(content) {
+    // Keep the first timestamp (ours), remove any subsequent ones the LLM generates
+    let first = true;
+    return content.replace(TIMESTAMP_REGEX_GLOBAL, (match) => {
+        if (first) {
+            first = false;
+            return match; // Keep first timestamp
+        }
+        return ''; // Remove subsequent timestamps
+    });
+}
 
 // ============================================
 // Utilities
