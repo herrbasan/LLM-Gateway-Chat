@@ -733,7 +733,14 @@ nui-app:not(.nui-ready) { display: none; }
 
 @media (max-width: 600px) {
     .app-title { font-size: 0.7rem; }
+    .chat-input-area {
+        padding: 0.5rem;
+    }
+    .chat-input-area .input-row .context-progress-wrap{
+        display: none;
+    }
 }
+
 /* Dim edit/delete actions by default, highlight on message hover */
 .chat-message.user .edit-message,
 .chat-message.user .delete-message,
@@ -748,4 +755,138 @@ nui-app:not(.nui-ready) { display: none; }
 .chat-message.assistant:hover .edit-message,
 .chat-message.assistant:hover .delete-message {
     opacity: 1;
+}
+
+/* Message Header Layout */
+.message-header-flex {
+    display: flex;
+    align-items: center;
+}
+
+.streaming-indicator {
+    display: none;
+    margin-left: 8px;
+}
+
+.streaming-indicator.visible {
+    display: inline-block;
+}
+
+.context-usage-display {
+    display: none;
+    margin-left: auto;
+    font-size: 0.9em;
+    color: var(--color-shade5, #888);
+    font-weight: normal;
+}
+
+/* Message Actions */
+.message-actions {
+    display: none;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.message-actions.visible {
+    display: flex;
+}
+
+.message-actions-user {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    justify-content: flex-end;
+}
+
+/* Progress Status */
+.progress-status {
+    display: none;
+    font-size: 0.85em;
+    color: var(--color-highlight);
+    margin-bottom: 8px;
+    font-style: italic;
+}
+
+.progress-status.visible {
+    display: block;
+}
+
+/* Version Controls */
+.version-info {
+    min-width: 3rem;
+    text-align: center;
+    color: var(--color-shade2);
+    font-size: 0.75rem;
+}
+
+.arrow-rotated {
+    transform: rotate(180deg);
+}
+
+.spacer {
+    flex-grow: 1;
+}
+
+/* Edit Dialog Styles */
+.edit-dialog-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    box-sizing: border-box;
+}
+
+.edit-dialog-container.gap-lg {
+    gap: 1rem;
+}
+
+.edit-dialog-text {
+    margin-top: 0;
+    color: var(--text-color-dim);
+    font-size: 0.875rem;
+}
+
+.edit-dialog-text.mb-1 {
+    margin-bottom: 1rem;
+}
+
+.edit-dialog-text.mb-0 {
+    margin-bottom: 0;
+}
+
+.edit-section {
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+    gap: 0.5rem;
+    min-height: 200px;
+}
+
+.edit-label {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-color-dim);
+    padding-left: 0.25rem;
+}
+
+.edit-input-full {
+    width: 100%;
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.edit-textarea {
+    width: 100%;
+    flex-grow: 1;
+    resize: none;
+    padding: 1rem;
+    color: inherit;
+    background: transparent;
+    font-family: inherit;
+    border: none;
+    outline: none;
+}
+
+.edit-textarea.min-h-400 {
+    min-height: 400px;
 }

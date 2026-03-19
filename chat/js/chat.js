@@ -538,7 +538,7 @@ async function streamResponse(exchangeId) {
                 case 'delta':
                     // Hide progress status once text generation begins
                     const statusEl = assistantEl.querySelector('.progress-status');
-                    if (statusEl) statusEl.style.display = 'none';
+                    if (statusEl) statusEl.classList.remove('visible');
 
                     contentBuffer += event.content;
                     conversation.updateAssistantResponse(exchangeId, event.content);
@@ -630,7 +630,7 @@ async function streamResponse(exchangeId) {
                                 }
                             }
                             if (statusText) {
-                                statusEl.style.display = 'block';
+                                statusEl.classList.add('visible');
                                 statusEl.textContent = statusText;
                             }
                         }
@@ -697,7 +697,7 @@ function renderExchange(exchange) {
             // Use blobUrl for loaded images, dataUrl for new attachments
             const displayUrl = att.blobUrl || att.dataUrl || '';
             const dataUrl = att.getDataUrl ? att.getDataUrl() : att.dataUrl;
-            userContent += `<img src="${displayUrl}" alt="${att.name}" data-lightbox-src="${dataUrl}" class="chat-attachment" style="cursor: pointer;">`;
+            userContent += `<img src="${displayUrl}" alt="${att.name}" data-lightbox-src="${dataUrl}" class="chat-attachment">`
         }
         userContent += '</nui-lightbox></div>';
     }
@@ -705,7 +705,7 @@ function renderExchange(exchange) {
     userEl.innerHTML = `
         <div class="message-header">You <span class="message-timestamp">${userTimestamp}</span></div>
         <div class="message-content">${userContent}</div>
-        <div class="message-actions" style="display: flex; align-items: center; gap: 0.5rem; justify-content: flex-end;">
+        <div class="message-actions-user">
             <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
             <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
         </div>
@@ -762,23 +762,23 @@ function createAssistantElement(exchangeId, timestamp = '') {
     el.className = 'chat-message assistant';
     el.dataset.exchangeId = exchangeId;
     el.innerHTML = `
-        <div class="message-header" style="display: flex; align-items: center;">
+        <div class="message-header message-header-flex">
             <span>Assistant</span>${timestamp ? ` <span class="message-timestamp">${timestamp}</span>` : ''}
-            <span class="streaming-indicator" style="display: inline-block; margin-left: 8px;">
+            <span class="streaming-indicator visible">
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
-            <span class="context-usage-display" style="display: none; margin-left: auto; font-size: 0.9em; color: var(--color-shade5, #888); font-weight: normal;">
+            <span class="context-usage-display">
                 Context: <span class="usage-values">--</span>
             </span>
         </div>
-        <div class="progress-status" class="progress-status" style="display: none;"></div>
+        <div class="progress-status"></div>
         <div class="message-content"></div>
-        <div class="message-actions" style="display: none; align-items: center; gap: 0.5rem;">
+        <div class="message-actions">
             <nui-button class="action-btn regenerate" title="Regenerate"><button type="button"><nui-icon name="sync"></nui-icon></button></nui-button>
-            <nui-button class="action-btn prev-version" title="Previous version"><button type="button"><nui-icon name="arrow" style="transform: rotate(180deg)"></nui-icon></button></nui-button>
-            <span class="version-info" style="min-width: 3rem; text-align: center; color: var(--color-shade2); font-size: 0.75rem;"></span>
+            <nui-button class="action-btn prev-version" title="Previous version"><button type="button"><nui-icon name="arrow" class="arrow-rotated"></nui-icon></button></nui-button>
+            <span class="version-info"></span>
             <nui-button class="action-btn next-version" title="Next version"><button type="button"><nui-icon name="arrow"></nui-icon></button></nui-button>
-            <div style="flex-grow: 1;"></div>
+            <div class="spacer"></div>
             <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
             <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
         </div>
@@ -1074,7 +1074,7 @@ function showError(el, message) {
 function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null) {
     // Hide streaming indicator
     const indicator = el.querySelector('.streaming-indicator');
-    if (indicator) indicator.style.display = 'none';
+    if (indicator) indicator.classList.remove('visible');
 
     // Update static usage text if we have it
     const exchange = conversation.getExchange(exchangeId);
@@ -1108,11 +1108,11 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     const info = conversation.getVersionInfo(exchangeId);
     const actions = el.querySelector('.message-actions');
     if (actions && info?.hasMultiple) {
-        actions.style.display = 'flex';
+        actions.classList.add('visible');
         updateVersionControls(el, exchangeId);
     } else if (actions) {
         // Only show regenerate button initially
-        actions.style.display = 'flex';
+        actions.classList.add('visible');
         actions.querySelector('.regenerate').style.display = 'inline-block';
         actions.querySelector('.prev-version').style.display = 'none';
         actions.querySelector('.next-version').style.display = 'none';
@@ -1167,8 +1167,8 @@ async function regenerate(exchangeId) {
     const oldEl = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
     if (oldEl) {
         oldEl.querySelector('.message-content').innerHTML = '';
-        oldEl.querySelector('.streaming-indicator').style.display = 'inline-block';
-        oldEl.querySelector('.message-actions').style.display = 'none';
+        oldEl.querySelector('.streaming-indicator').classList.add('visible');
+        oldEl.querySelector('.message-actions').classList.remove('visible');
     }
     
     // Stream new response
@@ -1206,32 +1206,32 @@ async function startEditMode(exchangeId, role = 'user') {
     // Use NUI page dialog
     if (hasThinking) {
         contentHtml = `
-            <div style="display: flex; flex-direction: column; height: 100%; box-sizing: border-box; gap: 1rem;">
-                <p style="margin-top: 0; margin-bottom: 0; color: var(--text-color-dim); font-size: 0.875rem;">
+            <div class="edit-dialog-container gap-lg">
+                <p class="edit-dialog-text mb-0">
                     Editing this message will truncate all subsequent conversation history.
                 </p>
-                <div style="display: flex; flex-direction: column; flex-grow: 1; gap: 0.5rem; min-height: 200px;">
-                    <label style="font-size: 0.875rem; font-weight: 500; color: var(--text-color-dim); padding-left: 0.25rem;">Thoughts (Thinking Portion)</label>
-                    <nui-input style="width: 100%; flex-grow: 1; display: flex; flex-direction: column;">
-                        <textarea class="edit-textarea-thinking" style="width: 100%; flex-grow: 1; resize: none; padding: 1rem; color: inherit; background: transparent; font-family: inherit; border: none; outline: none;">${escapeHtml(parsed.thinking || '')}</textarea>
+                <div class="edit-section">
+                    <label class="edit-label">Thoughts (Thinking Portion)</label>
+                    <nui-input class="edit-input-full">
+                        <textarea class="edit-textarea edit-textarea-thinking">${escapeHtml(parsed.thinking || '')}</textarea>
                     </nui-input>
                 </div>
-                <div style="display: flex; flex-direction: column; flex-grow: 1; gap: 0.5rem; min-height: 200px;">
-                    <label style="font-size: 0.875rem; font-weight: 500; color: var(--text-color-dim); padding-left: 0.25rem;">Response (Answer Portion)</label>
-                    <nui-input style="width: 100%; flex-grow: 1; display: flex; flex-direction: column;">
-                        <textarea class="edit-textarea-answer" style="width: 100%; flex-grow: 1; resize: none; padding: 1rem; color: inherit; background: transparent; font-family: inherit; border: none; outline: none;">${escapeHtml(parsed.answer || '')}</textarea>
+                <div class="edit-section">
+                    <label class="edit-label">Response (Answer Portion)</label>
+                    <nui-input class="edit-input-full">
+                        <textarea class="edit-textarea edit-textarea-answer">${escapeHtml(parsed.answer || '')}</textarea>
                     </nui-input>
                 </div>
             </div>
         `;
     } else {
         contentHtml = `
-            <div style="display: flex; flex-direction: column; height: 100%; box-sizing: border-box;">
-                <p style="margin-top: 0; margin-bottom: 1rem; color: var(--text-color-dim); font-size: 0.875rem;">
+            <div class="edit-dialog-container">
+                <p class="edit-dialog-text mb-1">
                     Editing this message will truncate all subsequent conversation history.
                 </p>
-                <nui-input style="width: 100%; flex-grow: 1; display: flex; flex-direction: column;">
-                    <textarea class="edit-textarea" style="width: 100%; flex-grow: 1; resize: none; padding: 1rem; color: inherit; background: transparent; font-family: inherit; border: none; outline: none; min-height: 400px;">${escapeHtml(currentContent)}</textarea>
+                <nui-input class="edit-input-full">
+                    <textarea class="edit-textarea min-h-400">${escapeHtml(currentContent)}</textarea>
                 </nui-input>
             </div>
         `;
