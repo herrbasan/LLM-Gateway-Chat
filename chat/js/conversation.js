@@ -69,7 +69,23 @@ export class Conversation {
     deleteExchange(id) {
         const index = this.exchanges.findIndex(e => e.id === id);
         if (index !== -1) {
+            imageStore.delete(id);
             this.exchanges.splice(index, 1);
+            this.save();
+        }
+    }
+
+    truncateAfter(id) {
+        const index = this.exchanges.findIndex(e => e.id === id);
+        if (index !== -1) {
+            // Delete images for orphaned downstream exchanges
+            for (let i = index + 1; i < this.exchanges.length; i++) {
+                imageStore.delete(this.exchanges[i].id);
+            }
+            // Splice array to remove exchanges *after* 'index' (dropping index+1 onward)
+            // Splice arguments: start, deleteCount. 
+            // Start at index + 1, delete until the end.
+            this.exchanges.splice(index + 1);
             this.save();
         }
     }

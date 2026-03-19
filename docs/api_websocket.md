@@ -1,4 +1,6 @@
-# LLM Gateway WebSocket API Documentation\n\n## WebSocket Real-Time API
+# LLM Gateway WebSocket API Documentation
+
+## WebSocket Real-Time API
 
 The WebSocket real-time mode provides a high-performance, bi-directional channel using JSON-RPC 2.0. It is designed for low-latency conversational agents and applications that need stream multiplexing, message interruption (cancellation), and binary audio streaming.
 
@@ -58,9 +60,12 @@ Initiates a new chat completion stream.
 
 ```json
 // Server -> Client
-{"jsonrpc": "2.0", "method": "chat.delta", "params": {"request_id": "req-1", "delta": {"content": "Hello! "}}}
-{"jsonrpc": "2.0", "method": "chat.done", "params": {"request_id": "req-1"}}
+{"jsonrpc": "2.0", "method": "chat.progress", "params": {"request_id": "req-1", "phase": "routing"}}
+{"jsonrpc": "2.0", "method": "chat.delta", "params": {"request_id": "req-1", "choices": [{"index": 0, "delta": {"content": "Hello! "}}]}}
+{"jsonrpc": "2.0", "method": "chat.done", "params": {"request_id": "req-1", "cancelled": false}}
 ```
+
+If `max_tokens` is omitted from `params`, the gateway resolves a safe output budget automatically and reports it in the `chat.progress` `context_stats` payload.
 
 #### `chat.append`
 Efficient incremental context update using a connection-scoped buffer. Appends only the new message to avoid sending massive context histories repeatedly.
@@ -86,6 +91,44 @@ Cancels an ongoing generation stream.
   "id": "cancel-1",
   "method": "chat.cancel",
   "params": {"request_id": "req-1"}
+}
+```
+
+The cancellation target is the original `chat.create` or `chat.append` request ID. On success, the server stops streaming, aborts the upstream provider request, and finishes with:
+
+```json
+{"jsonrpc": "2.0", "method": "chat.done", "params": {"request_id": "req-1", "cancelled": true, "telemetry": {"total_duration_ms": 1234}}}
+```
+
+There is no separate acknowledgement response for `chat.cancel`; `chat.done` with `cancelled: true` is the completion signal.
+
+### Stream Notifications
+
+During an active request, the server can emit these JSON-RPC notifications:
+
+- `chat.progress`: lifecycle and context updates such as `routing`, `model_routed`, `context`, `context_stats`, `network_throttled`, and `reasoning_started`
+- `chat.delta`: streamed token chunks in OpenAI-compatible `choices[].delta` shape
+- `chat.done`: terminal event with `cancelled: false` or `cancelled: true`
+- `chat.error`: terminal error event
+
+Example `context_stats` notification:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "chat.progress",
+  "params": {
+    "request_id": "req-1",
+    "phase": "context_stats",
+    "context": {
+      "window_size": 1048576,
+      "used_tokens": 2800,
+      "available_tokens": 1045776,
+      "strategy_applied": false,
+      "resolved_max_tokens": 835060,
+      "max_tokens_source": "implicit"
+    }
+  }
 }
 ```
 

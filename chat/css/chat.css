@@ -726,3 +726,18 @@ nui-app:not(.nui-ready) { display: none; }
 @media (max-width: 600px) {
     .app-title { font-size: 0.7rem; }
 }
+/* Dim edit/delete actions by default, highlight on message hover */
+.chat-message.user .edit-message,
+.chat-message.user .delete-message,
+.chat-message.assistant .edit-message,
+.chat-message.assistant .delete-message {
+    opacity: 0.3;
+    transition: opacity 0.2s ease;
+}
+
+.chat-message.user:hover .edit-message,
+.chat-message.user:hover .delete-message,
+.chat-message.assistant:hover .edit-message,
+.chat-message.assistant:hover .delete-message {
+    opacity: 1;
+}

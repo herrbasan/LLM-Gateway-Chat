@@ -140,6 +140,8 @@ X-Async: true
 
 Main chat completion endpoint. Supports both streaming and non-streaming responses.
 
+If `max_tokens` is omitted, the gateway derives a safe output budget from the configured model context window, the estimated prompt size, and an internal safety margin. The resolved value is returned in `context.resolved_max_tokens`.
+
 **Headers:**
 
 | Header | Description | Required |
@@ -190,10 +192,14 @@ Main chat completion endpoint. Supports both streaming and non-streaming respons
     "window_size": 1048576,
     "used_tokens": 2800,
     "available_tokens": 1045776,
-    "strategy_applied": true
+    "strategy_applied": true,
+    "resolved_max_tokens": 835060,
+    "max_tokens_source": "implicit"
   }
 }
 ```
+
+`max_tokens_source` is `explicit` when the caller supplied `max_tokens`, otherwise `implicit`.
 
 **Response 202 (With `X-Async: true`):**
 
@@ -224,6 +230,10 @@ curl http://localhost:3400/v1/chat/completions \
 ```
 data: {"id":"...","choices":[{"delta":{"content":"Hello"}}]}
 data: {"id":"...","choices":[{"delta":{"content":" world"}}]}
+
+event: context.status
+data: {"window_size":1048576,"used_tokens":2800,"available_tokens":1045776,"strategy_applied":false,"resolved_max_tokens":835060,"max_tokens_source":"implicit"}
+
 data: [DONE]
 ```
 
@@ -249,10 +259,16 @@ data: {"original_tokens":45000,"final_tokens":2800}
 
 data: {"id":"...","choices":[{"delta":{"content":"The"}}]}
 data: {"id":"...","choices":[{"delta":{"content":" answer"}}]}
+
+event: context.status
+data: {"window_size":1048576,"used_tokens":2800,"available_tokens":1045776,"strategy_applied":true,"resolved_max_tokens":835060,"max_tokens_source":"implicit"}
+
 data: [DONE]
 ```
 
 > Compaction progress events are non-standard SSE events (prefixed with `compaction.`). Standard OpenAI SDKs will ignore them, receiving only the `data:` token chunks. Clients that understand compaction events get progress visibility for free.
+
+If the HTTP client disconnects while a chat request is still in flight, the gateway aborts the upstream provider request for supported fetch-based chat adapters.
 
 **Streaming Error Handling:**
 ```

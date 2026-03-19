@@ -589,7 +589,18 @@ function renderExchange(exchange) {
     userEl.innerHTML = `
         <div class="message-header">You</div>
         <div class="message-content">${userContent}</div>
+        <div class="message-actions" style="display: flex; align-items: center; gap: 0.5rem; justify-content: flex-end;">
+            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
+            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
+        </div>
     `;
+
+    // Bind user message action buttons
+    userEl.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchange.id, 'user'));
+    userEl.querySelector('.delete-message')?.addEventListener('click', () => {
+        conversation.deleteExchange(exchange.id);
+        renderConversation();
+    });
 
     elements.messages?.appendChild(userEl);
 
@@ -639,14 +650,22 @@ function createAssistantElement(exchangeId) {
             <nui-button class="action-btn prev-version" title="Previous version"><button type="button"><nui-icon name="arrow" style="transform: rotate(180deg)"></nui-icon></button></nui-button>
             <span class="version-info" style="min-width: 3rem; text-align: center; color: var(--color-shade2); font-size: 0.75rem;"></span>
             <nui-button class="action-btn next-version" title="Next version"><button type="button"><nui-icon name="arrow"></nui-icon></button></nui-button>
+            <div style="flex-grow: 1;"></div>
+            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
+            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
         </div>
     `;
-    
+
     // Bind action buttons
     el.querySelector('.regenerate')?.addEventListener('click', () => regenerate(exchangeId));
     el.querySelector('.prev-version')?.addEventListener('click', () => switchVersion(exchangeId, 'prev'));
     el.querySelector('.next-version')?.addEventListener('click', () => switchVersion(exchangeId, 'next'));
-    
+    el.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchangeId, 'assistant'));
+    el.querySelector('.delete-message')?.addEventListener('click', () => {
+        conversation.deleteExchange(exchangeId);
+        renderConversation();
+    });
+
     return el;
 }
 
@@ -709,20 +728,24 @@ function updateOverallContext(contextData = null) {
 
         if (foundContext) {
             contextData = foundContext;
-        } else if (foundUsage) {
-            contextData = { used_tokens: foundUsage.total_tokens };
         } else {
             // Rough estimation fallback based on the data we have in the conversation text
             let textLength = 0;
             const msgs = conversation.getMessagesForApi();
             for (const m of msgs) {
+                let contentText = '';
                 if (typeof m.content === 'string') {
-                    textLength += m.content.length;
+                    contentText = m.content;
                 } else if (Array.isArray(m.content)) {
                     for (const block of m.content) {
-                        if (block.type === 'text') textLength += block.text.length;
+                        if (block.type === 'text') contentText += block.text;
                     }
                 }
+                
+                // Strip <think>...</think> blocks
+                contentText = contentText.replace(/<think>[\s\S]*?<\/think>/g, '');
+                
+                textLength += contentText.length;
                 textLength += m.role.length;
             }
             if (textLength > 0) {
@@ -921,19 +944,17 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
         }
     }
 
-    if (finalUsage || finalContext) {
-        // Build a display object
-        const displayData = {};
-        if (finalContext) {
-            displayData.used_tokens = finalContext.used_tokens;
-            displayData.window_size = finalContext.window_size;
-        } else if (finalUsage) {
-            displayData.used_tokens = finalUsage.total_tokens;
-        }
-        updateUsageDisplay(el, displayData);
+    if (finalContext) {
+        updateUsageDisplay(el, finalContext);
     } else if (exchange && exchange.assistant.content) {
-        // If we still lack explicit context stats, fallback to a heuristic estimation if it's rendered in history
-        const roughTokens = Math.ceil((exchange.user.content.length + exchange.assistant.content.length) / 4);
+        // If we lack explicit context stats, fallback to a heuristic estimation if it's rendered in history
+        const userContent = typeof exchange.user.content === 'string' ? exchange.user.content : '';
+        let assistantContent = typeof exchange.assistant.content === 'string' ? exchange.assistant.content : '';
+        
+        // Strip <think>...</think> blocks
+        assistantContent = assistantContent.replace(/<think>[\s\S]*?<\/think>/g, '');
+        
+        const roughTokens = Math.ceil((userContent.length + assistantContent.length) / 4);
         updateUsageDisplay(el, { used_tokens: roughTokens, isEstimate: true });
     }
 
@@ -1019,6 +1040,133 @@ function switchVersion(exchangeId, direction) {
             updateVersionControls(el, exchangeId);
             finalizeAssistantElement(el, exchangeId);
         }
+    }
+}
+
+async function startEditMode(exchangeId, role = 'user') {
+    if (isStreaming) return;
+
+    const exchange = conversation.getExchange(exchangeId);
+    if (!exchange) return;
+
+    const currentContent = role === 'user' ? exchange.user.content : exchange.assistant.content;
+
+    const parsed = parseThinking(currentContent);
+    const hasThinking = parsed.thinking !== null;
+
+    let contentHtml = '';
+
+    // Use NUI page dialog
+    if (hasThinking) {
+        contentHtml = `
+            <div style="display: flex; flex-direction: column; height: 100%; box-sizing: border-box; gap: 1rem;">
+                <p style="margin-top: 0; margin-bottom: 0; color: var(--text-color-dim); font-size: 0.875rem;">
+                    Editing this message will truncate all subsequent conversation history.
+                </p>
+                <div style="display: flex; flex-direction: column; flex-grow: 1; gap: 0.5rem; min-height: 200px;">
+                    <label style="font-size: 0.875rem; font-weight: 500; color: var(--text-color-dim); padding-left: 0.25rem;">Thoughts (Thinking Portion)</label>
+                    <nui-input style="width: 100%; flex-grow: 1; display: flex; flex-direction: column;">
+                        <textarea class="edit-textarea-thinking" style="width: 100%; flex-grow: 1; resize: none; padding: 1rem; color: inherit; background: transparent; font-family: inherit; border: none; outline: none;">${escapeHtml(parsed.thinking || '')}</textarea>
+                    </nui-input>
+                </div>
+                <div style="display: flex; flex-direction: column; flex-grow: 1; gap: 0.5rem; min-height: 200px;">
+                    <label style="font-size: 0.875rem; font-weight: 500; color: var(--text-color-dim); padding-left: 0.25rem;">Response (Answer Portion)</label>
+                    <nui-input style="width: 100%; flex-grow: 1; display: flex; flex-direction: column;">
+                        <textarea class="edit-textarea-answer" style="width: 100%; flex-grow: 1; resize: none; padding: 1rem; color: inherit; background: transparent; font-family: inherit; border: none; outline: none;">${escapeHtml(parsed.answer || '')}</textarea>
+                    </nui-input>
+                </div>
+            </div>
+        `;
+    } else {
+        contentHtml = `
+            <div style="display: flex; flex-direction: column; height: 100%; box-sizing: border-box;">
+                <p style="margin-top: 0; margin-bottom: 1rem; color: var(--text-color-dim); font-size: 0.875rem;">
+                    Editing this message will truncate all subsequent conversation history.
+                </p>
+                <nui-input style="width: 100%; flex-grow: 1; display: flex; flex-direction: column;">
+                    <textarea class="edit-textarea" style="width: 100%; flex-grow: 1; resize: none; padding: 1rem; color: inherit; background: transparent; font-family: inherit; border: none; outline: none; min-height: 400px;">${escapeHtml(currentContent)}</textarea>
+                </nui-input>
+            </div>
+        `;
+    }
+
+    const { dialog, main, result } = await nui.components.dialog.page('Edit Message', contentHtml, {
+        contentScroll: false, 
+        buttons: [
+            { label: 'Cancel', type: 'secondary', value: 'cancel' },
+            { label: role === 'user' ? 'Save & Resubmit' : 'Save', type: 'primary', value: 'save' }
+        ]
+    });
+
+    // Auto focus the appended textarea within the dialog
+    const focusArea = hasThinking ? main.querySelector('.edit-textarea-answer') : main.querySelector('textarea');
+    if (focusArea) {
+        // give dialog time to mount
+        setTimeout(() => focusArea.focus(), 100);
+    }
+
+    const action = await result;
+
+    if (action === 'save') {
+        let newContent = '';
+        if (hasThinking) {
+            const thinkingVal = main.querySelector('.edit-textarea-thinking')?.value.trim() || '';
+            const answerVal = main.querySelector('.edit-textarea-answer')?.value.trim() || '';
+            if (thinkingVal) {
+                newContent = `<think>\n${thinkingVal}\n</think>\n\n${answerVal}`.trim();
+            } else {
+                newContent = answerVal.trim();
+            }
+        } else {
+            newContent = main.querySelector('textarea')?.value.trim() || '';
+        }
+        
+        if (newContent && newContent !== currentContent) {
+            commitEdit(exchangeId, role, newContent);
+        }
+    }
+}
+
+function commitEdit(exchangeId, role, newContent) {
+    const exchange = conversation.getExchange(exchangeId);
+    if (!exchange) return;
+
+    if (role === 'user') {
+        // 1. Update content
+        exchange.user.content = newContent;
+        
+        // 2. Truncate conversation
+        conversation.truncateAfter(exchangeId);
+
+        // 3. Clear assistant response for this exchange so it doesn't flash on screen
+        conversation.regenerateResponse(exchangeId);
+
+        // 4. Render wipes downstream
+        renderConversation();
+
+        // 5. Stream new response
+        currentExchangeId = exchangeId;
+        streamResponse(exchangeId);
+    } else {
+        // 1. Update content for assistant
+        exchange.assistant.content = newContent;
+        
+        // Update the current version to match
+        if (exchange.assistant.versions && exchange.assistant.versions.length > 0) {
+            const currentVersionObj = exchange.assistant.versions[exchange.assistant.currentVersion] || exchange.assistant.versions[0];
+            if (currentVersionObj) {
+                currentVersionObj.content = newContent;
+            }
+        }
+        
+        // 2. Truncate conversation downstream
+        conversation.truncateAfter(exchangeId);
+        
+        // 3. Save manually since we aren't streaming
+        conversation.save();
+
+        // 4. Render wipes downstream
+        renderConversation();
     }
 }
 

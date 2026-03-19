@@ -263,7 +263,11 @@ export class GatewayClient extends EventEmitter {
 
     stream.on('progress', (data) => pushEvent({ type: 'progress', data }));
 
-    stream.on('done', (data) => pushEvent({ type: 'done', usage: data?.usage, context: data?.context }));
+    stream.on('done', (data) => pushEvent({ 
+      type: 'done', 
+      usage: data?.telemetry?.usage ?? data?.usage ?? null, 
+      context: data?.context ?? null 
+    }));
     
     stream.on('error', (err) => {
       if (!isAborted) pushEvent({ type: 'error', error: err.message || 'Stream error' });
@@ -302,8 +306,12 @@ export class GatewayClient extends EventEmitter {
         }
       });
       
-      stream.on('done', () => {
-        resolve({ content: fullContent });
+      stream.on('done', (data) => {
+        resolve({ 
+          content: fullContent,
+          usage: data?.telemetry?.usage ?? data?.usage ?? null,
+          context: data?.context ?? null
+        });
       });
       
       stream.on('error', (err) => {
