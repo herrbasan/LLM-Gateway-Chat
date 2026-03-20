@@ -16,6 +16,7 @@
     <!-- Chat Styles -->
     <link rel="stylesheet" href="css/chat.css">
     <link rel="stylesheet" href="../nui_wc2/NUI/css/modules/nui-lightbox.css">
+    <link rel="stylesheet" href="../nui_wc2/NUI/css/modules/nui-rich-text.css">
     
 </head>
 <body>
@@ -140,9 +141,7 @@
                     <!-- Input Area -->
                     <footer class="chat-input-area">
                         <div class="attachment-preview" id="attachment-preview"></div>
-                        <div class="input-row">                              <div id="overall-context-progress-wrap" class="context-progress-wrap"><nui-progress id="overall-context-progress" type="circular" value="0" size="28px" hide-text></nui-progress></div><nui-tooltip id="overall-context-tooltip" class="context-tooltip">Context Usage</nui-tooltip>                            <nui-textarea id="message-input" class="chat-input">
-                                <textarea rows="1" placeholder="Type a message... (Shift+Enter for new line)"></textarea>
-                            </nui-textarea>
+                        <div class="input-row">                              <div id="overall-context-progress-wrap" class="context-progress-wrap"><nui-progress id="overall-context-progress" type="circular" value="0" size="28px" hide-text></nui-progress></div><nui-tooltip id="overall-context-tooltip" class="context-tooltip">Context Usage</nui-tooltip>                            <nui-rich-text id="message-input" class="chat-input" no-toolbar placeholder="Type a message... (Shift+Enter for new line)"></nui-rich-text>
                             <nui-button id="attach-btn" class="icon-only" title="Attach Image">
                                 <button type="button"><nui-icon name="image"></nui-icon></button>
                             </nui-button>
@@ -167,6 +166,7 @@
     <script src="../shared/vendor/markdown-it-prism.js"></script>
     <script src="../nui_wc2/NUI/nui.js" type="module"></script>
     <script src="../nui_wc2/NUI/lib/modules/nui-lightbox.js" type="module"></script>
+    <script src="../nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
     <script src="js/chat.js" type="module"></script>
     <script>
         // NUI specific interactions for app shell

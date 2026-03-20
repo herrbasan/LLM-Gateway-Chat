@@ -349,12 +349,10 @@ function setupEventListeners() {
     elements.messageInput?.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
+            e.stopPropagation();
             sendMessage();
         }
-    });
-    
-    // Auto-resize textarea
-    elements.messageInput?.addEventListener('input', autoResizeTextarea);
+    }, true);
     
     // File attachment
     elements.attachBtn?.addEventListener('click', () => {
@@ -362,6 +360,33 @@ function setupEventListeners() {
     });
     elements.fileInput?.addEventListener('change', handleFileSelect);
     
+    // Image paste support
+    elements.messageInput?.addEventListener('paste', (e) => {
+        const files = Array.from(e.clipboardData?.files || []);
+        let hasImage = false;
+        
+        for (const file of files) {
+            if (!file.type.startsWith('image/')) continue;
+            hasImage = true;
+            
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                attachedImages.push({
+                    dataUrl: event.target.result,
+                    name: file.name || 'pasted-image.png',
+                    type: file.type
+                });
+                addAttachmentPreview(event.target.result, file.name || 'Pasted Image');
+            };
+            reader.readAsDataURL(file);
+        }
+        
+        // If pure image paste (e.g. from Snipping Tool), prevent default so editor doesn't add empty lines
+        if (hasImage && !e.clipboardData.types.includes('text/plain') && !e.clipboardData.types.includes('text/html')) {
+            e.preventDefault();
+        }
+    });
+
     // New chat
     elements.newChatBtn?.addEventListener('click', startNewChat);
     
@@ -389,13 +414,6 @@ function setupEventListeners() {
     });
 }
 
-function autoResizeTextarea() {
-    const textarea = elements.messageInput?.querySelector('textarea');
-    if (!textarea) return;
-    
-    textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-}
 
 // ============================================
 // Session Metadata
@@ -432,8 +450,8 @@ function getSystemPromptWithMetadata() {
 // ============================================
 
 async function sendMessage() {
-    const textarea = elements.messageInput?.querySelector('textarea');
-    const content = textarea?.value.trim();
+    const editor = elements.messageInput;
+    const content = editor?.getMarkdown().trim();
     
     if ((!content && attachedImages.length === 0) || isStreaming) return;
     if (!currentModel) {
@@ -457,8 +475,7 @@ async function sendMessage() {
     }
 
     // Clear input and attachments
-    textarea.value = '';
-    textarea.style.height = 'auto';
+    editor.setMarkdown('');
     clearAttachments();
     
     // Render user message
@@ -688,7 +705,7 @@ function renderExchange(exchange) {
     userEl.className = 'chat-message user';
     userEl.dataset.exchangeId = exchange.id;
 
-    let userContent = escapeHtml(userParsed.cleanContent);
+    let userContent = renderMarkdown(userParsed.cleanContent);
 
     // Add attachment previews
     if (exchange.user.attachments?.length > 0) {
@@ -779,6 +796,7 @@ function createAssistantElement(exchangeId, timestamp = '') {
             <span class="version-info"></span>
             <nui-button class="action-btn next-version" title="Next version"><button type="button"><nui-icon name="arrow"></nui-icon></button></nui-button>
             <div class="spacer"></div>
+            <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
             <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
             <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
         </div>
@@ -788,6 +806,7 @@ function createAssistantElement(exchangeId, timestamp = '') {
     el.querySelector('.regenerate')?.addEventListener('click', () => regenerate(exchangeId));
     el.querySelector('.prev-version')?.addEventListener('click', () => switchVersion(exchangeId, 'prev'));
     el.querySelector('.next-version')?.addEventListener('click', () => switchVersion(exchangeId, 'next'));
+    el.querySelector('.copy-message')?.addEventListener('click', (e) => copyMessageToClipboard(exchangeId, e.currentTarget));
     el.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchangeId, 'assistant'));
     el.querySelector('.delete-message')?.addEventListener('click', () => {
         conversation.deleteExchange(exchangeId);
@@ -1188,6 +1207,27 @@ function switchVersion(exchangeId, direction) {
     }
 }
 
+async function copyMessageToClipboard(exchangeId, btn) {
+    const exchange = conversation.getExchange(exchangeId);
+    if (!exchange) return;
+    
+    // Always use assistant, but can be generic if needed
+    const rawContent = exchange.assistant.content;
+    const currentContent = parseTimestamp(rawContent).cleanContent;
+    const parsed = parseThinking(currentContent);
+    const mdToCopy = parsed.answer || currentContent;
+    
+    try {
+        await navigator.clipboard.writeText(mdToCopy.trim());
+        const icon = btn.querySelector('nui-icon');
+        const oldIconName = icon.getAttribute('name');
+        icon.setAttribute('name', 'check');
+        setTimeout(() => icon.setAttribute('name', oldIconName), 2000);
+    } catch (err) {
+        console.error('Failed to copy text: ', err);
+    }
+}
+
 async function startEditMode(exchangeId, role = 'user') {
     if (isStreaming) return;
 
@@ -1198,43 +1238,14 @@ async function startEditMode(exchangeId, role = 'user') {
     const currentContent = parseTimestamp(rawContent).cleanContent;
 
     const parsed = parseThinking(currentContent);
-    const hasThinking = parsed.thinking !== null;
+    // Even if it has thinking, we only edit the final parsed answer
+    const editableContent = parsed.answer || currentContent;
 
-    let contentHtml = '';
-
-    // Use NUI page dialog
-    if (hasThinking) {
-        contentHtml = `
-            <div class="edit-dialog-container gap-lg">
-                <p class="edit-dialog-text mb-0">
-                    Editing this message will truncate all subsequent conversation history.
-                </p>
-                <div class="edit-section">
-                    <label class="edit-label">Thoughts (Thinking Portion)</label>
-                    <nui-input class="edit-input-full">
-                        <textarea class="edit-textarea edit-textarea-thinking">${escapeHtml(parsed.thinking || '')}</textarea>
-                    </nui-input>
-                </div>
-                <div class="edit-section">
-                    <label class="edit-label">Response (Answer Portion)</label>
-                    <nui-input class="edit-input-full">
-                        <textarea class="edit-textarea edit-textarea-answer">${escapeHtml(parsed.answer || '')}</textarea>
-                    </nui-input>
-                </div>
-            </div>
-        `;
-    } else {
-        contentHtml = `
-            <div class="edit-dialog-container">
-                <p class="edit-dialog-text mb-1">
-                    Editing this message will truncate all subsequent conversation history.
-                </p>
-                <nui-input class="edit-input-full">
-                    <textarea class="edit-textarea min-h-400">${escapeHtml(currentContent)}</textarea>
-                </nui-input>
-            </div>
-        `;
-    }
+    const contentHtml = `
+        <div class="edit-dialog-container">
+            <nui-rich-text class="edit-textarea"></nui-rich-text>
+        </div>
+    `;
 
     const { dialog, main, result } = await nui.components.dialog.page('Edit Message', contentHtml, {
         contentScroll: false, 
@@ -1244,29 +1255,37 @@ async function startEditMode(exchangeId, role = 'user') {
         ]
     });
 
+    // Initialize content using standard NUI method on connected nodes
+    const applyContent = () => {
+        const tb = main.querySelector('nui-rich-text');
+        if(tb && tb.setMarkdown) tb.setMarkdown(editableContent);
+    };
+    
     // Auto focus the appended textarea within the dialog
-    const focusArea = hasThinking ? main.querySelector('.edit-textarea-answer') : main.querySelector('textarea');
+    const focusArea = main.querySelector('nui-rich-text');
     if (focusArea) {
         // give dialog time to mount
-        setTimeout(() => focusArea.focus(), 100);
+        setTimeout(() => {
+            applyContent();
+            // NuiRichText inner editor focus
+            const editor = focusArea.querySelector('.nui-rich-text-editor');
+            if (editor) editor.focus();
+        }, 100);
     }
 
     const action = await result;
 
     if (action === 'save') {
-        let newContent = '';
-        if (hasThinking) {
-            const thinkingVal = main.querySelector('.edit-textarea-thinking')?.value.trim() || '';
-            const answerVal = main.querySelector('.edit-textarea-answer')?.value.trim() || '';
-            if (thinkingVal) {
-                newContent = `<think>\n${thinkingVal}\n</think>\n\n${answerVal}`.trim();
-            } else {
-                newContent = answerVal.trim();
-            }
-        } else {
-            newContent = main.querySelector('textarea')?.value.trim() || '';
-        }
+        let newContent = main.querySelector('nui-rich-text')?.getMarkdown().trim() || '';
         
+        // Ensure if there was original thinking we retain it unedited in the saved state, 
+        // to not alter the local rendering of the history if they don't want to change the thinking.
+        // Wait, the user said "Therefore the edit window should only edit the message, not the thinking portion." 
+        // This implies we simply prepend the old thinking block if it existed before saving.
+        if (parsed.thinking) {
+            newContent = `<think>\n${parsed.thinking}\n</think>\n\n${newContent}`.trim();
+        }
+
         if (newContent && newContent !== currentContent) {
             commitEdit(exchangeId, role, newContent);
         }

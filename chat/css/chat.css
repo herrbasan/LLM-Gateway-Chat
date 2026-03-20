@@ -220,8 +220,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 }
 
 .chat-message.user .message-content {
-    background: var(--color-highlight);
-    color: #fff;
+    background-color: light-dark(var(--color-shade2), var(--color-shade3));
 }
 
 .chat-message.user .message-content p {
@@ -455,27 +454,25 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     min-width: 0;
 }
 
-.chat-input textarea {
+.chat-input .nui-rich-text-container {
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+    background: transparent;
+}
+
+.chat-input .nui-rich-text-editor {
     width: 100%;
     min-height: 44px;
     max-height: 200px;
-    resize: none;
-    overflow: hidden;
     padding: 0.75rem 1rem;
-    border: 1px solid var(--border-shade2);
     border-radius: 0.2rem;
     background: var(--color-base);
     color: var(--text-color);
     font-size: 0.875rem;
     font-family: inherit;
     box-sizing: border-box;
-    margin-top: 0.5rem;
-    margin-bottom: 0.5rem;
-}
-
-.chat-input textarea:focus {
-    outline: none;
-    border-color: var(--color-highlight);
+    overflow-y: auto;
+    text-align: left;
 }
 
 /* Message Attachments */
@@ -767,7 +764,7 @@ nui-app:not(.nui-ready) { display: none; }
     .chat-input-area .input-row .context-progress-wrap{
         display: none;
     }
-    .chat-input-area .input-row textarea {
+    .chat-input-area .input-row .nui-rich-text-container {
         margin: 0;
     }
 }
@@ -775,6 +772,7 @@ nui-app:not(.nui-ready) { display: none; }
 /* Dim edit/delete actions by default, highlight on message hover */
 .chat-message.user .edit-message,
 .chat-message.user .delete-message,
+.chat-message.assistant .copy-message,
 .chat-message.assistant .edit-message,
 .chat-message.assistant .delete-message {
     opacity: 0.3;
@@ -783,6 +781,7 @@ nui-app:not(.nui-ready) { display: none; }
 
 .chat-message.user:hover .edit-message,
 .chat-message.user:hover .delete-message,
+.chat-message.assistant:hover .copy-message,
 .chat-message.assistant:hover .edit-message,
 .chat-message.assistant:hover .delete-message {
     opacity: 1;
@@ -862,7 +861,8 @@ nui-app:not(.nui-ready) { display: none; }
 .edit-dialog-container {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     box-sizing: border-box;
 }
 
@@ -908,16 +908,28 @@ nui-app:not(.nui-ready) { display: none; }
 
 .edit-textarea {
     width: 100%;
-    flex-grow: 1;
-    resize: none;
-    padding: 1rem;
-    color: inherit;
-    background: transparent;
-    font-family: inherit;
-    border: none;
-    outline: none;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
 }
 
-.edit-textarea.min-h-400 {
-    min-height: 400px;
+nui-rich-text.edit-textarea .nui-rich-text-container {
+    flex: 1;
+    min-height: 0;
+}
+
+nui-rich-text.edit-textarea .nui-rich-text-container:has(.nui-rich-text-editor:focus) {
+    filter: none;
+    border-color: var(--border-shade1, rgba(0,0,0,0.1));
+    background-color: var(--color-shade2);
+}
+
+nui-rich-text.edit-textarea .nui-rich-text-editor {
+    flex: 1;
+    min-height: 200px;
+    max-height: none;
+    height: 100%;
+    overflow-y: auto;
+    text-align: left;
 }

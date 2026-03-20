@@ -289,8 +289,11 @@ export class Conversation {
             
             // Assistant message (only if complete)
             if (exchange.assistant.isComplete && exchange.assistant.content) {
-                // Clean assistant content (remove duplicate timestamps)
-                const cleanAssistantContent = this._stripExtraTimestamps(exchange.assistant.content);
+                // Clean assistant content (remove duplicate timestamps and thinking portions)
+                const cleanAssistantContent = this._stripExtraTimestamps(exchange.assistant.content)
+                    .replace(/<think>[\s\S]*?<\/think>/g, '')
+                    .trim();
+                    
                 messages.push({
                     role: 'assistant',
                     content: cleanAssistantContent
