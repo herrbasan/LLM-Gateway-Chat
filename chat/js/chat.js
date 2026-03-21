@@ -884,17 +884,17 @@ function updateUsageDisplay(el, contextData) {
 
     if (contextData.used_tokens !== undefined) {
         displaySpan.style.display = 'inline-block';
-        
+
         // Compact token formatting (e.g., 36139 -> "36K")
         function formatTokensCompact(n) {
             if (n >= 1000000) return Math.round(n / 100000) / 10 + 'M';
             if (n >= 1000) return Math.round(n / 100) / 10 + 'K';
             return n.toString();
         }
-        
+
         const isEstimate = contextData.isEstimate;
         let text = `${isEstimate ? '~' : ''}${formatTokensCompact(contextData.used_tokens)}`;
-        
+
         let windowSize = contextData.window_size;
         if (!windowSize) {
             const modelConfig = models.find(m => m.id === currentModel);
@@ -907,8 +907,12 @@ function updateUsageDisplay(el, contextData) {
             text += ` / ${formatTokensCompact(windowSize)}`;
         }
         text += ' Tokens';
-        valueSpan.textContent = text;
-        
+
+        // Only update if value changed - prevents tooltip flicker
+        if (valueSpan.textContent !== text) {
+            valueSpan.textContent = text;
+        }
+
         // Add full context info as tooltip for debugging
         let debugText = [];
         for (const [key, val] of Object.entries(contextData)) {
@@ -916,7 +920,10 @@ function updateUsageDisplay(el, contextData) {
                 debugText.push(`${key}: ${val}`);
             }
         }
-        displaySpan.title = debugText.length > 0 ? debugText.join('\n') : '';
+        const newTitle = debugText.length > 0 ? debugText.join('\n') : '';
+        if (displaySpan.title !== newTitle) {
+            displaySpan.title = newTitle;
+        }
 
         updateOverallContext(contextData);
     }
@@ -1039,7 +1046,7 @@ function updateOverallContext(contextData = null) {
 function updateAssistantContent(el, content) {
     const contentDiv = el.querySelector('.message-content');
     if (!contentDiv) return;
-    
+
     // Strip the injected timestamp from visible content (shown in header)
     // We know the exact format: [YYYY-MM-DD@HH:MM] with optional space
     if (el.dataset.timestampLen && content.startsWith('[')) {
@@ -1057,11 +1064,11 @@ function updateAssistantContent(el, content) {
         const tsParsed = parseTimestamp(content);
         content = tsParsed.cleanContent;
     }
-    
+
     // Skip if content hasn't changed (prevents redundant renders during streaming)
     if (contentDiv.dataset.lastContent === content) return;
     contentDiv.dataset.lastContent = content;
-    
+
     // Check if thinking-content is currently scrolled to bottom to maintain it
     let thinkingScrollTop = 0;
     let thinkingWasAtBottom = true;
@@ -1071,43 +1078,79 @@ function updateAssistantContent(el, content) {
         const tolerance = 10;
         thinkingWasAtBottom = Math.abs(oldThinkingContent.scrollHeight - oldThinkingContent.scrollTop - oldThinkingContent.clientHeight) <= tolerance;
     }
-    
+
     // Parse thinking and answer
     const parsed = parseThinking(content);
-    
-    let html = '';
-    
-    // Render thinking block if exists
+
+    // INCREMENTAL DOM UPDATE PATTERN:
+    // Only create elements once, then update in place
+
+    // === THINKING BLOCK ===
+    const thinkingId = 'thinking-' + el.dataset.exchangeId;
+    let thinkingBlock = contentDiv.querySelector('.thinking-block');
+
     if (parsed.thinking !== null) {
-        const existingBlock = contentDiv.querySelector('.thinking-block');
-        const isCollapsed = existingBlock ? existingBlock.classList.contains('collapsed') : true;
-        let thinkingClass = isCollapsed ? 'collapsed' : '';
-        if (parsed.isStreaming) thinkingClass += ' streaming';
-        
-        const thinkingId = 'thinking-' + el.dataset.exchangeId;
-        
-        html += `
-            <div class="thinking-block ${thinkingClass}" id="${thinkingId}">
+        if (!thinkingBlock) {
+            // Create thinking block once - it doesn't exist yet
+            thinkingBlock = document.createElement('div');
+            thinkingBlock.className = 'thinking-block collapsed';
+            thinkingBlock.id = thinkingId;
+            thinkingBlock.innerHTML = `
                 <div class="thinking-header" onclick="toggleThinking('${thinkingId}')">
                     <nui-icon name="lightbulb_2" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><use href="/nui_wc2/NUI/assets/material-icons-sprite.svg#image"></use></svg></nui-icon>
-                    <span class="thinking-title">${parsed.isStreaming ? 'Thinking...' : 'Thoughts'}</span>
+                    <span class="thinking-title">Thoughts</span>
                     <span class="thinking-toggle">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="6 9 12 15 18 9"></polyline>
                         </svg>
                     </span>
                 </div>
-                <div class="thinking-content">${escapeHtml(parsed.thinking)}</div>
-            </div>
-        `;
+                <div class="thinking-content"></div>
+            `;
+            contentDiv.appendChild(thinkingBlock);
+        }
+
+        // Update existing thinking block state and content
+        // Always stay collapsed by default - user manually expands if they want to see it
+        if (parsed.isStreaming) {
+            thinkingBlock.classList.add('streaming');
+            const titleEl = thinkingBlock.querySelector('.thinking-title');
+            if (titleEl) titleEl.textContent = 'Thinking...';
+        } else {
+            thinkingBlock.classList.remove('streaming');
+            const titleEl = thinkingBlock.querySelector('.thinking-title');
+            if (titleEl) titleEl.textContent = 'Thoughts';
+        }
+
+        // Update thinking content text - only this changes during streaming
+        const thinkingContent = thinkingBlock.querySelector('.thinking-content');
+        if (thinkingContent) {
+            thinkingContent.textContent = parsed.thinking;
+        }
+    } else if (thinkingBlock) {
+        // No thinking but element exists - could remove it, or leave for now
+        // Keeping it preserves collapsed state if user interacted with it
     }
-    
-    // Render answer with markdown
+
+    // === ANSWER BLOCK ===
+    // Track answer container for incremental updates
+    let answerContainer = contentDiv.querySelector('.answer-container');
+
     if (parsed.answer) {
-        html += renderMarkdown(parsed.answer);
+        if (!answerContainer) {
+            // Create answer container once
+            answerContainer = document.createElement('div');
+            answerContainer.className = 'answer-container';
+            contentDiv.appendChild(answerContainer);
+        }
+
+        // Only re-render markdown if answer content changed
+        const newHtml = renderMarkdown(parsed.answer);
+        if (answerContainer.dataset.lastHtml !== newHtml) {
+            answerContainer.innerHTML = newHtml;
+            answerContainer.dataset.lastHtml = newHtml;
+        }
     }
-    
-    contentDiv.innerHTML = html;
 
     // Restore thinking-content scroll position
     const newThinkingContent = contentDiv.querySelector('.thinking-content');
@@ -1124,6 +1167,7 @@ window.toggleThinking = function(id) {
     const el = document.getElementById(id);
     if (el) {
         el.classList.toggle('collapsed');
+        el.dataset.userToggled = 'true';  // Track that user manually toggled
     }
 };
 
@@ -1303,7 +1347,8 @@ async function copyMessageToClipboard(exchangeId, btn) {
 }
 
 async function startEditMode(exchangeId, role = 'user') {
-    if (isStreaming) return;
+    // Block editing only if this specific exchange is currently streaming
+    if (isStreaming && currentExchangeId === exchangeId) return;
 
     const exchange = conversation.getExchange(exchangeId);
     if (!exchange) return;
