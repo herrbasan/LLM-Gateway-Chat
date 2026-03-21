@@ -845,7 +845,7 @@ function createAssistantElement(exchangeId, timestamp = '') {
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
             <span class="context-usage-display">
-                Context: <span class="usage-values">--</span>
+                <span class="usage-values">--</span>
             </span>
         </div>
         <div class="progress-status"></div>
@@ -884,8 +884,16 @@ function updateUsageDisplay(el, contextData) {
 
     if (contextData.used_tokens !== undefined) {
         displaySpan.style.display = 'inline-block';
+        
+        // Compact token formatting (e.g., 36139 -> "36K")
+        function formatTokensCompact(n) {
+            if (n >= 1000000) return Math.round(n / 100000) / 10 + 'M';
+            if (n >= 1000) return Math.round(n / 100) / 10 + 'K';
+            return n.toString();
+        }
+        
         const isEstimate = contextData.isEstimate;
-        let text = `${isEstimate ? '~' : ''}${contextData.used_tokens.toLocaleString()}`;
+        let text = `${isEstimate ? '~' : ''}${formatTokensCompact(contextData.used_tokens)}`;
         
         let windowSize = contextData.window_size;
         if (!windowSize) {
@@ -896,9 +904,9 @@ function updateUsageDisplay(el, contextData) {
         }
 
         if (windowSize) {
-            text += ` / ${windowSize.toLocaleString()}`;
+            text += ` / ${formatTokensCompact(windowSize)}`;
         }
-        text += ' tokens';
+        text += ' Tokens';
         valueSpan.textContent = text;
         
         // Add full context info as tooltip for debugging
@@ -967,23 +975,30 @@ function updateOverallContext(contextData = null) {
     const usedTokens = (contextData && contextData.used_tokens) ? contextData.used_tokens : 0;
     const isEstimate = contextData && contextData.isEstimate;
     
-    let text = `Context: ${isEstimate ? '~' : ''}${usedTokens.toLocaleString()} tokens`;
+    // Compact token formatting (e.g., 36139 -> "36K")
+    function formatTokensCompact(n) {
+        if (n >= 1000000) return Math.round(n / 100000) / 10 + 'M';
+        if (n >= 1000) return Math.round(n / 100) / 10 + 'K';
+        return n.toString();
+    }
+    
+    let text = `${isEstimate ? '~' : ''}${formatTokensCompact(usedTokens)}`;
     let pct = 0;
     let knownLimit = false;
 
     const modelConfig = models.find(m => m.id === currentModel);
 
     if (modelConfig && modelConfig.capabilities?.contextWindow) {
-        text += ` / ${modelConfig.capabilities.contextWindow.toLocaleString()}`;
+        text += ` / ${formatTokensCompact(modelConfig.capabilities.contextWindow)} Tokens`;
         pct = Math.min(100, Math.max(0, (usedTokens / modelConfig.capabilities.contextWindow) * 100));
         knownLimit = true;
     } else if (contextData && contextData.window_size) {
         // Fallback to backend reported window size if model list lacks it
-        text += ` / ${contextData.window_size.toLocaleString()}`;
+        text += ` / ${formatTokensCompact(contextData.window_size)} Tokens`;
         pct = Math.min(100, Math.max(0, (usedTokens / contextData.window_size) * 100));
         knownLimit = true;
     } else {
-        text += ` / Unknown`;
+        text += ` / ? Tokens`;
     }
 
     if (elements.overallContextProgressWrap) {
@@ -1005,7 +1020,6 @@ function updateOverallContext(contextData = null) {
         if (!knownLimit || !currentModel) {
             elements.overallContextProgress.style.opacity = '0.3';
             elements.overallContextProgress.removeAttribute('variant');
-            if (!knownLimit) text += " (Max size unknown)";
         } else {
             elements.overallContextProgress.style.opacity = '1';
             // Change variant to warning/orange if context is full
