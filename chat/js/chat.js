@@ -1402,33 +1402,39 @@ async function switchChat(chatId) {
 
 async function deleteChat(chatId, e) {
     e.stopPropagation(); // prevent row click
-    if (await nui.components.dialog.confirm('Delete Chat', 'Are you sure you want to delete this chat?')) {
-        // Delete images from IndexedDB for this chat
-        const chatData = localStorage.getItem(`chat-conversation-${chatId}`);
-        if (chatData) {
-            try {
-                const exchanges = JSON.parse(chatData);
-                for (const ex of exchanges) {
-                    await imageStore.delete(ex.id);
-                }
-            } catch (err) {
-                console.warn('[Chat] Failed to delete images for chat', chatId, err);
+    
+    // Skip confirmation on shift-click
+    const skipConfirm = e.shiftKey;
+    
+    if (!skipConfirm && !await nui.components.dialog.confirm('Delete Chat', 'Are you sure you want to delete this chat?')) {
+        return;
+    }
+    
+    // Delete images from IndexedDB for this chat
+    const chatData = localStorage.getItem(`chat-conversation-${chatId}`);
+    if (chatData) {
+        try {
+            const exchanges = JSON.parse(chatData);
+            for (const ex of exchanges) {
+                await imageStore.delete(ex.id);
             }
+        } catch (err) {
+            console.warn('[Chat] Failed to delete images for chat', chatId, err);
         }
-        
-        chatHistory = chatHistory.filter(c => c.id !== chatId);
-        localStorage.removeItem(`chat-conversation-${chatId}`);
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
-        
-        if (currentChatId === chatId) {
-            if (chatHistory.length > 0) {
-                await switchChat(chatHistory[0].id);
-            } else {
-                startNewChat();
-            }
+    }
+    
+    chatHistory = chatHistory.filter(c => c.id !== chatId);
+    localStorage.removeItem(`chat-conversation-${chatId}`);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
+    
+    if (currentChatId === chatId) {
+        if (chatHistory.length > 0) {
+            await switchChat(chatHistory[0].id);
         } else {
-            renderHistoryList();
+            startNewChat();
         }
+    } else {
+        renderHistoryList();
     }
 }
 
@@ -1717,7 +1723,7 @@ function renderHistoryList() {
         delBtn.setAttribute('variant', 'danger');
         delBtn.className = 'chat-history-item-action chat-history-item-delete';
         delBtn.innerHTML = '<button type="button"><nui-icon name="close"></nui-icon></button>';
-        delBtn.title = 'Delete chat';
+        delBtn.title = 'Delete chat (Shift+click to skip confirm)';
         delBtn.addEventListener('click', (e) => deleteChat(chat.id, e));
         
         actionsDiv.appendChild(exportJsonBtn);
