@@ -388,6 +388,58 @@ function setupEventListeners() {
             e.preventDefault();
         }
     });
+    
+    // Ctrl+Alt+V: Paste as code block
+    elements.messageInput?.addEventListener('keydown', async (e) => {
+        if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'v') {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            try {
+                const text = await navigator.clipboard.readText();
+                if (text) {
+                    const editor = elements.messageInput;
+                    const editorEl = editor.querySelector('.nui-rich-text-editor');
+                    if (editorEl) editorEl.focus();
+                    
+                    // Create nui-code element programmatically
+                    const codeBlock = document.createElement('nui-code');
+                    const pre = document.createElement('pre');
+                    const code = document.createElement('code');
+                    code.textContent = text; // Use textContent to preserve raw text
+                    pre.appendChild(code);
+                    codeBlock.appendChild(pre);
+                    
+                    // Insert at cursor position
+                    const selection = window.getSelection();
+                    if (selection.rangeCount > 0) {
+                        const range = selection.getRangeAt(0);
+                        range.deleteContents();
+                        range.insertNode(codeBlock);
+                        
+                        // Add line break after
+                        const br = document.createElement('div');
+                        br.innerHTML = '<br>';
+                        codeBlock.after(br);
+                        
+                        // Move cursor after
+                        range.setStartAfter(br);
+                        range.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    } else {
+                        editorEl.appendChild(codeBlock);
+                    }
+                    
+                    // Trigger NUI component upgrade for syntax highlighting
+                    editor._forceComponentUpgrade?.();
+                }
+            } catch (err) {
+                console.error('Failed to paste as code block:', err);
+                nui.components.dialog.alert('Paste Error', 'Could not access clipboard. Make sure you have clipboard permissions.');
+            }
+        }
+    });
 
     // New chat
     elements.newChatBtn?.addEventListener('click', startNewChat);
