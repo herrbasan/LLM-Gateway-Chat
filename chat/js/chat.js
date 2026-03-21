@@ -1166,8 +1166,17 @@ function updateAssistantContent(el, content) {
 window.toggleThinking = function(id) {
     const el = document.getElementById(id);
     if (el) {
+        const isCollapsing = !el.classList.contains('collapsed');
         el.classList.toggle('collapsed');
         el.dataset.userToggled = 'true';  // Track that user manually toggled
+
+        // When collapsing, scroll to bottom first so most recent thinking shows
+        if (isCollapsing) {
+            const content = el.querySelector('.thinking-content');
+            if (content) {
+                content.scrollTop = content.scrollHeight;
+            }
+        }
     }
 };
 
