@@ -68,6 +68,8 @@ const elements = {
     sendBtn: document.getElementById('send-btn'),
     attachBtn: document.getElementById('attach-btn'),
     fileInput: document.getElementById('file-input'),
+    importChatInput: document.getElementById('import-chat-input'),
+    importChatBtn: document.getElementById('import-chat-btn'),
     attachmentPreview: document.getElementById('attachment-preview'),
     newChatBtn: document.getElementById('new-chat-btn'),
     chatHistoryList: document.getElementById('chat-history-list'),
@@ -389,6 +391,12 @@ function setupEventListeners() {
 
     // New chat
     elements.newChatBtn?.addEventListener('click', startNewChat);
+    
+    // Import chat
+    elements.importChatBtn?.addEventListener('click', () => {
+        elements.importChatInput?.click();
+    });
+    elements.importChatInput?.addEventListener('change', handleChatImport);
     
     // Theme toggle
     elements.themeToggle?.addEventListener('click', toggleTheme);
@@ -1425,12 +1433,26 @@ async function deleteChat(chatId, e) {
 }
 
 function exportChatAsJson(chatId, btn) {
+    // Export for debugging - excludes images, just metadata
     const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
     if (!chatDataString) return;
     
-    // Format JSON with 2 spaces for readability
     try {
-        const formattedJson = JSON.stringify(JSON.parse(chatDataString), null, 2);
+        const exchanges = JSON.parse(chatDataString);
+        // Create debug version without any image data
+        const debugExchanges = exchanges.map(ex => ({
+            ...ex,
+            user: {
+                ...ex.user,
+                attachments: ex.user.attachments?.map(att => ({
+                    name: att.name,
+                    type: att.type,
+                    hasImage: att.hasImage
+                    // Intentionally omit dataUrl/blobUrl
+                })) || []
+            }
+        }));
+        const formattedJson = JSON.stringify(debugExchanges, null, 2);
         navigator.clipboard.writeText(formattedJson).then(() => {
             if (btn) {
                 const originalHtml = btn.innerHTML;
@@ -1444,6 +1466,139 @@ function exportChatAsJson(chatId, btn) {
         });
     } catch (e) {
         console.error('Failed to parse chat data', e);
+    }
+}
+
+async function exportChatToFile(chatId) {
+    // Full export including images - for backup/restore
+    const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
+    if (!chatDataString) return;
+    
+    try {
+        const exchanges = JSON.parse(chatDataString);
+        const exportData = {
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            chatId: chatId,
+            chatInfo: chatHistory.find(c => c.id === chatId) || null,
+            exchanges: []
+        };
+        
+        // Load images for each exchange
+        for (const ex of exchanges) {
+            const exportExchange = { ...ex };
+            
+            if (ex.user.attachments?.some(att => att.hasImage)) {
+                const images = await imageStore.load(ex.id);
+                exportExchange.user = {
+                    ...ex.user,
+                    attachments: ex.user.attachments.map((att, idx) => {
+                        const img = images[idx];
+                        if (img) {
+                            return {
+                                ...att,
+                                dataUrl: img.getDataUrl() // Embed full image data
+                            };
+                        }
+                        return att;
+                    })
+                };
+            }
+            exportData.exchanges.push(exportExchange);
+        }
+        
+        // Download as file
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const chatInfo = exportData.chatInfo;
+        const title = chatInfo?.title ? chatInfo.title.replace(/[^a-z0-9]/gi, '_').toLowerCase() : 'chat';
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `chat_export_${title}_${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        
+    } catch (e) {
+        console.error('Failed to export chat to file', e);
+        nui.components.dialog.alert('Export Failed', 'Could not export chat session.');
+    }
+}
+
+async function handleChatImport(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    // Reset input so same file can be selected again
+    e.target.value = '';
+    
+    try {
+        const text = await file.text();
+        const importData = JSON.parse(text);
+        
+        // Validate format
+        if (!importData.exchanges || !Array.isArray(importData.exchanges)) {
+            throw new Error('Invalid format: missing exchanges array');
+        }
+        
+        // Create new chat ID
+        const newChatId = 'ex_' + Date.now();
+        const title = importData.chatInfo?.title || 'Imported Chat';
+        
+        // Add to history
+        chatHistory.unshift({
+            id: newChatId,
+            title: title,
+            timestamp: Date.now(),
+            model: importData.chatInfo?.model || ''
+        });
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
+        
+        // Process exchanges - save images to IndexedDB
+        const processedExchanges = [];
+        for (const ex of importData.exchanges) {
+            const processedEx = { ...ex };
+            
+            // Strip dataUrl from attachments for storage, save to IndexedDB
+            if (ex.user.attachments?.some(att => att.dataUrl)) {
+                const attachmentsForDb = ex.user.attachments
+                    .filter(att => att.dataUrl)
+                    .map(att => ({
+                        dataUrl: att.dataUrl,
+                        name: att.name,
+                        type: att.type
+                    }));
+                
+                if (attachmentsForDb.length > 0) {
+                    await imageStore.save(ex.id, attachmentsForDb);
+                }
+                
+                // Store metadata only in exchange
+                processedEx.user = {
+                    ...ex.user,
+                    attachments: ex.user.attachments.map(att => ({
+                        name: att.name,
+                        type: att.type,
+                        hasImage: att.hasImage || !!att.dataUrl
+                        // dataUrl is intentionally omitted - stored in IndexedDB
+                    }))
+                };
+            }
+            processedExchanges.push(processedEx);
+        }
+        
+        // Save conversation
+        localStorage.setItem(`chat-conversation-${newChatId}`, JSON.stringify(processedExchanges));
+        
+        // Switch to imported chat
+        renderHistoryList();
+        await switchChat(newChatId);
+        
+        nui.components.toast?.success?.('Chat imported successfully');
+        
+    } catch (err) {
+        console.error('Failed to import chat', err);
+        nui.components.dialog.alert('Import Failed', `Could not import chat: ${err.message}`);
     }
 }
 
@@ -1534,10 +1689,19 @@ function renderHistoryList() {
         const exportJsonBtn = document.createElement('nui-button');
         exportJsonBtn.className = 'chat-history-item-action';
         exportJsonBtn.innerHTML = '<button type="button"><nui-icon name="content_copy"></nui-icon></button>';
-        exportJsonBtn.title = 'Copy JSON to clipboard';
+        exportJsonBtn.title = 'Copy JSON to clipboard (debug, no images)';
         exportJsonBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             exportChatAsJson(chat.id, exportJsonBtn);
+        });
+
+        const exportFullBtn = document.createElement('nui-button');
+        exportFullBtn.className = 'chat-history-item-action';
+        exportFullBtn.innerHTML = '<button type="button"><nui-icon name="download"></nui-icon></button>';
+        exportFullBtn.title = 'Export to file (with images)';
+        exportFullBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            exportChatToFile(chat.id);
         });
 
         const exportMdBtn = document.createElement('nui-button');
@@ -1557,6 +1721,7 @@ function renderHistoryList() {
         delBtn.addEventListener('click', (e) => deleteChat(chat.id, e));
         
         actionsDiv.appendChild(exportJsonBtn);
+        actionsDiv.appendChild(exportFullBtn);
         actionsDiv.appendChild(exportMdBtn);
         actionsDiv.appendChild(delBtn);
 

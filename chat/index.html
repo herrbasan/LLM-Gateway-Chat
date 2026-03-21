@@ -56,6 +56,9 @@
                     <nui-button id="new-chat-btn" variant="primary">
                         <button type="button"><nui-icon name="add"></nui-icon> New Chat</button>
                     </nui-button>
+                    <nui-button id="import-chat-btn" title="Import Chat">
+                        <button type="button"><nui-icon name="upload"></nui-icon></button>
+                    </nui-button>
                 </div>
 
                 <h3>History</h3>
@@ -150,6 +153,7 @@
                             </nui-button>
                         </div>
                         <input type="file" id="file-input" accept="image/*" multiple hidden>
+                        <input type="file" id="import-chat-input" accept=".json" hidden>
                     </footer>
                 </div>
             </nui-main>
