@@ -2368,47 +2368,41 @@ function renderMCPServers() {
         if (server.status === 'connected') statusColor = 'green';
         if (server.status === 'error') statusColor = 'red';
 
+        const isConnected = server.status === 'connected';
+
         let html = `
             <div style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
-                <div>
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem;">
-                        <h3 style="margin: 0; font-size: 1.1rem; color: var(--nui-fg); word-break: break-word;">${server.name}</h3>
-                        <span style="font-size: 0.8rem; color: ${statusColor}; white-space: nowrap; display: flex; align-items: center; gap: 0.25rem;">
-                            <span style="font-size: 0.5rem;">⬤</span> ${server.status}
-                        </span>
-                    </div>
-                    <div style="font-size: 0.8rem; color: var(--nui-shade5); word-break: break-all; margin-top: 0.25rem;">${server.url}</div>
+                <!-- Header: Title and Toggle -->
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem;">
+                    <h3 style="margin: 0; font-size: 1.1rem; color: var(--nui-fg); word-break: break-word;">${server.name}</h3>
+                    <nui-checkbox variant="switch" title="Connect/Disconnect">
+                        <input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected ? 'checked' : ''} ${(server.status === 'connecting...') ? 'disabled' : ''}>
+                    </nui-checkbox>
                 </div>
-                <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
-                    ${server.status !== 'connected' ? `
-                    <nui-button size="small" data-mcp-connect="${server.id}">
-                        <button type="button">Connect</button>
-                    </nui-button>` : ''}
-                    <nui-button variant="danger" size="small" data-mcp-remove="${server.id}">
-                        <button type="button">Remove</button>
+                
+                <!-- Status Badge -->
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 0.8rem; color: ${statusColor}; white-space: nowrap; display: flex; align-items: center; gap: 0.25rem;">
+                        <span style="font-size: 0.5rem;">⬤</span> ${isConnected ? 'connected (' + (server.tools ? server.tools.length : 0) + ' tools)' : server.status}
+                    </span>
+                </div>
+
+                <!-- Bottom Actions -->
+                <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem;">
+                    <nui-button variant="icon" title="Edit Server" data-mcp-edit="${server.id}">
+                        <button type="button" aria-label="Edit">
+                            <nui-icon name="edit"></nui-icon>
+                        </button>
+                    </nui-button>
+                    <nui-button variant="icon" title="Remove Server" data-mcp-remove="${server.id}">
+                        <button type="button" aria-label="Remove">
+                            <nui-icon name="delete"></nui-icon>
+                        </button>
                     </nui-button>
                 </div>
+            </div>
         `;
 
-        if (server.status === 'connected' && server.tools && server.tools.length > 0) {
-            html += `<h4 style="margin: 0 0 0.5rem 0; font-size: 0.9rem; color: var(--nui-shade6);">Available Tools</h4>`;
-            html += `<div style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 200px; overflow-y: auto;">`;
-            
-            server.tools.forEach(tool => {
-                const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
-                html += `
-                    <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--nui-fg);">
-                        <nui-checkbox>
-                            <input type="checkbox" data-mcp-toggle="${server.id}" data-mcp-tool="${tool.name}" ${isEnabled ? 'checked' : ''}>
-                        </nui-checkbox>
-                        <span title="${tool.description || ''}">${tool.name}</span>
-                    </label>
-                `;
-            });
-            html += `</div>`;
-        }
-
-        html += `</div>`;
         card.innerHTML = html;
 
         // Wire Event Listeners
@@ -2420,34 +2414,78 @@ function renderMCPServers() {
             });
         }
 
-        const connectBtn = card.querySelector('[data-mcp-connect]');
-        if (connectBtn) {
-            connectBtn.addEventListener('click', async () => {
-                const btnEl = connectBtn.querySelector('button');
-                btnEl.textContent = 'Connecting...';
-                connectBtn.setAttribute('disabled', 'true');
-                try {
-                    await mcpClient.connectToServer(server);
-                    renderMCPServers();
-                } catch (e) {
-                    console.error("Manual connect failed:", e);
+        const editBtn = card.querySelector('[data-mcp-edit]');
+        if (editBtn) {
+            editBtn.addEventListener('click', () => {
+                openMCPEditDialog(server);
+            });
+        }
+
+        const toggle = card.querySelector(`[data-mcp-status-toggle="${server.id}"]`);
+        if (toggle) {
+            toggle.addEventListener('change', async (e) => {
+                if (e.target.checked) {
+                    try {
+                        server.status = 'connecting...';
+                        renderMCPServers();
+                        await mcpClient.connectToServer(server);
+                    } catch (err) {
+                        console.error("Connect failed", err);
+                    } finally {
+                        renderMCPServers();
+                    }
+                } else {
+                    mcpClient.disconnectServer(server.id);
                     renderMCPServers();
                 }
             });
         }
 
-        const toggles = card.querySelectorAll('[data-mcp-toggle]');
-        toggles.forEach(toggle => {
-            toggle.addEventListener('change', (e) => {
-                const sId = e.target.getAttribute('data-mcp-toggle');
-                const tName = e.target.getAttribute('data-mcp-tool');
-                const checked = e.target.checked;
-                mcpClient.setToolEnabled(sId, tName, checked);
-            });
-        });
-
         elements.mcpServersList.appendChild(card);
     });
+}
+
+function openMCPEditDialog(server) {
+    const dialog = document.getElementById('mcp-edit-dialog');
+    if (!dialog) return;
+
+    document.getElementById('mcp-edit-title').textContent = server.name;
+    document.getElementById('mcp-edit-url').value = server.url;
+    
+    const toolsContainer = document.getElementById('mcp-edit-tools-container');
+    toolsContainer.innerHTML = '';
+
+    if (!server.tools || server.tools.length === 0) {
+        toolsContainer.innerHTML = `<p style="color: var(--nui-shade5); font-size: 0.9rem; padding: 1rem; text-align: center; border: 1px dashed var(--nui-shade3); border-radius: 4px;">No tools available. Connect the server to load tools.</p>`;
+    } else {
+        server.tools.forEach(tool => {
+            const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
+            
+            const toolEl = document.createElement('label');
+            toolEl.style.cssText = 'display: flex; align-items: flex-start; gap: 0.75rem; padding: 1rem; background: var(--nui-shade1); border: 1px solid var(--nui-shade2); border-radius: 6px; cursor: pointer; transition: background 0.2s;';
+            toolEl.onmouseover = () => toolEl.style.background = 'var(--nui-shade2)';
+            toolEl.onmouseout = () => toolEl.style.background = 'var(--nui-shade1)';
+
+            toolEl.innerHTML = `
+                <nui-checkbox style="margin-top: 0.1rem;">
+                    <input type="checkbox" data-mcp-toggle="${server.id}" data-mcp-tool="${tool.name}" ${isEnabled ? 'checked' : ''}>
+                </nui-checkbox>
+                <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                    <span style="font-weight: 600; color: var(--nui-fg); font-size: 0.95rem;">${tool.name}</span>
+                    <span style="font-size: 0.85rem; color: var(--nui-shade5); line-height: 1.4;">${tool.description || 'No description available.'}</span>
+                </div>
+            `;
+            
+            const checkbox = toolEl.querySelector('input');
+            checkbox.addEventListener('change', (e) => {
+                mcpClient.setToolEnabled(server.id, tool.name, e.target.checked);
+            });
+            
+            toolsContainer.appendChild(toolEl);
+        });
+    }
+
+    dialog.showModal();
 }
 
 // ============================================

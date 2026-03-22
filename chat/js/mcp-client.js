@@ -101,10 +101,24 @@ class MCPClient {
 
     removeServer(id) {
         // PHASE-0: Cleanup tracking states
+        this.disconnectServer(id);
         this.servers = this.servers.filter(s => s.id !== id);
         this.enabledTools.delete(id);
         this.saveConfig();
         this.rebuildToolRegistry();
+    }
+
+    disconnectServer(id) {
+        const server = this.servers.find(s => s.id === id);
+        if (server) {
+            if (server.eventSource) {
+                server.eventSource.close();
+                server.eventSource = null;
+            }
+            server.status = 'disconnected';
+            server.tools = [];
+            this.rebuildToolRegistry();
+        }
     }
 
     // Set a tool's enabled state locally
