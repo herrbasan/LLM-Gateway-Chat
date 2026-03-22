@@ -68,6 +68,13 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     padding: 1rem;
 }
 
+.sidebar-content .title{
+    display: block;
+    font-size: 1.2rem;
+    margin-bottom: 1rem;
+    color: var(--color-highlight)
+}
+
 .sidebar-section {
     margin-bottom: 1.5rem;
 }
