@@ -179,13 +179,23 @@ class MCPClient {
 
             // Connection timeout heuristic if server doesn't emit 'endpoint'
             const connectTimeout = setTimeout(() => {
-                const err = new Error(`Connection timeout: Server connected but never emitted the required 'endpoint' event for POST routing within 10s.`);
-                console.error(`[${server.name}]`, err);
-                this.logTraffic('IN', { error: err.message, note: 'MCP Protocol requires the server to send an EventSource message with type: endpoint' });
-                server.status = 'error';
-                eventSource.close();
-                reject(err);
-            }, 10000);
+                this.logTraffic('IN', { note: 'No endpoint event received after 3s. Falling back to using base URL for POST routing...' });
+                console.warn(`[${server.name}] No 'endpoint' event received after 3s. Falling back to base URL: ${server.url}`);
+                
+                // Fallback: try using the url directly if the server isn't standard SSE compliant
+                server.postEndpoint = server.url;
+                
+                this.refreshServerTools(server).then(() => {
+                    server.status = 'connected';
+                    server.eventSource = eventSource;
+                    resolve();
+                }).catch(err => {
+                    server.status = 'error';
+                    eventSource.close();
+                    this.logTraffic('IN', { error: 'Fallback POST failed. Ensure this is an MCP server.', details: err.message });
+                    reject(new Error(`SSE endpoint event missing -> Fallback POST to ${server.url} failed: ${err.message}`));
+                });
+            }, 3000);
 
             eventSource.onopen = () => {
                 this.logTraffic('IN', { status: 'SSE Connection opened', note: 'Waiting for endpoint event...' });
@@ -210,7 +220,10 @@ class MCPClient {
                 console.log(`[${server.name}] Received POST endpoint: ${postEndpoint}. Fetching tools...`);
                 
                 // Now that we have the endpoint, we can fetch tools
-                this.refreshServerTools(server).then(resolve).catch(reject);
+                this.refreshServerTools(server).then(() => {
+                    server.status = 'connected';
+                    resolve();
+                }).catch(reject);
             });
 
             // 3. Listen for general messages (JSON-RPC responses and progress updates)
@@ -220,6 +233,23 @@ class MCPClient {
                     this.logTraffic('IN', data);
                     console.log(`[${server.name}] Received message:`, data);
                     
+                    // Fallback to extract endpoint if server sent it as a generic message payload
+                    if (data.endpoint && !server.postEndpoint) {
+                        clearTimeout(connectTimeout);
+                        let ep = data.endpoint;
+                        if (ep.startsWith('/')) {
+                            const baseUrl = new URL(server.url);
+                            ep = `${baseUrl.protocol}//${baseUrl.host}${ep}`;
+                        }
+                        server.postEndpoint = ep;
+                        console.log(`[${server.name}] Recovered POST endpoint from generic message: ${ep}`);
+                        this.refreshServerTools(server).then(() => {
+                            server.status = 'connected';
+                            resolve();
+                        }).catch(reject);
+                        return; // exit early
+                    }
+
                     // Handle progress notifications for long-running tools
                     if (data.method === 'notifications/progress') {
                         this.handleProgress(server, data.params);
