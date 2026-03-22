@@ -2369,17 +2369,25 @@ function renderMCPServers() {
         if (server.status === 'error') statusColor = 'red';
 
         let html = `
-            <div style="padding: 1rem;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h3 style="margin: 0; font-size: 1.1rem; color: var(--nui-fg);">${server.name}</h3>
-                    <div style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span style="font-size: 0.8rem; color: ${statusColor};">⬤ ${server.status}</span>
-                        <nui-button variant="danger" size="small" data-mcp-remove="${server.id}">
-                            <button type="button">Remove</button>
-                        </nui-button>
+            <div style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                <div>
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem;">
+                        <h3 style="margin: 0; font-size: 1.1rem; color: var(--nui-fg); word-break: break-word;">${server.name}</h3>
+                        <span style="font-size: 0.8rem; color: ${statusColor}; white-space: nowrap; display: flex; align-items: center; gap: 0.25rem;">
+                            <span style="font-size: 0.5rem;">⬤</span> ${server.status}
+                        </span>
                     </div>
+                    <div style="font-size: 0.8rem; color: var(--nui-shade5); word-break: break-all; margin-top: 0.25rem;">${server.url}</div>
                 </div>
-                <div style="font-size: 0.8rem; color: var(--nui-shade5); margin-bottom: 1rem;">${server.url}</div>
+                <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+                    ${server.status !== 'connected' ? `
+                    <nui-button size="small" data-mcp-connect="${server.id}">
+                        <button type="button">Connect</button>
+                    </nui-button>` : ''}
+                    <nui-button variant="danger" size="small" data-mcp-remove="${server.id}">
+                        <button type="button">Remove</button>
+                    </nui-button>
+                </div>
         `;
 
         if (server.status === 'connected' && server.tools && server.tools.length > 0) {
@@ -2409,6 +2417,18 @@ function renderMCPServers() {
             removeBtn.addEventListener('click', () => {
                 mcpClient.removeServer(server.id);
                 renderMCPServers();
+            });
+        }
+
+        const connectBtn = card.querySelector('[data-mcp-connect]');
+        if (connectBtn) {
+            connectBtn.addEventListener('click', async () => {
+                try {
+                    await mcpClient.connectToServer(server);
+                    renderMCPServers();
+                } catch (e) {
+                    renderMCPServers();
+                }
             });
         }
 
