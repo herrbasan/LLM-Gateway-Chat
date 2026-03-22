@@ -17,18 +17,18 @@ Before beginning implementation, adhere to the project's core architectural and 
 
 > **Verify file paths before starting:** Confirm `chat/js/mcp-client.js`, `chat/js/chat.js`, `chat/js/conversation.js`, and `chat/index.html` exist. Update phase references if paths differ.
 
-1. **Fix Tool State Tracking (chat/js/mcp-client.js)**
+1. **[x] Fix Tool State Tracking (chat/js/mcp-client.js)**
    - Cache availableTools on the tools/list response to prevent silent failures.
    - Add reconnection handling and tool name collision prefixing per spec.
    - *Spec Reference:* [1.1 Tool State Tracking](mcp_integration_spec.md#11-tool-state-tracking)
 
 ## Phase 1: Storage Abstraction and State Management
 
-2. **Create Storage Adapter (chat/js/mcp-client.js)**
+2. **[x] Create Storage Adapter (chat/js/mcp-client.js)**
    - Implement storage abstractions without breaking legacy synchronous callers.
    - *Spec Reference:* [1.2 StorageAdapter Interface](mcp_integration_spec.md#12-storageadapter-interface)
 
-3. **Extend Core Logic (chat/js/mcp-client.js)**
+3. **[x] Extend Core Logic (chat/js/mcp-client.js)**
    - Map enabledTools using Map<serverId, Map<toolName, boolean>>.
    - Update generateToolPrompt() for the new strict JSON syntax.
    - *Spec Reference:* [2. LLM Tool Invocation Syntax](mcp_integration_spec.md#2-llm-tool-invocation-syntax)
@@ -37,32 +37,33 @@ Before beginning implementation, adhere to the project's core architectural and 
 
 > **Note:** Phase 2 UI scaffolding can begin once Phase 1's type definitions exist. Full Phase 1 completion is not required.
 
-4. **Build MCP Settings Tab (chat/index.html & chat/js/chat.js)**
+4. **[x] Build MCP Settings Tab (chat/index.html & chat/js/chat.js)**
    - Implement server addition, connection cards, toggles, and logs using nui_wc2 components.
+   - Enhanced UI: NUI dialog page modes, switch toggles, explicit active tool stats.
    - *Spec Reference:* [4.1 MCP Configuration Settings](mcp_integration_spec.md#41-mcp-configuration-settings)
 
 ## Phase 3: Tool Execution Loop & IDE-Style UI
 
-5. **Introduce "Tool" Message Type (chat/js/conversation.js & chat/js/chat.js)**
+5. **[ ] Introduce "Tool" Message Type (chat/js/conversation.js & chat/js/chat.js)**
    - Support role: 'tool' with distinct UI rendering states.
    - *Spec Reference:* [4.2 IDE-Style Tool Execution Messages](mcp_integration_spec.md#42-ide-style-tool-execution-messages)
 
-6. **LLM Payload Mapping & Prompt Injection (chat/js/chat.js)**
+6. **[ ] LLM Payload Mapping & Prompt Injection (chat/js/chat.js)**
    - Inject the updated prompt instructions and implement the payload shim for the backend.
    - *Spec Reference:* [5. Gateway Protocol Mapping (Shim)](mcp_integration_spec.md#5-gateway-protocol-mapping-shim)
 
-7. **Robust Execution Interception (chat/js/chat.js)**
+7. **[ ] Robust Execution Interception (chat/js/chat.js)**
    - Read SSE chunks via a line-buffered streaming JSON parser looking for __TOOL_CALL__.
    - Implement code block guard (ignore __TOOL_CALL__ inside markdown fences).
    - *Spec Reference:* [3. SSE Interception & Parsing Loop](mcp_integration_spec.md#3-sse-interception--parsing-loop)
 
-8. **Execution Error Handling (chat/js/chat.js)**
+8. **[ ] Execution Error Handling (chat/js/chat.js)**
    - Wrap tool execution, render visual error states, and resume automatically.
    - *Spec Reference:* [4.2 IDE-Style Tool Execution Messages](mcp_integration_spec.md#42-ide-style-tool-execution-messages)
 
 ## Phase 4: Testing & Validation
 
-9. **Integration Testing**
+9. **[ ] Integration Testing**
    - Test tool listing, enabling/disabling, and execution across multiple servers.
    - Test reconnection scenarios (server disconnects and reconnects).
    - Test code block false-positive guard.
