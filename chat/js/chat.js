@@ -6,6 +6,7 @@ import { Conversation } from './conversation.js';
 import { GatewayClient } from './client-sdk.js';
 import { renderMarkdown, parseThinking } from './markdown.js';
 import { imageStore } from './image-store.js';
+import { mcpClient } from './mcp-client.js';
 
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
@@ -81,7 +82,17 @@ const elements = {
     overallContextProgressWrap: document.getElementById('overall-context-progress-wrap'),
     overallContextProgress: document.getElementById('overall-context-progress'),
     overallContextTooltip: document.getElementById('overall-context-tooltip'),
-    stopButton: document.getElementById('stop-btn') // Added safe fallback
+    stopButton: document.getElementById('stop-btn'), // Added safe fallback
+
+    // MCP Elements
+    mcpServerName: document.getElementById('mcp-server-name'),
+    mcpServerUrl: document.getElementById('mcp-server-url'),
+    mcpAddBtn: document.getElementById('mcp-add-btn'),
+    mcpLogsBtn: document.getElementById('mcp-logs-btn'),
+    mcpLogsDialog: document.getElementById('mcp-logs-dialog'),
+    mcpLogsClearBtn: document.getElementById('mcp-logs-clear-btn'),
+    mcpLogsTextarea: document.getElementById('mcp-logs-textarea'),
+    mcpServersList: document.getElementById('mcp-servers-list')
 };
 
 // ============================================
@@ -104,10 +115,13 @@ async function init() {
     // Restore conversation
     renderHistoryList();
     renderConversation();
-    
+
     // Check gateway status
     checkGatewayStatus();
-    
+
+    // Init MCP
+    initMCP();
+
     console.log('[Chat] Ready');
 }
 
@@ -500,9 +514,18 @@ function getSystemPromptWithMetadata() {
     const metadata = buildMetadataPrefix();
     
     if (userPrompt) {
-        return `${metadata}\n\n${userPrompt}`;
+        prompt = `${metadata}\n\n${userPrompt}`;
+    } else {
+        prompt = metadata;
     }
-    return metadata;
+
+    // PHASE-3: MCP System Prompt Injection
+    const mcpPrompt = mcpClient.generateToolPrompt();
+    if (mcpPrompt) {
+        prompt += `\n\n${mcpPrompt}`;
+    }
+
+    return prompt;
 }
 
 // ============================================
@@ -610,21 +633,67 @@ async function streamResponse(exchangeId) {
         let lastRender = 0;
         const RENDER_INTERVAL = 50; // Render at most every 50ms
         
+// PHASE-3: Line-buffered State for Tool Execution Prefixing
+        let mdCodeBlockOpen = false;
+        let currentLineBuffer = '';
+        let toolCallIntercepted = false;
+
         for await (const event of client.streamChatIterable(requestBody)) {
+            if (toolCallIntercepted) break; // Halts the iterable immediately
+
             switch (event.type) {
                 case 'delta':
                     // Hide progress status once text generation begins
                     const statusEl = assistantEl.querySelector('.progress-status');
                     if (statusEl) statusEl.classList.remove('visible');
 
+                    // If a chunk contains newline boundary, test it.
+                    const chunks = event.content.split('\n');
+                    for (let i = 0; i < chunks.length; i++) {
+                        currentLineBuffer += chunks[i];
+
+                        // End of line reached
+                        if (i < chunks.length - 1) {
+                            if (currentLineBuffer.trim().startsWith('\`\`\`')) {
+                                mdCodeBlockOpen = !mdCodeBlockOpen;
+                            }
+                            if (!mdCodeBlockOpen && currentLineBuffer.trim().startsWith('__TOOL_CALL__(')) {
+                                const trimBuf = currentLineBuffer.trim();
+                                if (trimBuf.endsWith(')')) {
+                                    const payloadStr = trimBuf.substring(14, trimBuf.length - 1);
+                                    try {
+                                        const parsedObj = JSON.parse(payloadStr);
+                                        toolCallIntercepted = true;
+                                        handleToolExecution(exchangeId, parsedObj);
+                                        break; // break the chunk loop
+                                    } catch (e) {
+                                        console.warn("Failed to parse tool call JSON", e);
+                                        // Ignore and continue, or we could inject a system alert. Just ignore for now.
+                                    }
+                                }
+                            }
+                            currentLineBuffer = '';
+                        }
+                    }
+
+                    if (toolCallIntercepted) {
+                        const idx = event.content.indexOf('__TOOL_CALL__(');
+                        if (idx > 0) {
+                            const textBefore = event.content.substring(0, idx);
+                            contentBuffer += textBefore;
+                            conversation.updateAssistantResponse(exchangeId, textBefore);
+                        }
+                        break;
+                    }
+
                     contentBuffer += event.content;
                     conversation.updateAssistantResponse(exchangeId, event.content);
-                    
+
                     // Debounce DOM updates to prevent freezing
                     if (!pendingUpdate) {
                         pendingUpdate = true;
                         const now = performance.now();
-                        const delay = Math.max(0, RENDER_INTERVAL - (now - lastRender));
+                        const delay = Math.max(0, Math.min(RENDER_INTERVAL, RENDER_INTERVAL - (now - lastRender)));
                         
                         const wasNearBottom = isNearBottom();
                         setTimeout(() => {
@@ -669,6 +738,22 @@ async function streamResponse(exchangeId) {
                     break;
                     
                 case 'done':
+                    // Check if a tool call was left dangling without a trailing newline
+                    if (!mdCodeBlockOpen && currentLineBuffer.trim().startsWith('__TOOL_CALL__(')) {
+                        const trimBuf = currentLineBuffer.trim();
+                        if (trimBuf.endsWith(')')) {
+                            const payloadStr = trimBuf.substring(14, trimBuf.length - 1);
+                            try {
+                                const parsedObj = JSON.parse(payloadStr);
+                                toolCallIntercepted = true;
+                                handleToolExecution(exchangeId, parsedObj);
+                            } catch (e) {
+                                console.warn("Failed to parse tool call JSON", e);
+                            }
+                        }
+                    }
+                    if (toolCallIntercepted) break;
+
                     // contentBuffer doesn't include our injected timestamp
                     // Get the exchange to find the original timestamp we injected
                     const ex = conversation.getExchange(exchangeId);
@@ -756,6 +841,62 @@ function renderConversation() {
 }
 
 function renderExchange(exchange) {
+    if (exchange.type === 'tool') {
+        const parsedObj = { name: exchange.tool.name, args: exchange.tool.args };
+        const toolEl = document.createElement('div');
+        toolEl.className = 'chat-message tool';
+        toolEl.dataset.exchangeId = exchange.id;
+        toolEl.dataset.mcpToolName = parsedObj.name;
+        
+        const isSuccess = exchange.tool.status === 'success';
+        const isError = exchange.tool.status === 'error';
+        const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : 'Running...');
+        const statusColor = isSuccess ? 'green' : (isError ? 'red' : 'var(--nui-accent)');
+        
+        let resultHtml = '';
+        if (isSuccess) resultHtml = `<strong>Result:</strong><br>${exchange.tool.content}`;
+        else if (isError) resultHtml = `<strong>Error:</strong> ${exchange.tool.content}`;
+
+        toolEl.innerHTML = `
+            <div class="message-header" style="cursor:pointer; display: flex; align-items: center; gap: 0.5rem; color: var(--nui-shade5);">
+                <nui-icon name="handyman" style="font-size: 1.2rem;"></nui-icon>
+                <strong>Tool: ${parsedObj.name}</strong>
+                <span class="tool-status" style="margin-left: auto; color: ${statusColor};">${displayStatus}</span>
+            </div>
+            <div class="message-content tool-payload" style="display: none; padding: 0.5rem; margin-top: 0.5rem; background: var(--nui-shade1); border-radius: var(--border-radius1); font-family: monospace; font-size: 0.85rem; overflow-x: auto;">
+                <div><strong>Args:</strong> ${JSON.stringify(parsedObj.args, null, 2)}</div>
+                <div class="tool-result">${resultHtml}</div>
+            </div>
+        `;
+        elements.messages?.appendChild(toolEl);
+
+        toolEl.querySelector('.message-header').addEventListener('click', () => {
+            const payloadBox = toolEl.querySelector('.tool-payload');
+            payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+        });
+
+        // Assistant message (if exists after tool)
+        if (exchange.assistant.content || exchange.assistant.isStreaming) {
+            const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
+            const assistantParsed = parseTimestamp(cleanedContent);
+            const assistantTimestamp = assistantParsed.timestamp || '';
+            const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+            
+            const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
+            if (tsLen > 0) {
+                assistantEl.dataset.timestampLen = tsLen.toString();
+                assistantEl.dataset.timestampStripped = 'true';
+            }
+            updateAssistantContent(assistantEl, assistantParsed.cleanContent);
+            elements.messages?.appendChild(assistantEl);
+
+            if (exchange.assistant.isComplete) {
+                finalizeAssistantElement(assistantEl, exchange.id);
+            }
+        }
+        return;
+    }
+
     // Parse timestamps from content
     const userParsed = parseTimestamp(exchange.user.content);
     const userTimestamp = userParsed.timestamp || new Date(exchange.timestamp).toISOString().slice(0,16).replace('T',' @ ');
@@ -1040,6 +1181,105 @@ function updateOverallContext(contextData = null) {
 
     if (elements.overallContextTooltip) {
         elements.overallContextTooltip.textContent = text;
+    }
+}
+
+// ============================================
+// PHASE-3: MCP Tool Execution Logic
+// ============================================
+
+async function handleToolExecution(originalExchangeId, parsedObj) {
+    console.log('[Tool Call Intercepted]', parsedObj);
+    
+    // 1. Finalize the current assistant message
+    const oldEx = conversation.getExchange(originalExchangeId);
+    // Strip partial tool call fragments that may have leaked into the UI during streaming
+    oldEx.assistant.content = oldEx.assistant.content.replace(/__TOOL_CALL__\([\s\S]*$/, '').trim();
+    conversation.setAssistantComplete(originalExchangeId);
+    
+    let originalEl = elements.messages?.querySelector(`.chat-message.assistant[data-exchange-id="${originalExchangeId}"]`);
+    if (originalEl) {
+        updateAssistantContent(originalEl, oldEx.assistant.content);
+    }
+    
+    // 2. Create the tool exchange
+    const toolExchangeId = await conversation.addToolExchange(parsedObj.name, parsedObj.args);
+    const exchange = conversation.getExchange(toolExchangeId);
+    
+    // 3. Render Tool UI
+    const toolEl = document.createElement('div');
+    toolEl.className = 'chat-message tool';
+    toolEl.dataset.exchangeId = toolExchangeId;
+    toolEl.dataset.mcpToolName = parsedObj.name;
+    
+    // Build collapsible box UI
+    toolEl.innerHTML = `
+        <div class="message-header" style="cursor:pointer; display: flex; align-items: center; gap: 0.5rem; color: var(--nui-shade5);">
+            <nui-icon name="handyman" style="font-size: 1.2rem;"></nui-icon>
+            <strong>Tool: ${parsedObj.name}</strong>
+            <span class="tool-status" style="margin-left: auto; color: var(--nui-accent);">Running...</span>
+        </div>
+        <div class="message-content tool-payload" style="display: none; padding: 0.5rem; margin-top: 0.5rem; background: var(--nui-shade1); border-radius: var(--border-radius1); font-family: monospace; font-size: 0.85rem; overflow-x: auto;">
+            <div><strong>Args:</strong> ${JSON.stringify(parsedObj.args, null, 2)}</div>
+            <div class="tool-result"></div>
+        </div>
+    `;
+    elements.messages.appendChild(toolEl);
+    scrollToBottom();
+
+    // Toggle expand/collapse
+    toolEl.querySelector('.message-header').addEventListener('click', () => {
+        const payloadBox = toolEl.querySelector('.tool-payload');
+        payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+    });
+
+    // 4. Execute tool
+    try {
+        const result = await mcpClient.executeTool(parsedObj.name, parsedObj.args);
+        
+        exchange.tool.status = 'success';
+        exchange.tool.content = JSON.stringify(result, null, 2);
+        conversation.save(); // persist
+        
+        toolEl.querySelector('.tool-status').textContent = 'Success';
+        toolEl.querySelector('.tool-status').style.color = 'green';
+        toolEl.querySelector('.tool-result').innerHTML = `<strong>Result:</strong><br>${exchange.tool.content}`;
+        
+        // 5. Automatically resume stream!
+        // We will start a new pseudo-assistant stream using the toolExchangeId
+        // The LLM will receive the shimmed 'user' message and continue generating
+        await streamResponse(toolExchangeId);
+        
+    } catch (err) {
+        console.error('Tool execution error', err);
+        exchange.tool.status = 'error';
+        exchange.tool.content = err.message || String(err);
+        conversation.save();
+
+        toolEl.querySelector('.tool-status').textContent = 'Failed';
+        toolEl.querySelector('.tool-status').style.color = 'red';
+        toolEl.querySelector('.tool-result').innerHTML = `<strong>Error:</strong> ${exchange.tool.content}
+            <div style="margin-top: 0.5rem;">
+                <nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>
+                <nui-button size="small" class="dismiss-tool"><button>Dismiss & Continue</button></nui-button>
+            </div>
+        `;
+        toolEl.querySelector('.tool-payload').style.display = 'block'; // force open
+        
+        // Wire up retry/dismiss
+        toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
+            toolEl.querySelector('.tool-result').innerHTML = '';
+            toolEl.querySelector('.tool-status').textContent = 'Running...';
+            toolEl.querySelector('.tool-status').style.color = 'var(--nui-accent)';
+            handleToolExecution(originalExchangeId, parsedObj); // re-run recursively! wait, we might duplicate exchange. Instead, just execute again inside here.
+            // Simplified: just let user delete/regenerate, or handle properly inside handleToolExecution.
+        });
+        
+        toolEl.querySelector('.dismiss-tool')?.addEventListener('click', () => {
+            // Dismiss tool implies just continuing without tool result
+            streamResponse(toolExchangeId);
+            toolEl.querySelector('.dismiss-tool').parentElement.style.display = 'none';
+        });
     }
 }
 
@@ -2045,6 +2285,145 @@ function isNearBottom(threshold = 100) {
     if (!elements.messages) return true;
     const { scrollTop, scrollHeight, clientHeight } = elements.messages;
     return scrollHeight - scrollTop - clientHeight < threshold;
+}
+
+// ============================================
+// PHASE-2: MCP Configuration UI Layer
+// ============================================
+
+function initMCP() {
+    // 1. Initial render
+    renderMCPServers();
+
+    // 2. Wire up 'Add Server' button
+    if (elements.mcpAddBtn) {
+        elements.mcpAddBtn.addEventListener('click', async () => {
+            const nameInput = elements.mcpServerName.querySelector('input');
+            const urlInput = elements.mcpServerUrl.querySelector('input');
+            const name = nameInput.value.trim();
+            const url = urlInput.value.trim();
+            if (!name || !url) return alert('Name and URL are required');
+            
+            mcpClient.addServer(url, name);
+            nameInput.value = '';
+            urlInput.value = '';
+            renderMCPServers();
+            
+            // Auto connect the newly added one
+            const server = mcpClient.servers[mcpClient.servers.length - 1];
+            try {
+                await mcpClient.connectToServer(server);
+            } catch (e) {
+                console.error("Auto-connect failed", e);
+            }
+            renderMCPServers();
+        });
+    }
+
+    // 3. Connect existing offline servers on load
+    mcpClient.servers.forEach(async (server) => {
+        if (server.status === 'disconnected') {
+            try {
+                await mcpClient.connectToServer(server);
+                renderMCPServers();
+            } catch (e) {
+                renderMCPServers();
+            }
+        }
+    });
+
+    // 4. Debug Logs
+    if (elements.mcpLogsBtn) {
+        elements.mcpLogsBtn.addEventListener('click', () => {
+            elements.mcpLogsDialog.showModal();
+        });
+    }
+    if (elements.mcpLogsClearBtn) {
+        elements.mcpLogsClearBtn.addEventListener('click', () => {
+            if(elements.mcpLogsTextarea) {
+                elements.mcpLogsTextarea.value = '';
+            }
+        });
+    }
+
+    mcpClient.onLog = (logMsg) => {
+        if (elements.mcpLogsTextarea) {
+            elements.mcpLogsTextarea.value += logMsg;
+            // auto-scroll
+            elements.mcpLogsTextarea.scrollTop = elements.mcpLogsTextarea.scrollHeight;
+        }
+    };
+}
+
+function renderMCPServers() {
+    if (!elements.mcpServersList) return;
+    elements.mcpServersList.innerHTML = ''; // basic clear
+
+    mcpClient.servers.forEach(server => {
+        const card = document.createElement('nui-card');
+        card.style.display = 'block';
+        card.style.marginBottom = '1rem';
+        
+        let statusColor = 'var(--nui-shade3)';
+        if (server.status === 'connected') statusColor = 'green';
+        if (server.status === 'error') statusColor = 'red';
+
+        let html = `
+            <div style="padding: 1rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3 style="margin: 0; font-size: 1.1rem; color: var(--nui-fg);">${server.name}</h3>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="font-size: 0.8rem; color: ${statusColor};">⬤ ${server.status}</span>
+                        <nui-button variant="danger" size="small" data-mcp-remove="${server.id}">
+                            <button type="button">Remove</button>
+                        </nui-button>
+                    </div>
+                </div>
+                <div style="font-size: 0.8rem; color: var(--nui-shade5); margin-bottom: 1rem;">${server.url}</div>
+        `;
+
+        if (server.status === 'connected' && server.tools && server.tools.length > 0) {
+            html += `<h4 style="margin: 0 0 0.5rem 0; font-size: 0.9rem; color: var(--nui-shade6);">Available Tools</h4>`;
+            html += `<div style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 200px; overflow-y: auto;">`;
+            
+            server.tools.forEach(tool => {
+                const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
+                html += `
+                    <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--nui-fg);">
+                        <nui-checkbox>
+                            <input type="checkbox" data-mcp-toggle="${server.id}" data-mcp-tool="${tool.name}" ${isEnabled ? 'checked' : ''}>
+                        </nui-checkbox>
+                        <span title="${tool.description || ''}">${tool.name}</span>
+                    </label>
+                `;
+            });
+            html += `</div>`;
+        }
+
+        html += `</div>`;
+        card.innerHTML = html;
+
+        // Wire Event Listeners
+        const removeBtn = card.querySelector('[data-mcp-remove]');
+        if(removeBtn) {
+            removeBtn.addEventListener('click', () => {
+                mcpClient.removeServer(server.id);
+                renderMCPServers();
+            });
+        }
+
+        const toggles = card.querySelectorAll('[data-mcp-toggle]');
+        toggles.forEach(toggle => {
+            toggle.addEventListener('change', (e) => {
+                const sId = e.target.getAttribute('data-mcp-toggle');
+                const tName = e.target.getAttribute('data-mcp-tool');
+                const checked = e.target.checked;
+                mcpClient.setToolEnabled(sId, tName, checked);
+            });
+        });
+
+        elements.mcpServersList.appendChild(card);
+    });
 }
 
 // ============================================

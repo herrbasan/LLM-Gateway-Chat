@@ -47,6 +47,34 @@ export class Conversation {
     // Exchange Management
     // ============================================
 
+    async addToolExchange(toolName, toolArgs) {
+        const timestamp = Date.now();
+        const exchange = {
+            id: this._generateId(),
+            timestamp: timestamp,
+            type: 'tool', // special flag for UI and shim
+            tool: {
+                role: 'tool',
+                name: toolName,
+                args: toolArgs,
+                status: 'pending',
+                content: ''
+            },
+            assistant: {
+                role: 'assistant',
+                content: '',
+                versions: [],
+                currentVersion: 0,
+                isStreaming: true,
+                isComplete: false
+            }
+        };
+
+        this.exchanges.push(exchange);
+        await this._save();
+        return exchange.id;
+    }
+
     async addExchange(userContent, attachments = []) {
         const timestamp = Date.now();
         const contentWithTimestamp = this._prependTimestamp(userContent, timestamp);
@@ -293,14 +321,22 @@ export class Conversation {
                 const cleanAssistantContent = this._stripExtraTimestamps(exchange.assistant.content)
                     .replace(/<think>[\s\S]*?<\/think>/g, '')
                     .trim();
-                    
+
                 messages.push({
                     role: 'assistant',
                     content: cleanAssistantContent
                 });
             }
+
+            // PHASE-3: Protocol Mapping (Shim) for Tools
+            if (exchange.type === 'tool' && exchange.tool.status === 'success' && exchange.tool.content) {
+                messages.push({
+                    role: 'user',
+                    content: `[Tool Execution Result for '${exchange.tool.name}']\n${exchange.tool.content}`
+                });
+            }
         }
-        
+
         return messages;
     }
 
