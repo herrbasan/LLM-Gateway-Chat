@@ -2432,7 +2432,6 @@ function renderMCPServers() {
                 } catch (e) {
                     console.error("Manual connect failed:", e);
                     renderMCPServers();
-                    alert(`Connection to ${server.name} failed. See console for details.`);
                 }
             });
         }
