@@ -169,6 +169,7 @@ class MCPClient {
      */
     async connectToServer(server) {
         console.log(`Connecting to MCP server via SSE: ${server.name} at ${server.url}`);
+        this.logTraffic('OUT', { action: 'Connecting..', url: server.url, transport: 'SSE/EventSource' });
         
         return new Promise((resolve, reject) => {
             // 1. Establish the SSE connection
@@ -176,17 +177,37 @@ class MCPClient {
             const eventSource = new EventSource(server.url);
             let postEndpoint = server.url; // Fallback if server doesn't provide one
 
+            // Connection timeout heuristic if server doesn't emit 'endpoint'
+            const connectTimeout = setTimeout(() => {
+                const err = new Error(`Connection timeout: Server connected but never emitted the required 'endpoint' event for POST routing within 10s.`);
+                console.error(`[${server.name}]`, err);
+                this.logTraffic('IN', { error: err.message, note: 'MCP Protocol requires the server to send an EventSource message with type: endpoint' });
+                server.status = 'error';
+                eventSource.close();
+                reject(err);
+            }, 10000);
+
             eventSource.onopen = () => {
-                console.log(`[${server.name}] SSE Connection opened`);
+                this.logTraffic('IN', { status: 'SSE Connection opened', note: 'Waiting for endpoint event...' });
+                console.log(`[${server.name}] SSE Connection opened. Waiting for 'endpoint' event...`);
                 server.status = 'connected';
                 server.eventSource = eventSource;
             };
 
             // 2. Listen for the specific "endpoint" event that MCP servers send to tell us where to POST
             eventSource.addEventListener('endpoint', (e) => {
+                clearTimeout(connectTimeout);
                 postEndpoint = e.data;
+                
+                // The MCP Spec may return relative paths like `/message?sessionId=123` or absolute URLs
+                if (postEndpoint.startsWith('/')) {
+                    const baseUrl = new URL(server.url);
+                    postEndpoint = `${baseUrl.protocol}//${baseUrl.host}${postEndpoint}`;
+                }
+
                 server.postEndpoint = postEndpoint;
-                console.log(`[${server.name}] Received POST endpoint: ${postEndpoint}`);
+                this.logTraffic('IN', { event: 'endpoint', postEndpoint: postEndpoint });
+                console.log(`[${server.name}] Received POST endpoint: ${postEndpoint}. Fetching tools...`);
                 
                 // Now that we have the endpoint, we can fetch tools
                 this.refreshServerTools(server).then(resolve).catch(reject);
@@ -209,11 +230,13 @@ class MCPClient {
                         this.handleResponse(server, data);
                     }
                 } catch (err) {
-                    console.error(`[${server.name}] Error parsing message:`, err);
+                    this.logTraffic('IN', { rawEventData: e.data, parsingError: err.message });
+                    console.warn(`[${server.name}] Error parsing message or raw data received:`, e.data);
                 }
             };
 
             eventSource.onerror = (err) => {
+                clearTimeout(connectTimeout);
                 console.error(`[${server.name}] SSE connection error:`, err);
                 
                 // Keep the state in memory, but report it
@@ -222,7 +245,7 @@ class MCPClient {
                 eventSource.close();
                 
                 // If it's a UI callback, log it
-                this.logTraffic('IN', { error: 'SSE Connection Failed or Closed' });
+                this.logTraffic('IN', { error: 'SSE Connection Failed or Closed', details: (err && err.message) ? err.message : 'Unknown network failure' });
                 
                 reject(err);
             };
