@@ -2449,22 +2449,20 @@ function openMCPEditDialog(server) {
     const dialog = document.getElementById('mcp-edit-dialog');
     if (!dialog) return;
 
-    document.getElementById('mcp-edit-title').textContent = server.name;
+    dialog.setAttribute('title', server.name);
     document.getElementById('mcp-edit-url').value = server.url;
     
     const toolsContainer = document.getElementById('mcp-edit-tools-container');
     toolsContainer.innerHTML = '';
 
     if (!server.tools || server.tools.length === 0) {
-        toolsContainer.innerHTML = `<p style="color: var(--nui-shade5); font-size: 0.9rem; padding: 1rem; text-align: center; border: 1px dashed var(--nui-shade3); border-radius: 4px;">No tools available. Connect the server to load tools.</p>`;
+        toolsContainer.innerHTML = `<p style="color: var(--nui-shade5); font-size: 0.9rem; padding: 1rem 0; text-align: center;">No tools available. Connect the server to load tools.</p>`;
     } else {
         server.tools.forEach(tool => {
             const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
             
             const toolEl = document.createElement('label');
-            toolEl.style.cssText = 'display: flex; align-items: flex-start; gap: 0.75rem; padding: 1rem; background: var(--nui-shade1); border: 1px solid var(--nui-shade2); border-radius: 6px; cursor: pointer; transition: background 0.2s;';
-            toolEl.onmouseover = () => toolEl.style.background = 'var(--nui-shade2)';
-            toolEl.onmouseout = () => toolEl.style.background = 'var(--nui-shade1)';
+            toolEl.style.cssText = 'display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid var(--nui-shade2); cursor: pointer;';
 
             toolEl.innerHTML = `
                 <nui-checkbox style="margin-top: 0.1rem;">
