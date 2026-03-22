@@ -2369,6 +2369,17 @@ function renderMCPServers() {
         if (server.status === 'error') statusColor = 'red';
 
         const isConnected = server.status === 'connected';
+        
+        const enabledToolsMap = mcpClient.enabledTools.get(server.id);
+        let activeCount = 0;
+        let totalCount = server.tools ? server.tools.length : 0;
+        if (server.tools && enabledToolsMap) {
+            server.tools.forEach(t => {
+                if (enabledToolsMap.get(t.name)) {
+                    activeCount++;
+                }
+            });
+        }
 
         let html = `
             <div style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
@@ -2379,11 +2390,11 @@ function renderMCPServers() {
                         <input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected ? 'checked' : ''} ${(server.status === 'connecting...') ? 'disabled' : ''}>
                     </nui-checkbox>
                 </div>
-                
+
                 <!-- Status Badge -->
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <span style="font-size: 0.8rem; color: ${statusColor}; white-space: nowrap; display: flex; align-items: center; gap: 0.25rem;">
-                        <span style="font-size: 0.5rem;">⬤</span> ${isConnected ? 'connected (' + (server.tools ? server.tools.length : 0) + ' tools)' : server.status}
+                        <span style="font-size: 0.5rem;">⬤</span> ${isConnected ? 'connected (' + activeCount + '/' + totalCount + ' active)' : server.status}
                     </span>
                 </div>
 
@@ -2477,6 +2488,7 @@ function openMCPEditDialog(server) {
             const checkbox = toolEl.querySelector('input');
             checkbox.addEventListener('change', (e) => {
                 mcpClient.setToolEnabled(server.id, tool.name, e.target.checked);
+                renderMCPServers(); // Update the main config card badge dynamically
             });
             
             toolsContainer.appendChild(toolEl);
