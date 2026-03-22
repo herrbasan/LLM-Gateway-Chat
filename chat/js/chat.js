@@ -2423,11 +2423,16 @@ function renderMCPServers() {
         const connectBtn = card.querySelector('[data-mcp-connect]');
         if (connectBtn) {
             connectBtn.addEventListener('click', async () => {
+                const btnEl = connectBtn.querySelector('button');
+                btnEl.textContent = 'Connecting...';
+                connectBtn.setAttribute('disabled', 'true');
                 try {
                     await mcpClient.connectToServer(server);
                     renderMCPServers();
                 } catch (e) {
+                    console.error("Manual connect failed:", e);
                     renderMCPServers();
+                    alert(`Connection to ${server.name} failed. See console for details.`);
                 }
             });
         }

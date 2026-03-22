@@ -215,10 +215,15 @@ class MCPClient {
 
             eventSource.onerror = (err) => {
                 console.error(`[${server.name}] SSE connection error:`, err);
-                server.status = 'error'; // or disconnected, wait spec says 'disconnected'
-                server.status = 'disconnected'; // PHASE-0: Reconnection mapping
+                
+                // Keep the state in memory, but report it
+                server.status = 'error'; 
                 this.rebuildToolRegistry();
                 eventSource.close();
+                
+                // If it's a UI callback, log it
+                this.logTraffic('IN', { error: 'SSE Connection Failed or Closed' });
+                
                 reject(err);
             };
             
