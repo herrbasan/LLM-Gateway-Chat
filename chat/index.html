@@ -227,21 +227,19 @@
 
       <!-- MCP Edit Dialog -->
       <nui-dialog id="mcp-edit-dialog" mode="page" title="Edit Server" data-buttons='[{"label": "Close", "type": "primary", "value": "close"}]'>
-          <dialog>
-              <div style="padding: 1rem; width: 100%; max-width: 500px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem;">
-                  <nui-input>
-                      <label>Server URL</label>
-                      <input type="text" id="mcp-edit-url" readonly style="color: var(--nui-shade5);">
-                  </nui-input>
+          <div style="padding: 1rem; max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem;">
+              <nui-input>
+                  <label>Server URL</label>
+                  <input type="text" id="mcp-edit-url" readonly style="color: var(--nui-shade5);">
+              </nui-input>
 
-                  <div>
-                      <h3 style="margin: 0 0 1rem 0; color: var(--nui-fg); font-size: 1.1rem;">Available Tools</h3>
-                      <div id="mcp-edit-tools-container" style="display: flex; flex-direction: column;">
-                          <!-- populated dynamically -->
-                      </div>
+              <div>
+                  <h3 style="margin: 0 0 1rem 0; color: var(--nui-fg); font-size: 1.1rem;">Available Tools</h3>
+                  <div id="mcp-edit-tools-container" style="display: flex; flex-direction: column;">
+                      <!-- populated dynamically -->
                   </div>
               </div>
-          </dialog>
+          </div>
       </nui-dialog>
 
     <!-- Config - Edit chat/js/config.js to configure your Gateway -->
