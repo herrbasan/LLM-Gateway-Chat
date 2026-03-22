@@ -758,6 +758,58 @@ nui-app:not(.nui-ready) { display: none; }
         display: none;
     }
 }
+
+/* Config tabs styling */
+.sidebar-content nui-tabs {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.sidebar-content nui-tabs > nav {
+    flex-shrink: 0;
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border-shade1);
+    margin-bottom: var(--nui-space);
+}
+
+.sidebar-content nui-tabs > nav > button {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    border: none;
+    background: transparent;
+    color: var(--color-text);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.sidebar-content nui-tabs > nav > button:hover {
+    color: var(--nui-accent);
+}
+
+.sidebar-content nui-tabs > nav > button[aria-selected="true"] {
+    color: var(--nui-accent);
+    border-bottom-color: var(--nui-accent);
+}
+
+.sidebar-content nui-tabs > div {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+}
+
+/* Placeholder text for MCP tab */
+.sidebar-content .placeholder-text {
+    color: var(--color-shade4);
+    font-style: italic;
+    text-align: center;
+    padding: 2rem 1rem;
+}
 .context-tooltip { white-space: nowrap; max-width: none; }
 .progress-status { font-size: 0.85em; color: var(--color-highlight); margin-bottom: 8px; font-style: italic; }
 .chat-attachment { cursor: pointer; }

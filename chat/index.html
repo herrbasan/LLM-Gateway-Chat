@@ -72,59 +72,81 @@
             <div class="sidebar-content">
                 <h3>Configuration</h3>
                 
-                <!-- Model Selection -->
-                <div class="sidebar-section">
-                    <label>Model</label>
-                    <nui-select id="model-select" searchable data-label="Select model...">
-                        <select>
-                            <option value="">Loading models...</option>
-                        </select>
-                    </nui-select>
-                </div>
-                
-                <!-- Options -->
-                <div class="sidebar-section">
-                    <label>Temperature</label>
-                    <nui-input id="temperature">
-                        <input type="number" min="0" max="2" step="0.1" value="0.7">
-                    </nui-input>
-                </div>
-                
-                <div class="sidebar-section">
-                    <label>Max Tokens</label>
-                    <nui-input id="max-tokens">
-                        <input type="number" min="1" placeholder="Max Context">
-                    </nui-input>
-                </div>
-                
-                <div class="sidebar-section">
-                    <label>System Prompt</label>
-                    <nui-textarea id="system-prompt">
-                        <textarea rows="4" placeholder="Optional system instructions..."></textarea>
-                    </nui-textarea>
-                </div>
-                
-                <!-- Session Metadata -->
-                <div class="sidebar-section">
-                    <label>Your Name</label>
-                    <nui-input id="user-name">
-                        <input type="text" placeholder="How the AI should address you">
-                    </nui-input>
-                </div>
-                
-                <div class="sidebar-section">
-                    <label>Location</label>
-                    <nui-input id="user-location">
-                        <input type="text" placeholder="e.g., Germany, USA, Japan">
-                    </nui-input>
-                </div>
-                
-                <div class="sidebar-section">
-                    <label>Language Preference</label>
-                    <nui-input id="user-language">
-                        <input type="text" placeholder="e.g., English, German, Japanese">
-                    </nui-input>
-                </div>
+                <nui-tabs>
+                    <nav>
+                        <button>Model</button>
+                        <button>User</button>
+                        <button>System</button>
+                        <button>MCP</button>
+                    </nav>
+                    
+                    <!-- Model Tab -->
+                    <div>
+                        <div class="sidebar-section">
+                            <label>Model</label>
+                            <nui-select id="model-select" searchable data-label="Select model...">
+                                <select>
+                                    <option value="">Loading models...</option>
+                                </select>
+                            </nui-select>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Temperature</label>
+                            <nui-input id="temperature">
+                                <input type="number" min="0" max="2" step="0.1" value="0.7">
+                            </nui-input>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Max Tokens</label>
+                            <nui-input id="max-tokens">
+                                <input type="number" min="1" placeholder="Max Context">
+                            </nui-input>
+                        </div>
+                    </div>
+                    
+                    <!-- User Tab -->
+                    <div>
+                        <div class="sidebar-section">
+                            <label>Your Name</label>
+                            <nui-input id="user-name">
+                                <input type="text" placeholder="How the AI should address you">
+                            </nui-input>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Location</label>
+                            <nui-input id="user-location">
+                                <input type="text" placeholder="e.g., Germany, USA, Japan">
+                            </nui-input>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Language Preference</label>
+                            <nui-input id="user-language">
+                                <input type="text" placeholder="e.g., English, German, Japanese">
+                            </nui-input>
+                        </div>
+                    </div>
+                    
+                    <!-- System Tab -->
+                    <div>
+                        <div class="sidebar-section">
+                            <label>System Prompt</label>
+                            <nui-textarea id="system-prompt">
+                                <textarea rows="6" placeholder="Optional system instructions..."></textarea>
+                            </nui-textarea>
+                        </div>
+                    </div>
+                    
+                    <!-- MCP Tab -->
+                    <div>
+                        <div class="sidebar-section">
+                            <p class="placeholder-text">MCP server configuration will appear here.</p>
+                        </div>
+                    </div>
+                </nui-tabs>
             </div>
         </nui-sidebar>
 
