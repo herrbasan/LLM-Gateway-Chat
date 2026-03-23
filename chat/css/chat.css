@@ -817,7 +817,7 @@ nui-app:not(.nui-ready) { display: none; }
 
 .sidebar-content nui-tabs > div {
     flex: 1;
-    overflow-y: auto;
+    /* overflow removed to allow nui-select dropdowns to extend beyond */
     padding-right: 0.5rem;
 }
 
