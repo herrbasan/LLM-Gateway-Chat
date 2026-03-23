@@ -4,67 +4,39 @@
  * and tool execution coordination for the chat application.
  */
 
-// PHASE-1: Abstracted StorageAdapter interface
-class StorageAdapter {
-    constructor(prefix = 'mcp-') {
-        this.prefix = prefix;
-    }
-
-    get(key) {
-        try {
-            return localStorage.getItem(this.prefix + key);
-        } catch (e) {
-            console.error(`StorageAdapter get error for ${key}:`, e);
-            return null;
-        }
-    }
-
-    set(key, value) {
-        try {
-            localStorage.setItem(this.prefix + key, value);
-        } catch (e) {
-            console.error(`StorageAdapter set error for ${key}:`, e);
-        }
-    }
-}
+import { storage } from './storage.js';
 
 class MCPClient {
     constructor() {
-        this.storage = new StorageAdapter();
         this.servers = []; // List of active MCP server connections
         this.availableTools = []; // Cached flattened list of active tools mapped for the LLM
         this.toolRegistry = new Map(); // internal global lookup map: llmName -> { serverId, originalName, definition }
         this.enabledTools = new Map(); // Map<serverId, Map<toolName, boolean>>
         this.onLog = null; // Callback for UI logger
         this.pendingRequests = new Map(); // requestId -> { resolve, reject, server } for SSE responses
-        this.loadConfig();
+        this._configLoaded = false;
     }
 
-    logTraffic(direction, payload) {
-        if (this.onLog) {
-            const time = new Date().toISOString().split('T')[1].split('.')[0];
-            const prefix = direction === 'IN' ? '<<' : '>>';
-            const text = `[${time}] ${prefix} ${JSON.stringify(payload, null, 2)}\n`;
-            this.onLog(text);
-        }
-    }
+    /**
+     * Load MCP config from IndexedDB. Call once after app init.
+     */
+    async ready() {
+        if (this._configLoaded) return;
+        this._configLoaded = true;
 
-    loadConfig() {
-        // PHASE-1: Storage abstraction
         try {
-            const storedServers = this.storage.get('servers');
+            const storedServers = await storage.mcpGet('servers');
             if (storedServers) {
                 this.servers = JSON.parse(storedServers);
-                // Reset status to disconnected on load
                 this.servers.forEach(s => s.status = 'disconnected');
             }
 
-            const storedEnabledTools = this.storage.get('enabledTools');
+            const storedEnabledTools = await storage.mcpGet('enabledTools');
             if (storedEnabledTools) {
                 const parsedTools = JSON.parse(storedEnabledTools);
                 this.enabledTools = new Map(
                     Object.entries(parsedTools).map(([serverId, toolsObj]) => [
-                        serverId, 
+                        serverId,
                         new Map(Object.entries(toolsObj))
                     ])
                 );
@@ -74,22 +46,29 @@ class MCPClient {
         }
     }
 
-    saveConfig() {
-        // PHASE-1: Storage abstraction
+    async saveConfig() {
         const serversToStore = this.servers.map(s => ({
             id: s.id,
             url: s.url,
             name: s.name,
             status: 'disconnected'
         }));
-        this.storage.set('servers', JSON.stringify(serversToStore));
+        await storage.mcpSet('servers', JSON.stringify(serversToStore));
 
-        // Serialize nested Map explicitly
         const serializedTools = {};
         for (const [serverId, toolsMap] of this.enabledTools.entries()) {
             serializedTools[serverId] = Object.fromEntries(toolsMap);
         }
-        this.storage.set('enabledTools', JSON.stringify(serializedTools));
+        await storage.mcpSet('enabledTools', JSON.stringify(serializedTools));
+    }
+
+    logTraffic(direction, payload) {
+        if (this.onLog) {
+            const time = new Date().toISOString().split('T')[1].split('.')[0];
+            const prefix = direction === 'IN' ? '<<' : '>>';
+            const text = `[${time}] ${prefix} ${JSON.stringify(payload, null, 2)}\n`;
+            this.onLog(text);
+        }
     }
 
     addServer(url, name) {

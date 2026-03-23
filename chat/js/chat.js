@@ -7,6 +7,8 @@ import { GatewayClient } from './client-sdk.js';
 import { renderMarkdown, parseThinking } from './markdown.js';
 import { imageStore } from './image-store.js';
 import { mcpClient } from './mcp-client.js';
+import { chatHistory } from './chat-history.js';
+import { storage } from './storage.js';
 
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
@@ -16,37 +18,8 @@ const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
 
 // State
-// Storage wrapper for Chat History
-const HISTORY_KEY = 'chat-history-index';
-let chatHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
-let currentChatId = localStorage.getItem('current-chat-id');
-
-if (!currentChatId || !chatHistory.find(c => c.id === currentChatId)) {
-    // Check if there is an old conversation without history tracking
-    let oldData = localStorage.getItem('chat-conversation');
-    if (oldData) {
-        currentChatId = 'default';
-        if (!chatHistory.find(c => c.id === currentChatId)) {
-            chatHistory.push({ id: currentChatId, title: 'Old Chat', timestamp: Date.now() });
-        }
-    } else {
-        currentChatId = 'ex_' + Date.now();
-        chatHistory.push({ id: currentChatId, title: 'New Chat', timestamp: Date.now() });
-    }
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
-    localStorage.setItem('current-chat-id', currentChatId);
-}
-
-let conversation = new Conversation(`chat-conversation-${currentChatId}`);
-
-// Also polyfill the old 'chat-conversation' if it exists and we're loading 'default'
-if (currentChatId === 'default' && localStorage.getItem('chat-conversation') && !localStorage.getItem('chat-conversation-default')) {
-    localStorage.setItem('chat-conversation-default', localStorage.getItem('chat-conversation'));
-    conversation = new Conversation(`chat-conversation-default`);
-}
-
-// Async initialization - load images from IndexedDB
-await conversation.load();
+let currentChatId = null;
+let conversation = null;
 
 let client = new GatewayClient({ baseUrl: GATEWAY_URL });
 let models = [];
@@ -101,17 +74,39 @@ const elements = {
 
 async function init() {
     console.log('[Chat] Initializing...');
-    
-    // Apply default config values
-    applyDefaultConfig();
-    
+
+    // ---- Load chat history from IndexedDB ----
+    await chatHistory.ready();
+
+    // Restore theme (needs history loaded first for async prefs)
+    const savedTheme = await storage.getPref('theme');
+    if (savedTheme) {
+        await setTheme(savedTheme);
+    } else {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        await setTheme(prefersDark ? 'dark' : 'light');
+    }
+
+    // Get or create active conversation
+    let activeId = await chatHistory.getActiveId();
+    if (!activeId || !chatHistory.has(activeId)) {
+        activeId = chatHistory.create();
+    }
+
+    currentChatId = activeId;
+    conversation = new Conversation(`chat-conversation-${currentChatId}`);
+    await conversation.load();
+
+    // Apply default config values (needs history loaded first for async prefs)
+    await applyDefaultConfig();
+
     // Setup event listeners first
     setupEventListeners();
-    
+
     // Wait for NUI to be ready, then load models
     await waitForNUI();
     await loadModels();
-    
+
     // Restore conversation
     renderHistoryList();
     renderConversation();
@@ -119,13 +114,14 @@ async function init() {
     // Check gateway status
     checkGatewayStatus();
 
-    // Init MCP
+    // Init MCP (load config from IndexedDB first)
+    await mcpClient.ready();
     initMCP();
 
     console.log('[Chat] Ready');
 }
 
-function applyDefaultConfig() {
+async function applyDefaultConfig() {
     // Set default temperature
     if (elements.temperature) {
         const tempInput = elements.temperature.querySelector('input');
@@ -133,7 +129,7 @@ function applyDefaultConfig() {
             tempInput.value = DEFAULT_TEMPERATURE;
         }
     }
-    
+
     // Set default max tokens
     if (elements.maxTokens) {
         const maxTokensInput = elements.maxTokens.querySelector('input');
@@ -141,12 +137,12 @@ function applyDefaultConfig() {
             maxTokensInput.value = DEFAULT_MAX_TOKENS;
         }
     }
-    
-    // Load session metadata from localStorage (with defaults)
-    const savedName = localStorage.getItem('chat-user-name');
-    const savedLocation = localStorage.getItem('chat-user-location');
-    const savedLanguage = localStorage.getItem('chat-user-language');
-    
+
+    // Load session metadata from storage (with defaults)
+    const savedName = await storage.getPref('user-name');
+    const savedLocation = await storage.getPref('user-location');
+    const savedLanguage = await storage.getPref('user-language');
+
     // Defaults: Herrbasan, Germany, English
     const name = savedName !== null ? savedName : 'Herrbasan';
     const location = savedLocation !== null ? savedLocation : 'Germany';
@@ -219,7 +215,7 @@ function populateModelSelect() {
     let modelToSelect = null;
     
     // Highest priority: Used model saved in chat history
-    const curChatInfo = chatHistory.find(c => c.id === currentChatId);
+    const curChatInfo = chatHistory.get(currentChatId);
     if (curChatInfo && curChatInfo.model) {
         if (chatModels.some(m => m.id === curChatInfo.model)) {
             modelToSelect = curChatInfo.model;
@@ -343,15 +339,15 @@ function setupEventListeners() {
         console.log('[Chat] Selected model:', currentModel);
     });
     
-    // Session metadata - save to localStorage on change
+    // Session metadata - save to storage on change
     elements.userName?.querySelector('input')?.addEventListener('change', (e) => {
-        localStorage.setItem('chat-user-name', e.target.value);
+        storage.setPref('user-name', e.target.value).catch(() => {});
     });
     elements.userLocation?.querySelector('input')?.addEventListener('change', (e) => {
-        localStorage.setItem('chat-user-location', e.target.value);
+        storage.setPref('user-location', e.target.value).catch(() => {});
     });
     elements.userLanguage?.querySelector('input')?.addEventListener('change', (e) => {
-        localStorage.setItem('chat-user-language', e.target.value);
+        storage.setPref('user-language', e.target.value).catch(() => {});
     });
     
     // Send message / Toggle Stop
@@ -657,6 +653,10 @@ async function streamResponse(exchangeId) {
                     const statusEl = assistantEl.querySelector('.progress-status');
                     if (statusEl) statusEl.classList.remove('visible');
 
+                    // Hide user bubble pending indicator once assistant starts responding
+                    const userPendingEl = elements.messages?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
+                    if (userPendingEl) userPendingEl.classList.remove('visible');
+
                     contentBuffer += event.content;
                     conversation.updateAssistantResponse(exchangeId, event.content);
 
@@ -920,7 +920,12 @@ function renderExchange(exchange) {
     }
     
     userEl.innerHTML = `
-        <div class="message-header">You <span class="message-timestamp">${userTimestamp}</span></div>
+        <div class="message-header">
+            You <span class="message-timestamp">${userTimestamp}</span>
+            <span class="user-pending-indicator visible">
+                <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
+            </span>
+        </div>
         <div class="message-content">${userContent}</div>
         <div class="message-actions-user">
             <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
@@ -1188,6 +1193,10 @@ function updateOverallContext(contextData = null) {
 // ============================================
 
 function showPendingToolUI(exchangeId) {
+    // Hide user bubble pending indicator when tool is detected
+    const userPendingEl = elements.messages?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
+    if (userPendingEl) userPendingEl.classList.remove('visible');
+
     const toolEl = document.createElement('div');
     toolEl.className = 'chat-message tool pending-tool-element';
     toolEl.dataset.pendingExchangeId = exchangeId;
@@ -1814,16 +1823,12 @@ function startNewChat() {
     if (isStreaming) {
         client.abortCurrentIterableStream();
     }
-    
-    currentChatId = 'ex_' + Date.now();
-    chatHistory.unshift({ id: currentChatId, title: 'New Chat', timestamp: Date.now() });
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
-    localStorage.setItem('current-chat-id', currentChatId);
-    
+
+    currentChatId = chatHistory.create();
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     renderHistoryList();
     renderConversation();
-    
+
     // Auto-focus input
     setTimeout(() => {
         const textarea = elements.messageInput?.querySelector('textarea');
@@ -1836,12 +1841,12 @@ async function switchChat(chatId) {
         client.abortCurrentIterableStream();
     }
     currentChatId = chatId;
-    localStorage.setItem('current-chat-id', currentChatId);
+    storage.setActiveChatId(currentChatId).catch(() => {});
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     await conversation.load();
 
     // Restore the model if saved in history
-    const chatInfo = chatHistory.find(c => c.id === currentChatId);
+    const chatInfo = chatHistory.get(currentChatId);
     if (chatInfo && chatInfo.model && elements.modelSelect) {
         // Ensure the model actually exists to avoid setting invalid state
         const modelExists = models.some(m => m.id === chatInfo.model);
@@ -1862,34 +1867,31 @@ async function switchChat(chatId) {
 
 async function deleteChat(chatId, e) {
     e.stopPropagation(); // prevent row click
-    
+
     // Skip confirmation on shift-click
     const skipConfirm = e.shiftKey;
-    
+
     if (!skipConfirm && !await nui.components.dialog.confirm('Delete Chat', 'Are you sure you want to delete this chat?')) {
         return;
     }
-    
-    // Delete images from IndexedDB for this chat
-    const chatData = localStorage.getItem(`chat-conversation-${chatId}`);
-    if (chatData) {
-        try {
-            const exchanges = JSON.parse(chatData);
-            for (const ex of exchanges) {
-                await imageStore.delete(ex.id);
-            }
-        } catch (err) {
-            console.warn('[Chat] Failed to delete images for chat', chatId, err);
+
+    // Delete images from imageStore for this chat
+    try {
+        const exchanges = await storage.loadConversation(chatId);
+        for (const ex of exchanges) {
+            await imageStore.delete(ex.id);
         }
+    } catch (err) {
+        console.warn('[Chat] Failed to delete images for chat', chatId, err);
     }
-    
-    chatHistory = chatHistory.filter(c => c.id !== chatId);
-    localStorage.removeItem(`chat-conversation-${chatId}`);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
-    
+
+    // Delete from chat history (handles IndexedDB deletion)
+    chatHistory.delete(chatId);
+
     if (currentChatId === chatId) {
-        if (chatHistory.length > 0) {
-            await switchChat(chatHistory[0].id);
+        const allChats = chatHistory.getAll();
+        if (allChats.length > 0) {
+            await switchChat(allChats[0].id);
         } else {
             startNewChat();
         }
@@ -1898,14 +1900,13 @@ async function deleteChat(chatId, e) {
     }
 }
 
-function exportChatAsJson(chatId, btn) {
+async function exportChatAsJson(chatId, btn) {
     // Export the request body as it would be sent to the gateway (for debugging)
-    const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
-    if (!chatDataString) return;
+    const exchanges = await storage.loadConversation(chatId);
+    if (!exchanges || exchanges.length === 0) return;
 
     try {
-        const exchanges = JSON.parse(chatDataString);
-        const chatInfo = chatHistory.find(c => c.id === chatId);
+        const chatInfo = chatHistory.get(chatId);
 
         // Build messages array exactly like getMessagesForApi does
         const systemPrompt = getSystemPromptWithMetadata();
@@ -1996,16 +1997,15 @@ function exportChatAsJson(chatId, btn) {
 
 async function exportChatToFile(chatId) {
     // Full export including images - for backup/restore
-    const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
-    if (!chatDataString) return;
-    
+    const exchanges = await storage.loadConversation(chatId);
+    if (!exchanges || exchanges.length === 0) return;
+
     try {
-        const exchanges = JSON.parse(chatDataString);
         const exportData = {
             version: 1,
             exportedAt: new Date().toISOString(),
             chatId: chatId,
-            chatInfo: chatHistory.find(c => c.id === chatId) || null,
+            chatInfo: chatHistory.get(chatId) || null,
             exchanges: []
         };
         
@@ -2053,37 +2053,36 @@ async function exportChatToFile(chatId) {
 async function handleChatImport(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    
+
     // Reset input so same file can be selected again
     e.target.value = '';
-    
+
     try {
         const text = await file.text();
         const importData = JSON.parse(text);
-        
+
         // Validate format
         if (!importData.exchanges || !Array.isArray(importData.exchanges)) {
             throw new Error('Invalid format: missing exchanges array');
         }
-        
-        // Create new chat ID
-        const newChatId = 'ex_' + Date.now();
+
+        // Create new chat via chatHistory
+        const newChatId = chatHistory.create();
         const title = importData.chatInfo?.title || 'Imported Chat';
-        
-        // Add to history
-        chatHistory.unshift({
-            id: newChatId,
-            title: title,
-            timestamp: Date.now(),
-            model: importData.chatInfo?.model || ''
-        });
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
-        
+
+        // Update metadata
+        const meta = chatHistory.conversations.find(c => c.id === newChatId);
+        if (meta) {
+            meta.title = title;
+            meta.model = importData.chatInfo?.model || '';
+        }
+        await chatHistory._saveList();
+
         // Process exchanges - save images to IndexedDB
         const processedExchanges = [];
         for (const ex of importData.exchanges) {
             const processedEx = { ...ex };
-            
+
             // Strip dataUrl from attachments for storage, save to IndexedDB
             if (ex.user.attachments?.some(att => att.dataUrl)) {
                 const attachmentsForDb = ex.user.attachments
@@ -2093,11 +2092,11 @@ async function handleChatImport(e) {
                         name: att.name,
                         type: att.type
                     }));
-                
+
                 if (attachmentsForDb.length > 0) {
                     await imageStore.save(ex.id, attachmentsForDb);
                 }
-                
+
                 // Store metadata only in exchange
                 processedEx.user = {
                     ...ex.user,
@@ -2111,9 +2110,9 @@ async function handleChatImport(e) {
             }
             processedExchanges.push(processedEx);
         }
-        
-        // Save conversation
-        localStorage.setItem(`chat-conversation-${newChatId}`, JSON.stringify(processedExchanges));
+
+        // Save conversation to IndexedDB
+        await storage.saveConversation(newChatId, processedExchanges);
         
         // Switch to imported chat
         renderHistoryList();
@@ -2127,15 +2126,14 @@ async function handleChatImport(e) {
     }
 }
 
-function exportChatAsMarkdown(chatId) {
-    const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
-    if (!chatDataString) return;
-    
+async function exportChatAsMarkdown(chatId) {
+    const exchanges = await storage.loadConversation(chatId);
+    if (!exchanges || exchanges.length === 0) return;
+
     try {
-        const exchanges = JSON.parse(chatDataString);
         let md = "";
-        
-        const chatInfo = chatHistory.find(c => c.id === chatId);
+
+        const chatInfo = chatHistory.get(chatId);
         if (chatInfo) {
             md += `# ${chatInfo.title || 'Chat'}\n\n`;
             md += `*Model: ${chatInfo.model || 'Unknown'} | Date: ${new Date(chatInfo.timestamp).toLocaleString()}*\n\n---\n\n`;
@@ -2165,31 +2163,30 @@ function exportChatAsMarkdown(chatId) {
 }
 
 function updateChatTitle(chatId, firstMessageContent) {
-    const chatInfo = chatHistory.find(c => c.id === chatId);
-    if (chatInfo && (chatInfo.title === 'New Chat' || chatInfo.title === 'Old Chat')) {
-        chatInfo.title = firstMessageContent.substring(0, 30) + (firstMessageContent.length > 30 ? '...' : '');
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
+    const meta = chatHistory.conversations.find(c => c.id === chatId);
+    if (meta && (meta.title === 'New Chat' || meta.title === 'Old Chat')) {
+        meta.title = firstMessageContent.substring(0, 30) + (firstMessageContent.length > 30 ? '...' : '');
+        chatHistory._saveList();
         renderHistoryList();
     }
 }
 
 function updateChatModel(chatId, modelId) {
-    const chatInfo = chatHistory.find(c => c.id === chatId);
-    if (chatInfo && chatInfo.model !== modelId) {
-        chatInfo.model = modelId;
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory));
+    const meta = chatHistory.conversations.find(c => c.id === chatId);
+    if (meta && meta.model !== modelId) {
+        meta.model = modelId;
+        chatHistory._saveList();
     }
 }
 
 function renderHistoryList() {
     if (!elements.chatHistoryList) return;
-    
-    // Sort by timestamp desc
-    chatHistory.sort((a, b) => b.timestamp - a.timestamp);
-    
+
+    const allChats = chatHistory.getAll();
+
     elements.chatHistoryList.innerHTML = '';
-    
-    if (chatHistory.length === 0) {
+
+    if (allChats.length === 0) {
         const emptyMsg = document.createElement('div');
         emptyMsg.style.padding = '1rem';
         emptyMsg.style.color = 'var(--color-shade5)';
@@ -2198,8 +2195,8 @@ function renderHistoryList() {
         elements.chatHistoryList.appendChild(emptyMsg);
         return;
     }
-    
-    chatHistory.forEach(chat => {
+
+    allChats.forEach(chat => {
         const item = document.createElement('div');
         item.className = 'chat-history-item' + (chat.id === currentChatId ? ' active' : '');
         
@@ -2345,33 +2342,23 @@ async function checkGatewayStatus() {
 // Theme Toggle
 // ============================================
 
-function toggleTheme() {
+async function toggleTheme() {
     const current = document.documentElement.getAttribute('data-theme') || 'light';
     const next = current === 'dark' ? 'light' : 'dark';
-    setTheme(next);
+    await setTheme(next);
 }
 
-function setTheme(theme) {
+async function setTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('chat-theme', theme);
-    
+    await storage.setPref('theme', theme);
+
     // Also sync with NUI if available
     if (window.nui?.setTheme) {
         window.nui.setTheme(theme);
     }
-    
+
     // Update color-scheme for native form elements
     document.documentElement.style.colorScheme = theme;
-}
-
-// Restore theme on load
-const savedTheme = localStorage.getItem('chat-theme');
-if (savedTheme) {
-    setTheme(savedTheme);
-} else {
-    // Default to system preference
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    setTheme(prefersDark ? 'dark' : 'light');
 }
 
 // ============================================

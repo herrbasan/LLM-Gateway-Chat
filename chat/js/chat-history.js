@@ -2,8 +2,7 @@
 // Chat History Management - Multiple Conversations
 // ============================================
 
-const HISTORY_KEY = 'chat-history-list';
-const ACTIVE_CHAT_KEY = 'chat-active-id';
+import { storage, PREFIX_CONV } from './storage.js';
 
 /**
  * Manages a list of saved conversations.
@@ -11,33 +10,24 @@ const ACTIVE_CHAT_KEY = 'chat-active-id';
  */
 export class ChatHistory {
     constructor() {
-        this.conversations = this._loadList();
+        this.conversations = [];
+        this._loadPromise = this._loadList();
     }
 
-    // ============================================
-    // List Management
-    // ============================================
-
-    _loadList() {
+    async _loadList() {
         try {
-            const data = localStorage.getItem(HISTORY_KEY);
-            return data ? JSON.parse(data) : [];
+            this.conversations = await storage.loadHistory();
         } catch (error) {
             console.error('[ChatHistory] Failed to load list:', error);
-            return [];
+            this.conversations = [];
         }
     }
 
-    _saveList() {
+    async _saveList() {
         try {
-            localStorage.setItem(HISTORY_KEY, JSON.stringify(this.conversations));
+            await storage.saveHistory(this.conversations);
         } catch (error) {
             console.error('[ChatHistory] Failed to save list:', error);
-            // If quota exceeded, remove oldest conversations
-            if (error.name === 'QuotaExceededError' && this.conversations.length > 3) {
-                this.conversations = this.conversations.slice(-3);
-                localStorage.setItem(HISTORY_KEY, JSON.stringify(this.conversations));
-            }
         }
     }
 
@@ -59,15 +49,15 @@ export class ChatHistory {
             messageCount: 0,
             model: ''
         };
-        
+
         // Add to beginning of list
         this.conversations.unshift(conversation);
         this._saveList();
         this._setActiveId(id);
-        
+
         // Initialize empty conversation data
         this._saveConversationData(id, []);
-        
+
         return id;
     }
 
@@ -85,7 +75,7 @@ export class ChatHistory {
         meta.updatedAt = Date.now();
         meta.messageCount = exchanges.length;
         if (model) meta.model = model;
-        
+
         // Generate title from first user message
         if (exchanges.length > 0 && meta.title === 'New Chat') {
             const firstUserMsg = exchanges[0]?.user?.content?.trim();
@@ -100,13 +90,13 @@ export class ChatHistory {
     }
 
     /**
-     * Load a conversation's exchanges
+     * Load a conversation's exchanges (async)
      * @param {string} id - Conversation ID
-     * @returns {Array} Array of exchanges
+     * @returns {Promise<Array>} Array of exchanges
      */
-    load(id) {
+    async load(id) {
         this._setActiveId(id);
-        return this._getConversationData(id);
+        return await this._getConversationData(id);
     }
 
     /**
@@ -123,7 +113,7 @@ export class ChatHistory {
 
         // If we deleted the active conversation, clear active ID
         if (this.getActiveId() === id) {
-            localStorage.removeItem(ACTIVE_CHAT_KEY);
+            storage.setActiveChatId(null).catch(() => {});
         }
 
         return true;
@@ -150,12 +140,8 @@ export class ChatHistory {
     /**
      * Get the currently active conversation ID
      */
-    getActiveId() {
-        try {
-            return localStorage.getItem(ACTIVE_CHAT_KEY);
-        } catch {
-            return null;
-        }
+    async getActiveId() {
+        return await storage.getActiveChatId();
     }
 
     /**
@@ -170,7 +156,7 @@ export class ChatHistory {
      */
     getMostRecent() {
         if (this.conversations.length === 0) return null;
-        return this.conversations.reduce((latest, c) => 
+        return this.conversations.reduce((latest, c) =>
             c.updatedAt > latest.updatedAt ? c : latest
         );
     }
@@ -179,12 +165,8 @@ export class ChatHistory {
     // Helpers
     // ============================================
 
-    _setActiveId(id) {
-        try {
-            localStorage.setItem(ACTIVE_CHAT_KEY, id);
-        } catch (error) {
-            console.error('[ChatHistory] Failed to set active ID:', error);
-        }
+    async _setActiveId(id) {
+        await storage.setActiveChatId(id);
     }
 
     _generateTitle(content) {
@@ -194,24 +176,15 @@ export class ChatHistory {
         return clean.substring(0, 30).trim() + '...';
     }
 
-    _getStorageKey(id) {
-        return `chat-data-${id}`;
-    }
-
     _saveConversationData(id, exchanges) {
-        try {
-            const key = this._getStorageKey(id);
-            localStorage.setItem(key, JSON.stringify(exchanges));
-        } catch (error) {
-            console.error('[ChatHistory] Failed to save conversation data:', error);
-        }
+        storage.saveConversation(id, exchanges).catch(err => {
+            console.error('[ChatHistory] Failed to save conversation data:', err);
+        });
     }
 
-    _getConversationData(id) {
+    async _getConversationData(id) {
         try {
-            const key = this._getStorageKey(id);
-            const data = localStorage.getItem(key);
-            return data ? JSON.parse(data) : [];
+            return await storage.loadConversation(id);
         } catch (error) {
             console.error('[ChatHistory] Failed to load conversation data:', error);
             return [];
@@ -219,43 +192,16 @@ export class ChatHistory {
     }
 
     _deleteConversationData(id) {
-        try {
-            const key = this._getStorageKey(id);
-            localStorage.removeItem(key);
-        } catch (error) {
-            console.error('[ChatHistory] Failed to delete conversation data:', error);
-        }
+        storage.deleteConversation(id).catch(err => {
+            console.error('[ChatHistory] Failed to delete conversation data:', err);
+        });
     }
 
-    // ============================================
-    // Migration
-    // ============================================
-
     /**
-     * Migrate from old single-conversation format
-     * Call this once on startup to preserve existing chat
+     * Ensure history is loaded before accessing conversations
      */
-    migrateLegacyConversation() {
-        try {
-            const legacyData = localStorage.getItem('chat-conversation');
-            if (!legacyData) return null;
-
-            const exchanges = JSON.parse(legacyData);
-            if (!Array.isArray(exchanges) || exchanges.length === 0) return null;
-
-            // Create new conversation with legacy data
-            const id = this.create();
-            this.save(id, exchanges);
-            
-            // Clear legacy data
-            localStorage.removeItem('chat-conversation');
-            
-            console.log('[ChatHistory] Migrated legacy conversation:', id);
-            return id;
-        } catch (error) {
-            console.error('[ChatHistory] Failed to migrate legacy:', error);
-            return null;
-        }
+    async ready() {
+        await this._loadPromise;
     }
 }
 

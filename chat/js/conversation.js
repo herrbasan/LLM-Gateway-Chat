@@ -3,6 +3,7 @@
 // ============================================
 
 import { imageStore } from './image-store.js';
+import { storage } from './storage.js';
 
 export class Conversation {
     constructor(storageKey = 'chat-conversation') {
@@ -393,44 +394,43 @@ export class Conversation {
     // ============================================
 
     save() {
-        try {
-            // Strip dataUrl before saving to localStorage (images are in IndexedDB)
-            const exchangesToSave = this.exchanges.map(ex => {
-                const base = { ...ex };
-                // Tool exchanges don't have user.attachments
-                if (ex.user?.attachments) {
-                    base.user = {
-                        ...ex.user,
-                        attachments: ex.user.attachments.map(att => ({
-                            name: att.name,
-                            type: att.type,
-                            hasImage: att.hasImage
-                            // dataUrl is intentionally omitted
-                        }))
-                    };
-                }
-                return base;
-            });
-            localStorage.setItem(this.storageKey, JSON.stringify(exchangesToSave));
-        } catch (error) {
-            console.error('[Conversation] Failed to save:', error);
-            // Handle quota exceeded - remove oldest exchanges
-            if (error.name === 'QuotaExceededError' && this.exchanges.length > 5) {
-                const removed = this.exchanges.slice(0, -5);
-                this.exchanges = this.exchanges.slice(-5);
-                // Clean up IndexedDB for removed exchanges
-                removed.forEach(ex => imageStore.delete(ex.id));
-                this.save();
+        // Strip dataUrl and systemPrompt before saving
+        // (images are in IndexedDB via imageStore, systemPrompt is re-computed on load)
+        const exchangesToSave = this.exchanges.map(ex => {
+            const base = { ...ex };
+            // Omit systemPrompt - it's re-computed and not needed after load
+            delete base.systemPrompt;
+            // Tool exchanges don't have user.attachments
+            if (ex.user?.attachments) {
+                base.user = {
+                    ...ex.user,
+                    attachments: ex.user.attachments.map(att => ({
+                        name: att.name,
+                        type: att.type,
+                        hasImage: att.hasImage
+                        // dataUrl is intentionally omitted
+                    }))
+                };
             }
-        }
+            return base;
+        });
+
+        // Extract conversation ID from storageKey (format: "chat-conversation-{id}")
+        const conversationId = this.storageKey.replace('chat-conversation-', '');
+        storage.saveConversation(conversationId, exchangesToSave).catch(err => {
+            console.error('[Conversation] Failed to save:', err);
+        });
     }
 
     async load() {
         try {
-            const data = localStorage.getItem(this.storageKey);
-            if (data) {
-                this.exchanges = JSON.parse(data);
-                
+            // Extract conversation ID from storageKey (format: "chat-conversation-{id}")
+            const conversationId = this.storageKey.replace('chat-conversation-', '');
+            const data = await storage.loadConversation(conversationId);
+
+            if (data && data.length > 0) {
+                this.exchanges = data;
+
                 // Load images from IndexedDB for each exchange
                 for (const ex of this.exchanges) {
                     if (ex.user && ex.user.attachments?.some(att => att.hasImage)) {
@@ -450,21 +450,21 @@ export class Conversation {
                             console.warn('[Conversation] Failed to load images for exchange', ex.id, err);
                         }
                     }
-                    
+
                     // Cleanup routine for historically duplicated versions
                     if (ex.assistant && Array.isArray(ex.assistant.versions) && ex.assistant.versions.length > 0) {
                         const uniqueVersions = [];
                         const seen = new Set();
-                        
+
                         for (const v of ex.assistant.versions) {
                             if (!seen.has(v.content)) {
                                 seen.add(v.content);
                                 uniqueVersions.push(v);
                             }
                         }
-                        
+
                         ex.assistant.versions = uniqueVersions;
-                        
+
                         if (ex.assistant.currentVersion >= uniqueVersions.length) {
                             ex.assistant.currentVersion = Math.max(0, uniqueVersions.length - 1);
                         }
@@ -481,7 +481,8 @@ export class Conversation {
         // Clear IndexedDB images
         await imageStore.clear();
         this.exchanges = [];
-        localStorage.removeItem(this.storageKey);
+        const conversationId = this.storageKey.replace('chat-conversation-', '');
+        storage.deleteConversation(conversationId);
     }
 
     /**
