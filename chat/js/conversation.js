@@ -58,7 +58,8 @@ export class Conversation {
                 name: toolName,
                 args: toolArgs,
                 status: 'pending',
-                content: ''
+                content: '',
+                images: []
             },
             assistant: {
                 role: 'assistant',
@@ -69,9 +70,8 @@ export class Conversation {
                 isComplete: false
             }
         };
-
         this.exchanges.push(exchange);
-        await this._save();
+        this.save();
         return exchange.id;
     }
 
@@ -99,7 +99,8 @@ export class Conversation {
                 currentVersion: 0,
                 isStreaming: true,
                 isComplete: false
-            }
+            },
+            systemPrompt: '' // Will be set when sending to gateway
         };
         
         // Store full images in IndexedDB
@@ -193,6 +194,13 @@ export class Conversation {
         this.save();
     }
 
+    setSystemPrompt(exchangeId, systemPrompt) {
+        const exchange = this.getExchange(exchangeId);
+        if (!exchange) return;
+        exchange.systemPrompt = systemPrompt;
+        this.save();
+    }
+
     setAssistantError(exchangeId, error) {
         const exchange = this.getExchange(exchangeId);
         if (!exchange) return;
@@ -265,11 +273,11 @@ export class Conversation {
     // ============================================
 
     getMessagesForApi(systemPrompt = '') {
-        const messages = [];
+        const rawMessages = [];
         
         // Add system prompt if provided
         if (systemPrompt?.trim()) {
-            messages.push({
+            rawMessages.push({
                 role: 'system',
                 content: systemPrompt.trim()
             });
@@ -282,39 +290,74 @@ export class Conversation {
         for (let i = 0; i < this.exchanges.length; i++) {
             const exchange = this.exchanges[i];
             const isLastExchange = i === lastExchangeIndex;
-            
-            // User message
-            // Only include attachments for the current (last) exchange
-            const validAttachments = isLastExchange 
-                ? exchange.user.attachments?.filter(att => att.getDataUrl || att.dataUrl) || []
-                : [];
+
+            // PHASE-3: Tool exchanges - add tool result as user message, skip normal user/assistant
+            if (exchange.type === 'tool') {
+                if (exchange.tool.status === 'success' || exchange.tool.status === 'error') {
+                    // 1) First, insert the assistant's tool call so the LLM remembers what it did
+                    rawMessages.push({
+                        role: 'assistant',
+                        content: `__TOOL_CALL__({"name": "${exchange.tool.name}", "args": ${JSON.stringify(exchange.tool.args)}})`
+                    });
+
+                    // 2) Then, provide the tool result back as the user
+                    const toolResultText = `<tool_result>\n  <tool_name>${exchange.tool.name}</tool_name>\n  <status>${exchange.tool.status}</status>\n  <output>\n${exchange.tool.content || ''}\n  </output>\n</tool_result>`;
+                    
+                    let toolResultOptions = { role: 'user', content: toolResultText };
+                    
+                    // Attach images for tool exchanges if present
+                    if (exchange.tool.images && exchange.tool.images.length > 0) {
+                        toolResultOptions.content = [
+                            { type: 'text', text: toolResultText },
+                            ...exchange.tool.images.map(imgUrl => ({
+                                type: 'image_url',
+                                image_url: { url: imgUrl, detail: 'auto' }
+                            }))
+                        ];
+                    }
+
+                    rawMessages.push(toolResultOptions);
+                }
                 
-            // Clean user content (in case of any timestamp duplication)
-            const cleanUserContent = this._stripExtraTimestamps(exchange.user.content);
-            
-            if (validAttachments.length > 0) {
-                // Multimodal content - text first, then images
-                const content = [
-                    {
-                        type: 'text',
-                        text: cleanUserContent
-                    },
-                    ...validAttachments.map(att => ({
-                        type: 'image_url',
-                        image_url: { 
-                            url: att.getDataUrl ? att.getDataUrl() : att.dataUrl, 
-                            detail: 'auto' 
-                        }
-                    }))
-                ];
-                messages.push({ role: 'user', content });
+                // Do not 'continue;' here! We must allow the assistant's response that generated AFTER the tool execution
+                // to be appended to the context, just like normal exchanges.
+                // However, since it is a tool exchange, it has no `user` message to push, so we just skip the user part and let the assistant part be evaluated below.
             } else {
-                messages.push({
-                    role: 'user',
-                    content: cleanUserContent
-                });
+                // User message (Only parse for normal exchanges)
+                // Only include attachments for the current (last) exchange
+                const validAttachments = isLastExchange
+                    ? exchange.user?.attachments?.filter(att => att.getDataUrl || att.dataUrl) || []
+                    : [];
+
+                // Clean user content (in case of any timestamp duplication)
+                const cleanUserContent = this._stripExtraTimestamps(exchange.user?.content || '');
+
+                if (validAttachments.length > 0) {
+                    // Multimodal content - text first, then images
+                    const content = [
+                        {
+                            type: 'text',
+                            text: cleanUserContent
+                        },
+                        ...validAttachments.map(att => ({
+                            type: 'image_url',
+                            image_url: {
+                                url: att.getDataUrl ? att.getDataUrl() : att.dataUrl,
+                                detail: 'auto'
+                            }
+                        }))
+                    ];
+                    rawMessages.push({ role: 'user', content });
+                } else {
+                    if (cleanUserContent) {
+                        rawMessages.push({
+                            role: 'user',
+                            content: cleanUserContent
+                        });
+                    }
+                }
             }
-            
+
             // Assistant message (only if complete)
             if (exchange.assistant.isComplete && exchange.assistant.content) {
                 // Clean assistant content (remove duplicate timestamps and thinking portions)
@@ -322,18 +365,23 @@ export class Conversation {
                     .replace(/<think>[\s\S]*?<\/think>/g, '')
                     .trim();
 
-                messages.push({
-                    role: 'assistant',
-                    content: cleanAssistantContent
-                });
+                if (cleanAssistantContent) {
+                    rawMessages.push({
+                        role: 'assistant',
+                        content: cleanAssistantContent
+                    });
+                }
             }
+        }
 
-            // PHASE-3: Protocol Mapping (Shim) for Tools
-            if (exchange.type === 'tool' && exchange.tool.status === 'success' && exchange.tool.content) {
-                messages.push({
-                    role: 'user',
-                    content: `[Tool Execution Result for '${exchange.tool.name}']\n${exchange.tool.content}`
-                });
+        // Merge back-to-back messages of the same role to prevent API validation errors
+        // (This happens if an assistant speaks, then calls a tool, creating two assistant parts)
+        const messages = [];
+        for (const msg of rawMessages) {
+            if (messages.length > 0 && messages[messages.length - 1].role === msg.role && typeof msg.content === 'string' && typeof messages[messages.length - 1].content === 'string') {
+                messages[messages.length - 1].content += '\n' + msg.content;
+            } else {
+                messages.push(msg);
             }
         }
 
@@ -347,18 +395,22 @@ export class Conversation {
     save() {
         try {
             // Strip dataUrl before saving to localStorage (images are in IndexedDB)
-            const exchangesToSave = this.exchanges.map(ex => ({
-                ...ex,
-                user: {
-                    ...ex.user,
-                    attachments: ex.user.attachments?.map(att => ({
-                        name: att.name,
-                        type: att.type,
-                        hasImage: att.hasImage
-                        // dataUrl is intentionally omitted
-                    })) || []
+            const exchangesToSave = this.exchanges.map(ex => {
+                const base = { ...ex };
+                // Tool exchanges don't have user.attachments
+                if (ex.user?.attachments) {
+                    base.user = {
+                        ...ex.user,
+                        attachments: ex.user.attachments.map(att => ({
+                            name: att.name,
+                            type: att.type,
+                            hasImage: att.hasImage
+                            // dataUrl is intentionally omitted
+                        }))
+                    };
                 }
-            }));
+                return base;
+            });
             localStorage.setItem(this.storageKey, JSON.stringify(exchangesToSave));
         } catch (error) {
             console.error('[Conversation] Failed to save:', error);
@@ -381,7 +433,7 @@ export class Conversation {
                 
                 // Load images from IndexedDB for each exchange
                 for (const ex of this.exchanges) {
-                    if (ex.user.attachments?.some(att => att.hasImage)) {
+                    if (ex.user && ex.user.attachments?.some(att => att.hasImage)) {
                         try {
                             const images = await imageStore.load(ex.id);
                             // Merge image data with metadata

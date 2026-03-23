@@ -579,6 +579,8 @@ async function streamResponse(exchangeId) {
     const timestampWithSpace = assistantTimestamp + ' ';
     conversation.updateAssistantResponse(exchangeId, timestampWithSpace);
     const systemPrompt = getSystemPromptWithMetadata();
+    // Store system prompt for debugging (included in JSON export)
+    conversation.setSystemPrompt(exchangeId, systemPrompt);
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
@@ -607,7 +609,7 @@ async function streamResponse(exchangeId) {
     
     try {
         const messages = conversation.getMessagesForApi(systemPrompt);
-        
+
         const requestBody = {
             model: currentModel,
             messages,
@@ -618,9 +620,15 @@ async function streamResponse(exchangeId) {
         if (maxTokens) {
             requestBody.max_tokens = maxTokens;
         }
-        
+
+        // PHASE-3: Pass tools array so LLM knows what it can request
+        const mcpTools = mcpClient.getFormattedToolsForLLM();
+        if (mcpTools.length > 0) {
+            requestBody.tools = mcpTools;
+        }
+
         // Add image processing if images attached
-        if (exchange.user.attachments?.length > 0) {
+        if (exchange.user?.attachments?.length > 0) {
             requestBody.image_processing = {
                 resize: 'auto',
                 transcode: 'jpg',
@@ -632,11 +640,13 @@ async function streamResponse(exchangeId) {
         let pendingUpdate = false;
         let lastRender = 0;
         const RENDER_INTERVAL = 50; // Render at most every 50ms
-        
-// PHASE-3: Line-buffered State for Tool Execution Prefixing
-        let mdCodeBlockOpen = false;
-        let currentLineBuffer = '';
+
+        // PHASE-3: __TOOL_CALL__ text detection
+        // Matches: __TOOL_CALL__({"name": "tool", "args": {...}})
+        // The JSON args may span multiple lines with nested objects
+        const TOOL_CALL_REGEX = /__TOOL_CALL__\(([\s\S]*?)\)\s*$/;
         let toolCallIntercepted = false;
+        let isReceivingTool = false;
 
         for await (const event of client.streamChatIterable(requestBody)) {
             if (toolCallIntercepted) break; // Halts the iterable immediately
@@ -647,60 +657,41 @@ async function streamResponse(exchangeId) {
                     const statusEl = assistantEl.querySelector('.progress-status');
                     if (statusEl) statusEl.classList.remove('visible');
 
-                    // If a chunk contains newline boundary, test it.
-                    const chunks = event.content.split('\n');
-                    for (let i = 0; i < chunks.length; i++) {
-                        currentLineBuffer += chunks[i];
-
-                        // End of line reached
-                        if (i < chunks.length - 1) {
-                            if (currentLineBuffer.trim().startsWith('\`\`\`')) {
-                                mdCodeBlockOpen = !mdCodeBlockOpen;
-                            }
-                            if (!mdCodeBlockOpen && currentLineBuffer.trim().startsWith('__TOOL_CALL__(')) {
-                                const trimBuf = currentLineBuffer.trim();
-                                if (trimBuf.endsWith(')')) {
-                                    const payloadStr = trimBuf.substring(14, trimBuf.length - 1);
-                                    try {
-                                        const parsedObj = JSON.parse(payloadStr);
-                                        toolCallIntercepted = true;
-                                        handleToolExecution(exchangeId, parsedObj);
-                                        break; // break the chunk loop
-                                    } catch (e) {
-                                        console.warn("Failed to parse tool call JSON", e);
-                                        // Ignore and continue, or we could inject a system alert. Just ignore for now.
-                                    }
-                                }
-                            }
-                            currentLineBuffer = '';
-                        }
-                    }
-
-                    if (toolCallIntercepted) {
-                        const idx = event.content.indexOf('__TOOL_CALL__(');
-                        if (idx > 0) {
-                            const textBefore = event.content.substring(0, idx);
-                            contentBuffer += textBefore;
-                            conversation.updateAssistantResponse(exchangeId, textBefore);
-                        }
-                        break;
-                    }
-
                     contentBuffer += event.content;
                     conversation.updateAssistantResponse(exchangeId, event.content);
+
+                    const toolCallIndex = contentBuffer.indexOf('__TOOL_CALL__');
+                    if (toolCallIndex !== -1 && !isReceivingTool) {
+                        isReceivingTool = true;
+                        showPendingToolUI(exchangeId);
+                    }
+
+                    // Check for __TOOL_CALL__ pattern in accumulated content
+                    const toolMatch = contentBuffer.match(TOOL_CALL_REGEX);
+                    if (toolMatch) {
+                        const rawJson = toolMatch[1].trim();
+                        try {
+                            const parsedObj = JSON.parse(rawJson);
+                            if (parsedObj.name && parsedObj.args) {
+                                toolCallIntercepted = true;
+                                handleToolExecution(exchangeId, parsedObj);
+                                break;
+                            }
+                        } catch (e) {
+                            // JSON not complete yet, continue streaming
+                        }
+                    }
 
                     // Debounce DOM updates to prevent freezing
                     if (!pendingUpdate) {
                         pendingUpdate = true;
                         const now = performance.now();
                         const delay = Math.max(0, Math.min(RENDER_INTERVAL, RENDER_INTERVAL - (now - lastRender)));
-                        
+
                         const wasNearBottom = isNearBottom();
                         setTimeout(() => {
-                            // Reconstruct full content with timestamp for proper stripping
-                            const tsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
-                            const fullContent = tsMatch ? tsMatch[0] + contentBuffer : contentBuffer;
-                            updateAssistantContent(assistantEl, fullContent);
+                            // Give the UI the content without the __TOOL_CALL__ part
+                            updateAssistantContent(assistantEl, contentBuffer);
                             lastRender = performance.now();
                             pendingUpdate = false;
                             if (wasNearBottom) scrollToBottom();
@@ -738,32 +729,23 @@ async function streamResponse(exchangeId) {
                     break;
                     
                 case 'done':
-                    // Check if a tool call was left dangling without a trailing newline
-                    if (!mdCodeBlockOpen && currentLineBuffer.trim().startsWith('__TOOL_CALL__(')) {
-                        const trimBuf = currentLineBuffer.trim();
-                        if (trimBuf.endsWith(')')) {
-                            const payloadStr = trimBuf.substring(14, trimBuf.length - 1);
-                            try {
-                                const parsedObj = JSON.parse(payloadStr);
-                                toolCallIntercepted = true;
-                                handleToolExecution(exchangeId, parsedObj);
-                            } catch (e) {
-                                console.warn("Failed to parse tool call JSON", e);
-                            }
-                        }
-                    }
+                    // Tool calls are handled via __TOOL_CALL__ text detection in delta events
+                    // handleToolExecution() already called streamResponse() to continue
                     if (toolCallIntercepted) break;
 
                     // contentBuffer doesn't include our injected timestamp
                     // Get the exchange to find the original timestamp we injected
                     const ex = conversation.getExchange(exchangeId);
+                    
+                    let finalContent = contentBuffer;
+                    const toolIdxDone = finalContent.indexOf('__TOOL_CALL__');
+                    if (toolIdxDone !== -1) {
+                        finalContent = finalContent.substring(0, toolIdxDone).trim();
+                    }
                     const tsMatch = ex?.assistant?.content?.match(TIMESTAMP_REGEX);
-                    let finalContent;
                     if (tsMatch) {
                         // Reconstruct: original timestamp + content buffer (no LLM timestamp)
-                        finalContent = tsMatch[0] + contentBuffer;
-                    } else {
-                        finalContent = contentBuffer;
+                        finalContent = tsMatch[0] + finalContent; // use the stripped finalContent instead of raw contentBuffer
                     }
                     // Strip any extra timestamps LLM may have generated
                     finalContent = stripExtraTimestamps(finalContent);
@@ -850,22 +832,37 @@ function renderExchange(exchange) {
         
         const isSuccess = exchange.tool.status === 'success';
         const isError = exchange.tool.status === 'error';
-        const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : 'Running...');
+        const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : '<span class="tool-spinner"></span>&nbsp;Running...');
         const statusColor = isSuccess ? 'green' : (isError ? 'red' : 'var(--nui-accent)');
         
+        let hasImages = exchange.tool.images && exchange.tool.images.length > 0;
+        let imagesHtml = '';
+        if (hasImages) {
+            imagesHtml = `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">`;
+            exchange.tool.images.forEach(img => {
+                imagesHtml += `<img src="${img}" style="max-width: 100%; border-radius: var(--border-radius1); border: 1px solid var(--nui-shade3);" />`;
+            });
+            imagesHtml += `</div>`;
+        }
+
         let resultHtml = '';
         if (isSuccess) resultHtml = `<strong>Result:</strong><br>${exchange.tool.content}`;
         else if (isError) resultHtml = `<strong>Error:</strong> ${exchange.tool.content}`;
 
         toolEl.innerHTML = `
-            <div class="message-header" style="cursor:pointer; display: flex; align-items: center; gap: 0.5rem; color: var(--nui-shade5);">
-                <nui-icon name="handyman" style="font-size: 1.2rem;"></nui-icon>
-                <strong>Tool: ${parsedObj.name}</strong>
-                <span class="tool-status" style="margin-left: auto; color: ${statusColor};">${displayStatus}</span>
-            </div>
-            <div class="message-content tool-payload" style="display: none; padding: 0.5rem; margin-top: 0.5rem; background: var(--nui-shade1); border-radius: var(--border-radius1); font-family: monospace; font-size: 0.85rem; overflow-x: auto;">
-                <div><strong>Args:</strong> ${JSON.stringify(parsedObj.args, null, 2)}</div>
-                <div class="tool-result">${resultHtml}</div>
+            <div style="width: 100%; box-sizing: border-box; background: var(--nui-shade1, rgba(0,0,0,0.02)); border: 1px solid var(--border-shade2, var(--nui-shade3)); border-radius: var(--border-radius2, 8px); margin: 0.5rem 0 1rem 0; overflow: hidden;">
+                <div class="message-header" style="height: 48px; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; gap: 0.75rem; padding: 0 1rem; color: var(--nui-shade6);">
+                    <nui-icon name="api" style="font-size: 1.1rem; color: var(--nui-shade5); flex-shrink: 0;"></nui-icon>
+                    <strong style="font-size: 0.95em; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SYSTEM TOOL: ${parsedObj.name}</strong>
+                    <span class="tool-status" style="margin-left: auto; font-size: 0.85em; font-weight: bold; color: ${statusColor}; flex-shrink: 0; white-space: nowrap; display: flex; align-items: center;">${displayStatus}</span>
+                </div>
+                <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'}; padding: 0 1rem 1rem 1rem; box-sizing: border-box;">${imagesHtml}</div>
+                <div class="message-content tool-payload" style="display: none; border-top: 1px solid var(--border-shade1, var(--nui-shade2)); padding: 1rem; background: var(--nui-bg); font-family: monospace; font-size: 0.85rem; overflow-x: auto; white-space: pre-wrap; margin-top: 0;">
+                    <div style="color: var(--nui-shade5); margin-bottom: 0.5rem; text-transform: uppercase; font-size: 0.8em; letter-spacing: 1px;">Arguments</div>
+                    <div style="color: var(--nui-shade7); padding-bottom: 0.75rem; margin-bottom: 0.75rem; border-bottom: 1px dashed var(--nui-shade3);">${JSON.stringify(parsedObj.args, null, 2)}</div>
+                    <div style="color: var(--nui-shade5); margin-bottom: 0.5rem; text-transform: uppercase; font-size: 0.8em; letter-spacing: 1px;">Execution Result</div>
+                    <div class="tool-result" style="color: var(--nui-shade7);">${resultHtml}</div>
+                </div>
             </div>
         `;
         elements.messages?.appendChild(toolEl);
@@ -1188,6 +1185,26 @@ function updateOverallContext(contextData = null) {
 // PHASE-3: MCP Tool Execution Logic
 // ============================================
 
+function showPendingToolUI(exchangeId) {
+    const toolEl = document.createElement('div');
+    toolEl.className = 'chat-message tool pending-tool-element';
+    toolEl.dataset.pendingExchangeId = exchangeId;
+
+    toolEl.innerHTML = `
+        <div style="width: 100%; box-sizing: border-box; background: var(--nui-shade1, rgba(0,0,0,0.02)); border: 1px dashed var(--nui-shade3); border-radius: var(--border-radius2, 8px); margin: 0.5rem 0 1rem 0; overflow: hidden; opacity: 0.8; animation: pulse 2s infinite;">
+            <div class="message-header" style="height: 48px; box-sizing: border-box; display: flex; align-items: center; gap: 0.75rem; padding: 0 1rem; color: var(--nui-shade6);">
+                <nui-icon name="api" style="font-size: 1.1rem; color: var(--nui-shade5); flex-shrink: 0;"></nui-icon>
+                <strong style="font-size: 0.95em; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SYSTEM TOOL</strong>
+                <span class="tool-status" style="margin-left: auto; font-size: 0.85em; font-weight: bold; color: var(--nui-accent); flex-shrink: 0; white-space: nowrap; display: flex; align-items: center;">
+                    <span class="tool-spinner"></span> Receiving...
+                </span>
+            </div>
+        </div>
+    `;
+    elements.messages.appendChild(toolEl);
+    scrollToBottom();
+}
+
 async function handleToolExecution(originalExchangeId, parsedObj) {
     console.log('[Tool Call Intercepted]', parsedObj);
     
@@ -1201,7 +1218,12 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
     if (originalEl) {
         updateAssistantContent(originalEl, oldEx.assistant.content);
     }
-    
+
+    const pendingEl = elements.messages?.querySelector(`.pending-tool-element[data-pending-exchange-id="${originalExchangeId}"]`);
+    if (pendingEl) {
+        pendingEl.remove();
+    }
+
     // 2. Create the tool exchange
     const toolExchangeId = await conversation.addToolExchange(parsedObj.name, parsedObj.args);
     const exchange = conversation.getExchange(toolExchangeId);
@@ -1214,37 +1236,93 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
     
     // Build collapsible box UI
     toolEl.innerHTML = `
-        <div class="message-header" style="cursor:pointer; display: flex; align-items: center; gap: 0.5rem; color: var(--nui-shade5);">
-            <nui-icon name="handyman" style="font-size: 1.2rem;"></nui-icon>
-            <strong>Tool: ${parsedObj.name}</strong>
-            <span class="tool-status" style="margin-left: auto; color: var(--nui-accent);">Running...</span>
-        </div>
-        <div class="message-content tool-payload" style="display: none; padding: 0.5rem; margin-top: 0.5rem; background: var(--nui-shade1); border-radius: var(--border-radius1); font-family: monospace; font-size: 0.85rem; overflow-x: auto;">
-            <div><strong>Args:</strong> ${JSON.stringify(parsedObj.args, null, 2)}</div>
-            <div class="tool-result"></div>
+          <div style="width: 100%; box-sizing: border-box; background: var(--nui-shade1, rgba(0,0,0,0.02)); border: 1px solid var(--border-shade2, var(--nui-shade3)); border-radius: var(--border-radius2, 8px); margin: 0.5rem 0 1rem 0; overflow: hidden;">
+              <div class="message-header" style="height: 48px; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; gap: 0.75rem; padding: 0 1rem; color: var(--nui-shade6);">
+                  <nui-icon name="api" style="font-size: 1.1rem; color: var(--nui-shade5); flex-shrink: 0;"></nui-icon>
+                  <strong style="font-size: 0.95em; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SYSTEM TOOL: ${parsedObj.name}</strong>
+                  <span class="tool-status" style="margin-left: auto; font-size: 0.85em; font-weight: bold; color: var(--nui-accent); flex-shrink: 0; white-space: nowrap; display: flex; align-items: center;"><span class="tool-spinner"></span>&nbsp;Running...</span>
+              </div>
+              <div class="tool-images" style="display: none; padding: 0 1rem 1rem 1rem; box-sizing: border-box;"></div>
+              <div class="message-content tool-payload" style="display: none; border-top: 1px solid var(--border-shade1, var(--nui-shade2)); padding: 1rem; background: var(--nui-bg); font-family: monospace; font-size: 0.85rem; overflow-x: auto; white-space: pre-wrap; margin-top: 0;">
+                <div style="color: var(--nui-shade5); margin-bottom: 0.5rem; text-transform: uppercase; font-size: 0.8em; letter-spacing: 1px;">Execution Result</div>
+                <div class="tool-result" style="color: var(--nui-shade7);"></div>
+            </div>
         </div>
     `;
+
     elements.messages.appendChild(toolEl);
     scrollToBottom();
 
-    // Toggle expand/collapse
-    toolEl.querySelector('.message-header').addEventListener('click', () => {
+// Toggle expand/collapse
+    toolEl.querySelector('.message-header').addEventListener('click', (e) => {
+        // Prevent toggle if clicking a button
+        if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
         const payloadBox = toolEl.querySelector('.tool-payload');
         payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
     });
 
     // 4. Execute tool
     try {
-        const result = await mcpClient.executeTool(parsedObj.name, parsedObj.args);
-        
+        const result = await mcpClient.executeTool(parsedObj.name, parsedObj.args, (progressParams) => {
+            // Update UI on progress
+            const { progress, total, message } = progressParams;
+            let statusText = 'Running...';
+            if (message) statusText = message;
+            if (progress !== undefined) {
+                statusText += ` (${progress}${total ? '/' + total : ''})`;
+            }
+            toolEl.querySelector('.tool-status').innerHTML = '<span class="tool-spinner"></span>&nbsp;' + statusText;
+        });
+
         exchange.tool.status = 'success';
-        exchange.tool.content = JSON.stringify(result, null, 2);
+        // Extract the actual content from MCP result structure
+        // MCP result is { content: [{ type: 'text', text: '...' }] } or similar
+        let resultText = '';
+        const resultImages = [];
+        if (result && typeof result === 'object') {
+            if (result.content && Array.isArray(result.content)) {
+                resultText = result.content.map(c => {
+                    if (c.type === 'text') return c.text;
+                    if (c.type === 'image' && c.data) {
+                        const mime = c.mimeType || 'image/png';
+                        // Keep image data outside the text payload to prevent blowing up the token string directly
+                        resultImages.push(`data:${mime};base64,${c.data}`);
+                        return '[Image Included in Output]';
+                    }
+                    return JSON.stringify(c);
+                }).join('\n');
+            } else if (result.text) {
+                resultText = result.text;
+            } else {
+                resultText = JSON.stringify(result);
+            }
+        } else {
+            resultText = String(result);
+        }
+        // Strip any __TOOL_CALL__ artifacts from the result
+        resultText = resultText.replace(/__TOOL_CALL__\([\s\S]*?\)/g, '').trim();
+        exchange.tool.content = resultText;
+        if (resultImages.length > 0) {
+            exchange.tool.images = resultImages;
+        }
         conversation.save(); // persist
-        
+
         toolEl.querySelector('.tool-status').textContent = 'Success';
-        toolEl.querySelector('.tool-status').style.color = 'green';
-        toolEl.querySelector('.tool-result').innerHTML = `<strong>Result:</strong><br>${exchange.tool.content}`;
+        toolEl.querySelector('.tool-status').style.color = 'var(--color-success, #2e7d32)';
         
+        let toolResultHtml = exchange.tool.content;
+        if (exchange.tool.images && exchange.tool.images.length > 0) {
+            const imagesDiv = toolEl.querySelector('.tool-images');
+            imagesDiv.style.display = 'block';
+            let imagesHtml = `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">`;
+            exchange.tool.images.forEach(img => {
+                imagesHtml += `<img src="${img}" style="max-width: 100%; border-radius: var(--border-radius1); border: 1px solid var(--nui-shade3);" />`;
+            });
+            imagesHtml += `</div>`;
+            imagesDiv.innerHTML = imagesHtml;
+        }
+        toolEl.querySelector('.tool-result').innerHTML = toolResultHtml;
+
         // 5. Automatically resume stream!
         // We will start a new pseudo-assistant stream using the toolExchangeId
         // The LLM will receive the shimmed 'user' message and continue generating
@@ -1257,9 +1335,9 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         conversation.save();
 
         toolEl.querySelector('.tool-status').textContent = 'Failed';
-        toolEl.querySelector('.tool-status').style.color = 'red';
-        toolEl.querySelector('.tool-result').innerHTML = `<strong>Error:</strong> ${exchange.tool.content}
-            <div style="margin-top: 0.5rem;">
+        toolEl.querySelector('.tool-status').style.color = 'var(--color-error, #d32f2f)';
+        toolEl.querySelector('.tool-result').innerHTML = `<span style="color: var(--color-error, #d32f2f);">${exchange.tool.content}</span>
+            <div style="margin-top: 1rem; border-top: 1px dashed var(--nui-shade3); padding-top: 0.75rem;">
                 <nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>
                 <nui-button size="small" class="dismiss-tool"><button>Dismiss & Continue</button></nui-button>
             </div>
@@ -1269,7 +1347,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         // Wire up retry/dismiss
         toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
             toolEl.querySelector('.tool-result').innerHTML = '';
-            toolEl.querySelector('.tool-status').textContent = 'Running...';
+            toolEl.querySelector('.tool-status').innerHTML = '<span class="tool-spinner"></span>&nbsp;Running...';
             toolEl.querySelector('.tool-status').style.color = 'var(--nui-accent)';
             handleToolExecution(originalExchangeId, parsedObj); // re-run recursively! wait, we might duplicate exchange. Instead, just execute again inside here.
             // Simplified: just let user delete/regenerate, or handle properly inside handleToolExecution.
@@ -1287,27 +1365,40 @@ function updateAssistantContent(el, content) {
     const contentDiv = el.querySelector('.message-content');
     if (!contentDiv) return;
 
+    let visibleContent = content;
+
+    // First strip out the tool call exactly, so we don't accidentally leave floating whitespace or closing braces
+    const toolCallIndex = visibleContent.indexOf('__TOOL_CALL__');
+    if (toolCallIndex !== -1) {
+        visibleContent = visibleContent.substring(0, toolCallIndex).trim();
+    }
+
     // Strip the injected timestamp from visible content (shown in header)
-    // We know the exact format: [YYYY-MM-DD@HH:MM] with optional space
-    if (el.dataset.timestampLen && content.startsWith('[')) {
+    if (el.dataset.timestampLen && visibleContent.startsWith('[')) {
         const len = parseInt(el.dataset.timestampLen);
-        if (content.length >= len) {
-            content = content.substring(len);
-        } else if (content.length < 20) {
+        if (visibleContent.length >= len) {
+            visibleContent = visibleContent.substring(len).trim();
+        } else if (visibleContent.length < 20) {
             // Not enough content yet, likely still building up timestamp
             return;
         }
-        // If content is between 17-19 chars and starts with '[', it might be partial timestamp
-        // Just strip what we can and continue
-    } else if (content.startsWith('[')) {
+    } else if (visibleContent.startsWith('[')) {
         // Fallback: try to parse timestamp (for backwards compatibility)
-        const tsParsed = parseTimestamp(content);
-        content = tsParsed.cleanContent;
+        const tsParsed = parseTimestamp(visibleContent);
+        visibleContent = tsParsed.cleanContent;
+    }
+
+    // Hide the entire assistant bubble if it's completely empty (or just contained the stripped TOOL_CALL)
+    if (!visibleContent.trim()) {
+        el.style.display = 'none';
+        // Note: we don't return here, so it updates the internal state in case it needs to re-appear later
+    } else {
+        el.style.display = '';
     }
 
     // Skip if content hasn't changed (prevents redundant renders during streaming)
-    if (contentDiv.dataset.lastContent === content) return;
-    contentDiv.dataset.lastContent = content;
+    if (contentDiv.dataset.lastContent === visibleContent) return;
+    contentDiv.dataset.lastContent = visibleContent;
 
     // Check if thinking-content is currently scrolled to bottom to maintain it
     let thinkingScrollTop = 0;
@@ -1320,7 +1411,7 @@ function updateAssistantContent(el, content) {
     }
 
     // Parse thinking and answer
-    const parsed = parseThinking(content);
+    const parsed = parseThinking(visibleContent);
 
     // INCREMENTAL DOM UPDATE PATTERN:
     // Only create elements once, then update in place
@@ -1477,9 +1568,9 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
 
     if (finalContext) {
         updateUsageDisplay(el, finalContext);
-    } else if (exchange && exchange.assistant.content) {
+    } else if (exchange && exchange.assistant?.content) {
         // If we lack explicit context stats, fallback to a heuristic estimation if it's rendered in history
-        const userContent = typeof exchange.user.content === 'string' ? exchange.user.content : '';
+        const userContent = exchange.user ? (typeof exchange.user.content === 'string' ? exchange.user.content : '') : '';
         let assistantContent = typeof exchange.assistant.content === 'string' ? exchange.assistant.content : '';
         
         // Strip <think>...</think> blocks
@@ -1799,26 +1890,85 @@ async function deleteChat(chatId, e) {
 }
 
 function exportChatAsJson(chatId, btn) {
-    // Export for debugging - excludes images, just metadata
+    // Export the request body as it would be sent to the gateway (for debugging)
     const chatDataString = localStorage.getItem(`chat-conversation-${chatId}`);
     if (!chatDataString) return;
-    
+
     try {
         const exchanges = JSON.parse(chatDataString);
-        // Create debug version without any image data
-        const debugExchanges = exchanges.map(ex => ({
-            ...ex,
-            user: {
-                ...ex.user,
-                attachments: ex.user.attachments?.map(att => ({
-                    name: att.name,
-                    type: att.type,
-                    hasImage: att.hasImage
-                    // Intentionally omit dataUrl/blobUrl
-                })) || []
+        const chatInfo = chatHistory.find(c => c.id === chatId);
+
+        // Build messages array exactly like getMessagesForApi does
+        const systemPrompt = getSystemPromptWithMetadata();
+        const rawMessages = [];
+
+        if (systemPrompt?.trim()) {
+            rawMessages.push({ role: 'system', content: systemPrompt.trim() });
+        }
+
+        const lastExchangeIndex = exchanges.length - 1;
+        for (let i = 0; i < exchanges.length; i++) {
+            const ex = exchanges[i];
+
+            if (ex.type === 'tool') {
+                // Tool results
+                if (ex.tool?.status === 'success' || ex.tool?.status === 'error') {
+                    rawMessages.push({
+                        role: 'assistant',
+                        content: `__TOOL_CALL__({"name": "${ex.tool.name}", "args": ${JSON.stringify(ex.tool.args)}})`
+                    });
+                    rawMessages.push({
+                        role: 'user',
+                        content: `<tool_result>\n  <tool_name>${ex.tool.name}</tool_name>\n  <status>${ex.tool.status}</status>\n  <output>\n${ex.tool.content || ''}\n  </output>\n</tool_result>`
+                    });
+                }
+            } else {
+                const cleanUserContent = ex.user ? (ex.user.content || '') : '';
+                
+                // User message (strip timestamps for export)
+                const userContent = cleanUserContent.replace(/^\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g, '');
+                if (userContent) {
+                    rawMessages.push({ role: 'user', content: userContent });
+                }
             }
-        }));
-        const formattedJson = JSON.stringify(debugExchanges, null, 2);
+
+            // Assistant message (if complete)
+            if (ex.assistant?.isComplete && ex.assistant.content) {
+                const cleanAssistantContent = ex.assistant.content
+                    .replace(/^\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g, '')
+                    .replace(/<think>[\s\S]*?<\/think>/g, '')
+                    .trim();
+                if (cleanAssistantContent) {
+                    rawMessages.push({ role: 'assistant', content: cleanAssistantContent });
+                }
+            }
+        }
+
+        // Merge back-to-back messages of the same role
+        const messages = [];
+        for (const msg of rawMessages) {
+            if (messages.length > 0 && messages[messages.length - 1].role === msg.role && typeof msg.content === 'string' && typeof messages[messages.length - 1].content === 'string') {
+                messages[messages.length - 1].content += '\n' + msg.content;
+            } else {
+                messages.push(msg);
+            }
+        }
+
+        // Build request body
+        const requestBody = {
+            model: chatInfo?.model || currentModel || 'unknown',
+            messages,
+            temperature: parseFloat(elements.temperature?.value) || 0.7,
+            stream: true
+        };
+
+        // Add tools if available
+        const mcpTools = mcpClient.getFormattedToolsForLLM();
+        if (mcpTools.length > 0) {
+            requestBody.tools = mcpTools;
+        }
+
+        const formattedJson = JSON.stringify(requestBody, null, 2);
         navigator.clipboard.writeText(formattedJson).then(() => {
             if (btn) {
                 const originalHtml = btn.innerHTML;
@@ -2386,9 +2536,7 @@ function renderMCPServers() {
                 <!-- Header: Title and Toggle -->
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem;">
                     <h3 style="margin: 0; font-size: 1.1rem; color: var(--nui-fg); word-break: break-word;">${server.name}</h3>
-                    <nui-checkbox variant="switch" title="Connect/Disconnect">
-                        <input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected ? 'checked' : ''} ${(server.status === 'connecting...') ? 'disabled' : ''}>
-                    </nui-checkbox>
+                    <nui-checkbox variant="switch" title="Connect/Disconnect"><input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected ? 'checked' : ''} ${(server.status === 'connecting...') ? 'disabled' : ''}></nui-checkbox>
                 </div>
 
                 <!-- Status Badge -->
@@ -2432,23 +2580,18 @@ function renderMCPServers() {
             });
         }
 
-        const toggle = card.querySelector(`[data-mcp-status-toggle="${server.id}"]`);
+        const toggle = card.querySelector(`nui-checkbox`);
         if (toggle) {
-            toggle.addEventListener('change', async (e) => {
-                if (e.target.checked) {
-                    try {
-                        server.status = 'connecting...';
-                        renderMCPServers();
-                        await mcpClient.connectToServer(server);
-                    } catch (err) {
+            toggle.addEventListener('nui-change', (e) => {
+                if (e.detail.checked) {
+                    mcpClient.connectToServer(server).catch(err => {
                         console.error("Connect failed", err);
-                    } finally {
                         renderMCPServers();
-                    }
+                    });
                 } else {
                     mcpClient.disconnectServer(server.id);
-                    renderMCPServers();
                 }
+                renderMCPServers();
             });
         }
 
@@ -2471,24 +2614,26 @@ function openMCPEditDialog(server) {
     } else {
         server.tools.forEach(tool => {
             const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
-            
             const toolEl = document.createElement('label');
             toolEl.style.cssText = 'display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid var(--nui-shade2); cursor: pointer;';
 
-            toolEl.innerHTML = `
-                <nui-checkbox style="margin-top: 0.1rem;">
-                    <input type="checkbox" data-mcp-toggle="${server.id}" data-mcp-tool="${tool.name}" ${isEnabled ? 'checked' : ''}>
-                </nui-checkbox>
-                <div style="display: flex; flex-direction: column; gap: 0.25rem;">
-                    <span style="font-weight: 600; color: var(--nui-fg); font-size: 0.95rem;">${tool.name}</span>
-                    <span style="font-size: 0.85rem; color: var(--nui-shade5); line-height: 1.4;">${tool.description || 'No description available.'}</span>
-                </div>
+            const nuiCheckbox = document.createElement('nui-checkbox');
+            nuiCheckbox.innerHTML = `<input type="checkbox" data-mcp-toggle="${server.id}" data-mcp-tool="${tool.name}">`;
+            const input = nuiCheckbox.querySelector('input');
+            if (isEnabled) input.checked = true;
+
+            toolEl.appendChild(nuiCheckbox);
+            const textDiv = document.createElement('div');
+            textDiv.style.cssText = 'display: flex; flex-direction: column; gap: 0.25rem;';
+            textDiv.innerHTML = `
+                <span style="font-weight: 600; color: var(--nui-fg); font-size: 0.95rem;">${tool.name}</span>
+                <span style="font-size: 0.85rem; color: var(--nui-shade5); line-height: 1.4;">${tool.description || 'No description available.'}</span>
             `;
-            
-            const checkbox = toolEl.querySelector('input');
-            checkbox.addEventListener('change', (e) => {
-                mcpClient.setToolEnabled(server.id, tool.name, e.target.checked);
-                renderMCPServers(); // Update the main config card badge dynamically
+            toolEl.appendChild(textDiv);
+
+            nuiCheckbox.addEventListener('nui-change', (e) => {
+                mcpClient.setToolEnabled(server.id, tool.name, e.detail.checked);
+                renderMCPServers();
             });
             
             toolsContainer.appendChild(toolEl);
