@@ -1218,3 +1218,12 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 
 
+
+.tool-notifications {
+    font-size: 0.85em;
+    color: var(--color-highlight);
+    padding: 0 1rem 0.5rem 1rem;
+    font-style: italic;
+    display: none;
+}
+
