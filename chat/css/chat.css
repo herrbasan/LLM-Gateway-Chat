@@ -17,6 +17,7 @@ button, input, textarea, select, a {
 /* Root theme variables - ensure NUI compatibility */
 :root {
     --sidebar-width: 24rem;
+    --chat-bubble-radius: 0.75rem;
 }
 
 /* Layout */
