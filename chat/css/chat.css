@@ -1,4 +1,4 @@
-/* ============================================
+﻿/* ============================================
    LLM Gateway Chat Styles
    ============================================ */
 
@@ -1120,7 +1120,6 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 }
 
 .mcp-server-status-badge {
-    font-size: 0.8rem;
     white-space: nowrap;
     display: flex;
     align-items: center;
@@ -1215,6 +1214,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     border-top: thin dashed var(--color-shade3);
     padding-top: 0.75rem;
 }
+
 
 
 

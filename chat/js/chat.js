@@ -833,7 +833,7 @@ function renderExchange(exchange) {
         const isSuccess = exchange.tool.status === 'success';
         const isError = exchange.tool.status === 'error';
         const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : '<span class="tool-spinner"></span>&nbsp;Running...');
-        const statusColor = isSuccess ? 'green' : (isError ? 'red' : 'var(--color-highlight)');
+        const badgeVariant = isSuccess ? 'success' : (isError ? 'danger' : 'primary');
         
         let hasImages = exchange.tool.images && exchange.tool.images.length > 0;
         let imagesHtml = '';
@@ -854,7 +854,7 @@ function renderExchange(exchange) {
                 <div class="message-header tool-header">
                     <nui-icon name="extension"></nui-icon>
                     <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
-                    <span class="tool-status" style="color: ${statusColor};">${displayStatus}</span>
+                    <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
                 </div>
                 <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
                 <div class="message-content tool-payload" style="display: none;">
@@ -1195,9 +1195,7 @@ function showPendingToolUI(exchangeId) {
             <div class="message-header tool-header pending">
                 <nui-icon name="extension"></nui-icon>
                 <strong class="tool-title">SYSTEM TOOL</strong>
-                <span class="tool-status" style="color: var(--color-highlight);">
-                    <span class="tool-spinner"></span> Receiving...
-                </span>
+                <nui-badge variant="primary" class="tool-status"><span class="tool-spinner"></span> Receiving...</nui-badge>
             </div>
         </div>
     `;
@@ -1240,7 +1238,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
               <div class="message-header tool-header">
                   <nui-icon name="extension"></nui-icon>
                   <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
-                  <span class="tool-status" style="color: var(--color-highlight);"><span class="tool-spinner"></span>&nbsp;Running...</span>
+                  <nui-badge variant="primary" class="tool-status"><span class="tool-spinner"></span> Running...</nui-badge>
               </div>
               <div class="tool-images" style="display: none;"></div>
               <div class="message-content tool-payload" style="display: none;">
@@ -1307,8 +1305,8 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         }
         conversation.save(); // persist
 
-        toolEl.querySelector('.tool-status').textContent = 'Success';
-        toolEl.querySelector('.tool-status').style.color = 'var(--color-success, #2e7d32)';
+        toolEl.querySelector('.tool-status').setAttribute('variant', 'success');
+          toolEl.querySelector('.tool-status').innerHTML = 'Success';
         
         let toolResultHtml = exchange.tool.content;
         if (exchange.tool.images && exchange.tool.images.length > 0) {
@@ -1334,8 +1332,8 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         exchange.tool.content = err.message || String(err);
         conversation.save();
 
-        toolEl.querySelector('.tool-status').textContent = 'Failed';
-        toolEl.querySelector('.tool-status').style.color = 'var(--color-error, #d32f2f)';
+        toolEl.querySelector('.tool-status').setAttribute('variant', 'danger');
+          toolEl.querySelector('.tool-status').innerHTML = 'Failed';
         toolEl.querySelector('.tool-result').innerHTML = `<span class="tool-error">${exchange.tool.content}</span>
             <div class="tool-error-actions">
                 <nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>
@@ -1348,7 +1346,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
             toolEl.querySelector('.tool-result').innerHTML = '';
             toolEl.querySelector('.tool-status').innerHTML = '<span class="tool-spinner"></span>&nbsp;Running...';
-            toolEl.querySelector('.tool-status').style.color = 'var(--color-highlight)';
+            toolEl.querySelector('.tool-status').setAttribute('variant', 'primary');
             handleToolExecution(originalExchangeId, parsedObj); // re-run recursively! wait, we might duplicate exchange. Instead, just execute again inside here.
             // Simplified: just let user delete/regenerate, or handle properly inside handleToolExecution.
         });
@@ -2513,9 +2511,10 @@ function renderMCPServers() {
         const card = document.createElement('nui-card');
         card.className = "mcp-server-card";
         
-        let statusColor = 'var(--color-shade3)';
-        if (server.status === 'connected') statusColor = 'green';
-        if (server.status === 'error') statusColor = 'red';
+        let badgeVariant = '';
+          if (server.status === 'connected') badgeVariant = 'success';
+          if (server.status === 'error') badgeVariant = 'danger';
+          if (server.status === 'connecting...') badgeVariant = 'warning';
 
         const isConnected = server.status === 'connected';
         
@@ -2540,12 +2539,12 @@ function renderMCPServers() {
 
                 <!-- Status Badge -->
                 <div class="mcp-server-status-row">
-                    <span class="mcp-server-status-badge" style="color: ${statusColor};">
+                    <nui-badge variant="${badgeVariant}" class="mcp-server-status-badge">
                         <span class="mcp-server-status-dot">&#11044;</span> ${isConnected ? 'connected (' + activeCount + '/' + totalCount + ' active)' : server.status}
-                    </span>
-                </div>
+                    </nui-badge>
+                  </div>
 
-                <!-- Bottom Actions -->
+                  <!-- Bottom Actions -->
                 <div class="mcp-server-actions">
                     <nui-button variant="icon" title="Edit Server" data-mcp-edit="${server.id}">
                         <button type="button" aria-label="Edit">
@@ -2647,6 +2646,15 @@ function openMCPEditDialog(server) {
 // ============================================
 
 init();
+
+
+
+
+
+
+
+
+
 
 
 
