@@ -203,13 +203,12 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 }
 
 .chat-message.tool {
-    margin-left: auto;
-    margin-right: auto;
-    max-width: 90%;
-    background: transparent;
-    border: 1px solid var(--nui-shade3);
+    width: 100%;
+    border: 1px solid var(--border-shade3);
     border-radius: var(--border-radius1);
-    padding: 0.5rem 1rem;
+    padding: 0;
+    margin: 0;
+    background-color: var(--color-shade3);
 }
 
 .message-header {
@@ -798,7 +797,7 @@ nui-app:not(.nui-ready) { display: none; }
     font-size: 0.85rem;
     border: none;
     background: transparent;
-    color: var(--color-text);
+    color: var(--text-color);
     cursor: pointer;
     border-bottom: 2px solid transparent;
     margin-bottom: -1px;
@@ -806,12 +805,12 @@ nui-app:not(.nui-ready) { display: none; }
 }
 
 .sidebar-content nui-tabs > nav > button:hover {
-    color: var(--nui-accent);
+    color: var(--color-highlight);
 }
 
 .sidebar-content nui-tabs > nav > button[aria-selected="true"] {
-    color: var(--nui-accent);
-    border-bottom-color: var(--nui-accent);
+    color: var(--color-highlight);
+    border-bottom-color: var(--color-highlight);
 }
 
 .sidebar-content nui-tabs > div {
@@ -1010,18 +1009,20 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     height: 100%;
     overflow-y: auto;
     text-align: left;
-}.tool-bubble {
+}
+
+.tool-bubble {
     width: 100%;
     box-sizing: border-box;
-    background: var(--nui-shade1, rgba(0,0,0,0.02));
-    border: 1px solid var(--border-shade2, var(--nui-shade3));
+    background: var(--color-shade1, rgba(0,0,0,0.02));
+    border: 1px solid var(--border-shade2);
     border-radius: var(--border-radius2, 8px);
     margin: 0.5rem 0 1rem 0;
     overflow: hidden;
 }
 
 .tool-bubble.pending {
-    border: 1px dashed var(--nui-shade3);
+    border: 1px dashed var(--color-shade3);
     opacity: 0.8;
     animation: pulse 2s infinite;
 }
@@ -1034,7 +1035,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     align-items: center;
     gap: 0.75rem;
     padding: 0 1rem;
-    color: var(--nui-shade6);
+    color: var(--color-shade6);
 }
 
 .tool-header.pending {
@@ -1043,7 +1044,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .tool-header nui-icon {
     font-size: 1.1rem;
-    color: var(--nui-shade5);
+    color: var(--color-shade5);
     flex-shrink: 0;
 }
 
@@ -1075,7 +1076,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 .tool-image {
     max-width: 100%;
     border-radius: var(--border-radius1, 4px);
-    border: 1px solid var(--nui-shade3, rgba(0,0,0,0.1));
+    border: 1px solid var(--color-shade3, rgba(0,0,0,0.1));
 }
 
 .tool-error {
@@ -1084,7 +1085,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .tool-error-actions {
     margin-top: 1rem;
-    border-top: 1px dashed var(--nui-shade3, rgba(0,0,0,0.1));
+    border-top: 1px dashed var(--color-shade3, rgba(0,0,0,0.1));
     padding-top: 0.75rem;
 }
 
@@ -1111,7 +1112,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 .mcp-server-title {
     margin: 0;
     font-size: 1.1rem;
-    color: var(--nui-fg);
+    color: var(--text-color);
     word-break: break-word;
 }
 
@@ -1141,7 +1142,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 }
 
 .mcp-empty-tools {
-    color: var(--nui-shade5);
+    color: var(--color-shade5);
     font-size: 0.9rem;
     padding: 1rem 0;
     text-align: center;
@@ -1149,13 +1150,13 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .mcp-tool-name {
     font-weight: 600;
-    color: var(--nui-fg);
+    color: var(--text-color);
     font-size: 0.95rem;
 }
 
 .mcp-tool-desc {
     font-size: 0.85rem;
-    color: var(--nui-shade5);
+    color: var(--color-shade5);
     line-height: 1.4;
 }
 
@@ -1174,13 +1175,13 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 .tool-image {
     max-width: 100%;
     border-radius: var(--border-radius1);
-    border: 1px solid var(--nui-shade3);
+    border: 1px solid var(--color-shade3);
 }
 
 .tool-payload {
-    border-top: 1px solid var(--border-shade1, var(--nui-shade2));
+    border-top: 1px solid var(--border-shade1, var(--color-shade2));
     padding: 1rem;
-    background: var(--nui-bg);
+    background: var(--color-base);
     font-family: monospace;
     font-size: 0.85rem;
     overflow-x: auto;
@@ -1189,7 +1190,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 }
 
 .tool-section-title {
-    color: var(--nui-shade5);
+    color: var(--color-shade5);
     margin-bottom: 0.5rem;
     text-transform: uppercase;
     font-size: 0.8em;
@@ -1197,14 +1198,14 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 }
 
 .tool-args {
-    color: var(--nui-shade7);
+    color: var(--color-shade7);
     padding-bottom: 0.75rem;
     margin-bottom: 0.75rem;
-    border-bottom: 1px dashed var(--nui-shade3);
+    border-bottom: 1px dashed var(--color-shade3);
 }
 
 .tool-result {
-    color: var(--nui-shade7);
+    color: var(--color-shade7);
 }
 
 .tool-error-text {
@@ -1213,6 +1214,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .tool-retry-actions {
     margin-top: 1rem;
-    border-top: 1px dashed var(--nui-shade3);
+    border-top: 1px dashed var(--color-shade3);
     padding-top: 0.75rem;
 }
+

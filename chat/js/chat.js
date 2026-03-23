@@ -1,4 +1,4 @@
-﻿// ============================================
+// ============================================
 // LLM Gateway Chat - Main Controller
 // ============================================
 
@@ -833,7 +833,7 @@ function renderExchange(exchange) {
         const isSuccess = exchange.tool.status === 'success';
         const isError = exchange.tool.status === 'error';
         const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : '<span class="tool-spinner"></span>&nbsp;Running...');
-        const statusColor = isSuccess ? 'green' : (isError ? 'red' : 'var(--nui-accent)');
+        const statusColor = isSuccess ? 'green' : (isError ? 'red' : 'var(--color-highlight)');
         
         let hasImages = exchange.tool.images && exchange.tool.images.length > 0;
         let imagesHtml = '';
@@ -1195,7 +1195,7 @@ function showPendingToolUI(exchangeId) {
             <div class="message-header tool-header pending">
                 <nui-icon name="api"></nui-icon>
                 <strong class="tool-title">SYSTEM TOOL</strong>
-                <span class="tool-status" style="color: var(--nui-accent);">
+                <span class="tool-status" style="color: var(--color-highlight);">
                     <span class="tool-spinner"></span> Receiving...
                 </span>
             </div>
@@ -1240,7 +1240,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
               <div class="message-header tool-header">
                   <nui-icon name="api"></nui-icon>
                   <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
-                  <span class="tool-status" style="color: var(--nui-accent);"><span class="tool-spinner"></span>&nbsp;Running...</span>
+                  <span class="tool-status" style="color: var(--color-highlight);"><span class="tool-spinner"></span>&nbsp;Running...</span>
               </div>
               <div class="tool-images" style="display: none;"></div>
               <div class="message-content tool-payload" style="display: none;">
@@ -1348,7 +1348,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
             toolEl.querySelector('.tool-result').innerHTML = '';
             toolEl.querySelector('.tool-status').innerHTML = '<span class="tool-spinner"></span>&nbsp;Running...';
-            toolEl.querySelector('.tool-status').style.color = 'var(--nui-accent)';
+            toolEl.querySelector('.tool-status').style.color = 'var(--color-highlight)';
             handleToolExecution(originalExchangeId, parsedObj); // re-run recursively! wait, we might duplicate exchange. Instead, just execute again inside here.
             // Simplified: just let user delete/regenerate, or handle properly inside handleToolExecution.
         });
@@ -1519,7 +1519,7 @@ function showCompactionIndicator(el, data) {
     if (!compactEl) {
         compactEl = document.createElement('div');
         compactEl.className = 'compaction-indicator';
-        compactEl.innerHTML = '<span class="icon">ðŸ“</span> Compacting context...';
+        compactEl.innerHTML = '<span class="icon">📝</span> Compacting context...';
         contentDiv.insertBefore(compactEl, contentDiv.firstChild);
     }
 }
@@ -2513,7 +2513,7 @@ function renderMCPServers() {
         const card = document.createElement('nui-card');
         card.className = "mcp-server-card";
         
-        let statusColor = 'var(--nui-shade3)';
+        let statusColor = 'var(--color-shade3)';
         if (server.status === 'connected') statusColor = 'green';
         if (server.status === 'error') statusColor = 'red';
 
@@ -2614,7 +2614,7 @@ function openMCPEditDialog(server) {
         server.tools.forEach(tool => {
             const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
             const toolEl = document.createElement('label');
-            toolEl.style.cssText = 'display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid var(--nui-shade2); cursor: pointer;';
+            toolEl.style.cssText = 'display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid var(--color-shade2); cursor: pointer;';
 
             const nuiCheckbox = document.createElement('nui-checkbox');
             nuiCheckbox.innerHTML = `<input type="checkbox" data-mcp-toggle="${server.id}" data-mcp-tool="${tool.name}">`;
@@ -2647,6 +2647,7 @@ function openMCPEditDialog(server) {
 // ============================================
 
 init();
+
 
 
 
