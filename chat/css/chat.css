@@ -1010,8 +1010,209 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     height: 100%;
     overflow-y: auto;
     text-align: left;
+}.tool-bubble {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--nui-shade1, rgba(0,0,0,0.02));
+    border: 1px solid var(--border-shade2, var(--nui-shade3));
+    border-radius: var(--border-radius2, 8px);
+    margin: 0.5rem 0 1rem 0;
+    overflow: hidden;
 }
-@ k e y f r a m e s   s p i n   {   t o   {   t r a n s f o r m :   r o t a t e ( 3 6 0 d e g ) ;   }   } 
- . t o o l - s p i n n e r   {   d i s p l a y :   i n l i n e - b l o c k ;   w i d t h :   1 4 p x ;   h e i g h t :   1 4 p x ;   b o r d e r :   2 p x   s o l i d   c u r r e n t C o l o r ;   b o r d e r - t o p - c o l o r :   t r a n s p a r e n t ;   b o r d e r - r a d i u s :   5 0 % ;   a n i m a t i o n :   s p i n   1 s   l i n e a r   i n f i n i t e ;   m a r g i n - r i g h t :   6 p x ;   v e r t i c a l - a l i g n :   m i d d l e ;   }  
- @ k e y f r a m e s   p u l s e   {   0 %   {   o p a c i t y :   0 . 8 ;   b o x - s h a d o w :   0   0   0   0   r g b a ( 0 , 0 , 0 , 0 ) ;   }   5 0 %   {   o p a c i t y :   1 ;   b o x - s h a d o w :   0   0   5 p x   0   v a r ( - - n u i - s h a d e 3 ) ;   }   1 0 0 %   {   o p a c i t y :   0 . 8 ;   b o x - s h a d o w :   0   0   0   0   r g b a ( 0 , 0 , 0 , 0 ) ;   }   }  
- 
+
+.tool-bubble.pending {
+    border: 1px dashed var(--nui-shade3);
+    opacity: 0.8;
+    animation: pulse 2s infinite;
+}
+
+.tool-header {
+    height: 48px;
+    box-sizing: border-box;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0 1rem;
+    color: var(--nui-shade6);
+}
+
+.tool-header.pending {
+    cursor: default;
+}
+
+.tool-header nui-icon {
+    font-size: 1.1rem;
+    color: var(--nui-shade5);
+    flex-shrink: 0;
+}
+
+.tool-title {
+    font-size: 0.95em;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tool-status {
+    margin-left: auto;
+    font-size: 0.85em;
+    font-weight: bold;
+    flex-shrink: 0;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+}
+
+.tool-images-inner {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.5rem;
+}
+
+.tool-image {
+    max-width: 100%;
+    border-radius: var(--border-radius1, 4px);
+    border: 1px solid var(--nui-shade3, rgba(0,0,0,0.1));
+}
+
+.tool-error {
+    color: var(--color-error, #d32f2f);
+}
+
+.tool-error-actions {
+    margin-top: 1rem;
+    border-top: 1px dashed var(--nui-shade3, rgba(0,0,0,0.1));
+    padding-top: 0.75rem;
+}
+
+/* MCP Servers / Tools UI */
+.mcp-server-card {
+    display: block;
+    margin-bottom: 1rem;
+}
+
+.mcp-server-inner {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.mcp-server-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.mcp-server-title {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--nui-fg);
+    word-break: break-word;
+}
+
+.mcp-server-status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.mcp-server-status-badge {
+    font-size: 0.8rem;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.mcp-server-status-dot {
+    font-size: 0.5rem;
+}
+
+.mcp-server-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+}
+
+.mcp-empty-tools {
+    color: var(--nui-shade5);
+    font-size: 0.9rem;
+    padding: 1rem 0;
+    text-align: center;
+}
+
+.mcp-tool-name {
+    font-weight: 600;
+    color: var(--nui-fg);
+    font-size: 0.95rem;
+}
+
+.mcp-tool-desc {
+    font-size: 0.85rem;
+    color: var(--nui-shade5);
+    line-height: 1.4;
+}
+
+.tool-images {
+    padding: 0 1rem 1rem 1rem;
+    box-sizing: border-box;
+}
+
+.tool-images-container {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.5rem;
+}
+
+.tool-image {
+    max-width: 100%;
+    border-radius: var(--border-radius1);
+    border: 1px solid var(--nui-shade3);
+}
+
+.tool-payload {
+    border-top: 1px solid var(--border-shade1, var(--nui-shade2));
+    padding: 1rem;
+    background: var(--nui-bg);
+    font-family: monospace;
+    font-size: 0.85rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    margin-top: 0;
+}
+
+.tool-section-title {
+    color: var(--nui-shade5);
+    margin-bottom: 0.5rem;
+    text-transform: uppercase;
+    font-size: 0.8em;
+    letter-spacing: 1px;
+}
+
+.tool-args {
+    color: var(--nui-shade7);
+    padding-bottom: 0.75rem;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px dashed var(--nui-shade3);
+}
+
+.tool-result {
+    color: var(--nui-shade7);
+}
+
+.tool-error-text {
+    color: var(--color-error, #d32f2f);
+}
+
+.tool-retry-actions {
+    margin-top: 1rem;
+    border-top: 1px dashed var(--nui-shade3);
+    padding-top: 0.75rem;
+}

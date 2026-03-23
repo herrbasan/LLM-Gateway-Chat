@@ -1,4 +1,4 @@
-// ============================================
+﻿// ============================================
 // LLM Gateway Chat - Main Controller
 // ============================================
 
@@ -838,9 +838,9 @@ function renderExchange(exchange) {
         let hasImages = exchange.tool.images && exchange.tool.images.length > 0;
         let imagesHtml = '';
         if (hasImages) {
-            imagesHtml = `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">`;
+            imagesHtml = `<div class="tool-images-container">`;
             exchange.tool.images.forEach(img => {
-                imagesHtml += `<img src="${img}" style="max-width: 100%; border-radius: var(--border-radius1); border: 1px solid var(--nui-shade3);" />`;
+                imagesHtml += `<img src="${img}" class="tool-image" />`;
             });
             imagesHtml += `</div>`;
         }
@@ -850,18 +850,18 @@ function renderExchange(exchange) {
         else if (isError) resultHtml = `<strong>Error:</strong> ${exchange.tool.content}`;
 
         toolEl.innerHTML = `
-            <div style="width: 100%; box-sizing: border-box; background: var(--nui-shade1, rgba(0,0,0,0.02)); border: 1px solid var(--border-shade2, var(--nui-shade3)); border-radius: var(--border-radius2, 8px); margin: 0.5rem 0 1rem 0; overflow: hidden;">
-                <div class="message-header" style="height: 48px; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; gap: 0.75rem; padding: 0 1rem; color: var(--nui-shade6);">
-                    <nui-icon name="api" style="font-size: 1.1rem; color: var(--nui-shade5); flex-shrink: 0;"></nui-icon>
-                    <strong style="font-size: 0.95em; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SYSTEM TOOL: ${parsedObj.name}</strong>
-                    <span class="tool-status" style="margin-left: auto; font-size: 0.85em; font-weight: bold; color: ${statusColor}; flex-shrink: 0; white-space: nowrap; display: flex; align-items: center;">${displayStatus}</span>
+            <div class="tool-bubble">
+                <div class="message-header tool-header">
+                    <nui-icon name="api"></nui-icon>
+                    <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
+                    <span class="tool-status" style="color: ${statusColor};">${displayStatus}</span>
                 </div>
-                <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'}; padding: 0 1rem 1rem 1rem; box-sizing: border-box;">${imagesHtml}</div>
-                <div class="message-content tool-payload" style="display: none; border-top: 1px solid var(--border-shade1, var(--nui-shade2)); padding: 1rem; background: var(--nui-bg); font-family: monospace; font-size: 0.85rem; overflow-x: auto; white-space: pre-wrap; margin-top: 0;">
-                    <div style="color: var(--nui-shade5); margin-bottom: 0.5rem; text-transform: uppercase; font-size: 0.8em; letter-spacing: 1px;">Arguments</div>
-                    <div style="color: var(--nui-shade7); padding-bottom: 0.75rem; margin-bottom: 0.75rem; border-bottom: 1px dashed var(--nui-shade3);">${JSON.stringify(parsedObj.args, null, 2)}</div>
-                    <div style="color: var(--nui-shade5); margin-bottom: 0.5rem; text-transform: uppercase; font-size: 0.8em; letter-spacing: 1px;">Execution Result</div>
-                    <div class="tool-result" style="color: var(--nui-shade7);">${resultHtml}</div>
+                <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
+                <div class="message-content tool-payload" style="display: none;">
+                    <div class="tool-section-title">Arguments</div>
+                    <div class="tool-args">${JSON.stringify(parsedObj.args, null, 2)}</div>
+                    <div class="tool-section-title">Execution Result</div>
+                    <div class="tool-result">${resultHtml}</div>
                 </div>
             </div>
         `;
@@ -1191,11 +1191,11 @@ function showPendingToolUI(exchangeId) {
     toolEl.dataset.pendingExchangeId = exchangeId;
 
     toolEl.innerHTML = `
-        <div style="width: 100%; box-sizing: border-box; background: var(--nui-shade1, rgba(0,0,0,0.02)); border: 1px dashed var(--nui-shade3); border-radius: var(--border-radius2, 8px); margin: 0.5rem 0 1rem 0; overflow: hidden; opacity: 0.8; animation: pulse 2s infinite;">
-            <div class="message-header" style="height: 48px; box-sizing: border-box; display: flex; align-items: center; gap: 0.75rem; padding: 0 1rem; color: var(--nui-shade6);">
-                <nui-icon name="api" style="font-size: 1.1rem; color: var(--nui-shade5); flex-shrink: 0;"></nui-icon>
-                <strong style="font-size: 0.95em; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SYSTEM TOOL</strong>
-                <span class="tool-status" style="margin-left: auto; font-size: 0.85em; font-weight: bold; color: var(--nui-accent); flex-shrink: 0; white-space: nowrap; display: flex; align-items: center;">
+        <div class="tool-bubble pending">
+            <div class="message-header tool-header pending">
+                <nui-icon name="api"></nui-icon>
+                <strong class="tool-title">SYSTEM TOOL</strong>
+                <span class="tool-status" style="color: var(--nui-accent);">
                     <span class="tool-spinner"></span> Receiving...
                 </span>
             </div>
@@ -1236,18 +1236,18 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
     
     // Build collapsible box UI
     toolEl.innerHTML = `
-          <div style="width: 100%; box-sizing: border-box; background: var(--nui-shade1, rgba(0,0,0,0.02)); border: 1px solid var(--border-shade2, var(--nui-shade3)); border-radius: var(--border-radius2, 8px); margin: 0.5rem 0 1rem 0; overflow: hidden;">
-              <div class="message-header" style="height: 48px; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; gap: 0.75rem; padding: 0 1rem; color: var(--nui-shade6);">
-                  <nui-icon name="api" style="font-size: 1.1rem; color: var(--nui-shade5); flex-shrink: 0;"></nui-icon>
-                  <strong style="font-size: 0.95em; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SYSTEM TOOL: ${parsedObj.name}</strong>
-                  <span class="tool-status" style="margin-left: auto; font-size: 0.85em; font-weight: bold; color: var(--nui-accent); flex-shrink: 0; white-space: nowrap; display: flex; align-items: center;"><span class="tool-spinner"></span>&nbsp;Running...</span>
+          <div class="tool-bubble">
+              <div class="message-header tool-header">
+                  <nui-icon name="api"></nui-icon>
+                  <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
+                  <span class="tool-status" style="color: var(--nui-accent);"><span class="tool-spinner"></span>&nbsp;Running...</span>
               </div>
-              <div class="tool-images" style="display: none; padding: 0 1rem 1rem 1rem; box-sizing: border-box;"></div>
-              <div class="message-content tool-payload" style="display: none; border-top: 1px solid var(--border-shade1, var(--nui-shade2)); padding: 1rem; background: var(--nui-bg); font-family: monospace; font-size: 0.85rem; overflow-x: auto; white-space: pre-wrap; margin-top: 0;">
-                <div style="color: var(--nui-shade5); margin-bottom: 0.5rem; text-transform: uppercase; font-size: 0.8em; letter-spacing: 1px;">Execution Result</div>
-                <div class="tool-result" style="color: var(--nui-shade7);"></div>
-            </div>
-        </div>
+              <div class="tool-images" style="display: none;"></div>
+              <div class="message-content tool-payload" style="display: none;">
+                  <div class="tool-section-title">Arguments</div>
+                  <div class="tool-args">${JSON.stringify(parsedObj.args, null, 2)}</div>
+                  <div class="tool-section-title">Execution Result</div>
+                  <div class="tool-result"></div>
     `;
 
     elements.messages.appendChild(toolEl);
@@ -1314,9 +1314,9 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         if (exchange.tool.images && exchange.tool.images.length > 0) {
             const imagesDiv = toolEl.querySelector('.tool-images');
             imagesDiv.style.display = 'block';
-            let imagesHtml = `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">`;
+            let imagesHtml = `<div class="tool-images-inner">`;
             exchange.tool.images.forEach(img => {
-                imagesHtml += `<img src="${img}" style="max-width: 100%; border-radius: var(--border-radius1); border: 1px solid var(--nui-shade3);" />`;
+                imagesHtml += `<img src="${img}" class="tool-image" />`;
             });
             imagesHtml += `</div>`;
             imagesDiv.innerHTML = imagesHtml;
@@ -1336,8 +1336,8 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
 
         toolEl.querySelector('.tool-status').textContent = 'Failed';
         toolEl.querySelector('.tool-status').style.color = 'var(--color-error, #d32f2f)';
-        toolEl.querySelector('.tool-result').innerHTML = `<span style="color: var(--color-error, #d32f2f);">${exchange.tool.content}</span>
-            <div style="margin-top: 1rem; border-top: 1px dashed var(--nui-shade3); padding-top: 0.75rem;">
+        toolEl.querySelector('.tool-result').innerHTML = `<span class="tool-error">${exchange.tool.content}</span>
+            <div class="tool-error-actions">
                 <nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>
                 <nui-button size="small" class="dismiss-tool"><button>Dismiss & Continue</button></nui-button>
             </div>
@@ -1519,7 +1519,7 @@ function showCompactionIndicator(el, data) {
     if (!compactEl) {
         compactEl = document.createElement('div');
         compactEl.className = 'compaction-indicator';
-        compactEl.innerHTML = '<span class="icon">📝</span> Compacting context...';
+        compactEl.innerHTML = '<span class="icon">ðŸ“</span> Compacting context...';
         contentDiv.insertBefore(compactEl, contentDiv.firstChild);
     }
 }
@@ -2511,8 +2511,7 @@ function renderMCPServers() {
 
     mcpClient.servers.forEach(server => {
         const card = document.createElement('nui-card');
-        card.style.display = 'block';
-        card.style.marginBottom = '1rem';
+        card.className = "mcp-server-card";
         
         let statusColor = 'var(--nui-shade3)';
         if (server.status === 'connected') statusColor = 'green';
@@ -2532,22 +2531,22 @@ function renderMCPServers() {
         }
 
         let html = `
-            <div style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+            <div class="mcp-server-inner">
                 <!-- Header: Title and Toggle -->
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem;">
-                    <h3 style="margin: 0; font-size: 1.1rem; color: var(--nui-fg); word-break: break-word;">${server.name}</h3>
+                <div class="mcp-server-header">
+                    <h3 class="mcp-server-title">${server.name}</h3>
                     <nui-checkbox variant="switch" title="Connect/Disconnect"><input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected ? 'checked' : ''} ${(server.status === 'connecting...') ? 'disabled' : ''}></nui-checkbox>
                 </div>
 
                 <!-- Status Badge -->
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-size: 0.8rem; color: ${statusColor}; white-space: nowrap; display: flex; align-items: center; gap: 0.25rem;">
-                        <span style="font-size: 0.5rem;">⬤</span> ${isConnected ? 'connected (' + activeCount + '/' + totalCount + ' active)' : server.status}
+                <div class="mcp-server-status-row">
+                    <span class="mcp-server-status-badge" style="color: ${statusColor};">
+                        <span class="mcp-server-status-dot">&#11044;</span> ${isConnected ? 'connected (' + activeCount + '/' + totalCount + ' active)' : server.status}
                     </span>
                 </div>
 
                 <!-- Bottom Actions -->
-                <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem;">
+                <div class="mcp-server-actions">
                     <nui-button variant="icon" title="Edit Server" data-mcp-edit="${server.id}">
                         <button type="button" aria-label="Edit">
                             <nui-icon name="edit"></nui-icon>
@@ -2610,7 +2609,7 @@ function openMCPEditDialog(server) {
     toolsContainer.innerHTML = '';
 
     if (!server.tools || server.tools.length === 0) {
-        toolsContainer.innerHTML = `<p style="color: var(--nui-shade5); font-size: 0.9rem; padding: 1rem 0; text-align: center;">No tools available. Connect the server to load tools.</p>`;
+        toolsContainer.innerHTML = `<p class="mcp-empty-tools">No tools available. Connect the server to load tools.</p>`;
     } else {
         server.tools.forEach(tool => {
             const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
@@ -2626,8 +2625,8 @@ function openMCPEditDialog(server) {
             const textDiv = document.createElement('div');
             textDiv.style.cssText = 'display: flex; flex-direction: column; gap: 0.25rem;';
             textDiv.innerHTML = `
-                <span style="font-weight: 600; color: var(--nui-fg); font-size: 0.95rem;">${tool.name}</span>
-                <span style="font-size: 0.85rem; color: var(--nui-shade5); line-height: 1.4;">${tool.description || 'No description available.'}</span>
+                <span class="mcp-tool-name">${tool.name}</span>
+                <span class="mcp-tool-desc">${tool.description || 'No description available.'}</span>
             `;
             toolEl.appendChild(textDiv);
 
@@ -2648,6 +2647,8 @@ function openMCPEditDialog(server) {
 // ============================================
 
 init();
+
+
 
 
 
