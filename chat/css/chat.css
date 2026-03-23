@@ -41,7 +41,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 /* Sidebar */
 .chat-sidebar {
     background: var(--color-shade1);
-    border-right: 1px solid var(--border-shade2);
+    border-right: thin solid var(--border-shade2);
     display: flex;
     flex-direction: column;
     transition: transform 0.3s ease;
@@ -52,7 +52,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     align-items: center;
     justify-content: space-between;
     padding: 1rem;
-    border-bottom: 1px solid var(--border-shade2);
+    border-bottom: thin solid var(--border-shade2);
     background: var(--color-shade2);
 }
 
@@ -99,7 +99,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 /* Sidebar footer */
 .sidebar-footer {
     padding: 1rem;
-    border-top: 1px solid var(--border-shade2);
+    border-top: thin solid var(--border-shade2);
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
@@ -117,8 +117,8 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 }
 
 .status-dot {
-    width: 8px;
-    height: 8px;
+    width: 0.5rem;
+    height: 0.5rem;
     border-radius: 50%;
     background: #22c55e;
 }
@@ -150,9 +150,9 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     left: 1rem;
     z-index: 100;
     background: var(--color-shade2);
-    border: 1px solid var(--border-shade2);
+    border: thin solid var(--border-shade2);
     padding: 0.5rem;
-    border-radius: 4px;
+    border-radius: 0.25rem;
     cursor: pointer;
     color: var(--text-color);
 }
@@ -190,7 +190,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 }
 
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
+    from { opacity: 0; transform: translateY(0.625rem); }
     to { opacity: 1; transform: translateY(0); }
 }
 
@@ -204,11 +204,12 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 
 .chat-message.tool {
     width: 100%;
-    border: 1px solid var(--border-shade3);
+    border: thin solid var(--border-shade2);
     border-radius: var(--border-radius1);
     padding: 0;
     margin: 0;
-    background-color: var(--color-shade3);
+    background-color: var(--color-shade1);
+    border-radius: 0.5rem;
 }
 
 .message-header {
@@ -229,7 +230,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 
 .message-content {
     padding: 0.75rem 1rem;
-    border-radius: 12px;
+    border-radius: var(--chat-bubble-radius);
     line-height: 1.6;
     word-wrap: break-word;
     font-size: 0.9375rem;
@@ -287,7 +288,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 
 .message-content hr.hr-asterisk {
     border-top-style: dotted;
-    border-top-width: 2px;
+    border-top-width: 0.125rem;
 }
 
 .message-content hr.hr-dash {
@@ -295,11 +296,11 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 }
 
 .message-content hr.hr-underscore {
-    border-top-width: 2px;
+    border-top-width: 0.125rem;
 }
 
 .message-content blockquote {
-    border-left: 3px solid var(--color-highlight);
+    border-left: 0.1875rem solid var(--color-highlight);
     margin: 0.75rem 0;
     padding-left: 1rem;
     color: var(--text-color-dim);
@@ -324,7 +325,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 
 .message-content th,
 .message-content td {
-    border: 1px solid var(--border-shade2);
+    border: thin solid var(--border-shade2);
     padding: 0.5rem;
     text-align: left;
 }
@@ -337,7 +338,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 .message-content code {
     background: var(--color-shade1);
     padding: 0.125rem 0.375rem;
-    border-radius: 4px;
+    border-radius: 0.25rem;
     font-family: 'Consolas', 'Monaco', monospace;
     font-size: 0.875em;
 }
@@ -350,9 +351,9 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 /* Code Blocks */
 .code-block {
     margin: 0.75rem 0;
-    border-radius: 8px;
+    border-radius: 0.5rem;
     overflow: hidden;
-    border: 1px solid var(--border-shade2);
+    border: thin solid var(--border-shade2);
 }
 
 .code-header {
@@ -361,7 +362,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     align-items: center;
     padding: 0.5rem 0.75rem;
     background: var(--color-shade1);
-    border-bottom: 1px solid var(--border-shade2);
+    border-bottom: thin solid var(--border-shade2);
     font-size: 0.75rem;
 }
 
@@ -377,8 +378,8 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     gap: 0.25rem;
     padding: 0.25rem 0.5rem;
     background: var(--color-shade2);
-    border: 1px solid var(--border-shade2);
-    border-radius: 4px;
+    border: thin solid var(--border-shade2);
+    border-radius: 0.25rem;
     cursor: pointer;
     font-size: 0.75rem;
     color: var(--text-color-dim);
@@ -405,7 +406,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 /* Input Area */
 .chat-input-area {
     flex-shrink: 0;
-    border-top: 1px solid var(--border-shade2);
+    border-top: thin solid var(--border-shade2);
     padding: 0 1.5rem;
     background: var(--color-shade1);
     box-sizing: border-box;
@@ -426,11 +427,11 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 
 .attachment-item {
     position: relative;
-    width: 60px;
-    height: 60px;
-    border-radius: 4px;
+    width: 3.75rem;
+    height: 3.75rem;
+    border-radius: 0.25rem;
     overflow: hidden;
-    border: 1px solid var(--border-shade2);
+    border: thin solid var(--border-shade2);
 }
 
 .attachment-item img {
@@ -441,16 +442,16 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 
 .attachment-item .remove {
     position: absolute;
-    top: 2px;
-    right: 2px;
-    width: 20px;
-    height: 20px;
+    top: 0.125rem;
+    right: 0.125rem;
+    width: 1.25rem;
+    height: 1.25rem;
     background: rgba(0,0,0,0.6);
     color: white;
     border: none;
     border-radius: 50%;
     cursor: pointer;
-    font-size: 12px;
+    font-size: 0.75rem;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -478,8 +479,8 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 
 .chat-input .nui-rich-text-editor {
     width: 100%;
-    min-height: 44px;
-    max-height: 200px;
+    min-height: 2.75rem;
+    max-height: 12.5rem;
     padding: 0.75rem 1rem;
     border-radius: 0.2rem;
     background: var(--color-base);
@@ -500,10 +501,10 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 }
 
 .message-attachments img {
-    width: 120px;
-    height: 120px;
+    width: 7.5rem;
+    height: 7.5rem;
     object-fit: cover;
-    border-radius: 8px;
+    border-radius: 0.5rem;
     cursor: pointer;
     transition: opacity 0.2s;
 }
@@ -515,15 +516,15 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 /* Thinking Block */
 .thinking-block {
     background: var(--color-shade1);
-    border: 1px solid var(--border-shade2);
-    border-radius: 8px;
+    border: thin solid var(--border-shade2);
+    border-radius: 0.5rem;
     margin-bottom: 0.75rem;
     overflow: hidden;
 }
 
 .thinking-block.streaming {
     border-color: var(--color-highlight);
-    border-left-width: 3px;
+    border-left-width: 0.1875rem;
 }
 
 .thinking-header {
@@ -568,31 +569,31 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     font-style: italic;
     white-space: pre-wrap;
     line-height: 1.5;
-    max-height: 500px;
+    max-height: 31.25rem;
     overflow-y: auto;
     transition: max-height 0.3s ease, padding 0.3s ease;
 }
 
 .thinking-block.collapsed .thinking-content {
-    max-height: 140px;
+    max-height: 8.75rem;
     overflow-y: hidden;
     padding-bottom: 0;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0px, black 60px, black 90px, transparent 140px);
-    mask-image: linear-gradient(to bottom, transparent 0px, black 60px, black 90px, transparent 140px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 3.75rem, black 5.625rem, transparent 8.75rem);
+    mask-image: linear-gradient(to bottom, transparent 0, black 3.75rem, black 5.625rem, transparent 8.75rem);
 }
 
 .thinking-block.collapsed .thinking-content::-webkit-scrollbar {
-    width: 0px; 
+    width: 0; 
     background: transparent; 
 }
 
 /* Compaction Indicator */
 .compaction-indicator {
     background: light-dark(rgba(76, 132, 229, 0.1), rgba(76, 132, 229, 0.15));
-    border: 1px dashed var(--color-highlight);
+    border: thin dashed var(--color-highlight);
     padding: 0.5rem 0.75rem;
     margin-bottom: 0.75rem;
-    border-radius: 8px;
+    border-radius: 0.5rem;
     font-size: 0.875rem;
     color: var(--text-color-dim);
 }
@@ -643,17 +644,17 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
 /* Error Message */
 .error-message {
     background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    border: thin solid rgba(239, 68, 68, 0.3);
     color: #ef4444;
     padding: 0.5rem 0.75rem;
-    border-radius: 8px;
+    border-radius: 0.5rem;
     margin-top: 0.5rem;
     font-size: 0.875rem;
 }
 
 
 /* Mobile Styles */
-@media (max-width: 768px) {
+@media (max-width: 48rem) {
     .chat-sidebar {
         position: fixed;
         left: 0;
@@ -661,7 +662,7 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
         bottom: 0;
         z-index: 200;
         transform: translateX(-100%);
-        box-shadow: 2px 0 8px rgba(0,0,0,0.1);
+        box-shadow: 0.125rem 0 0.5rem rgba(0,0,0,0.1);
     }
     
     .chat-sidebar.open {
@@ -708,8 +709,8 @@ nui-app:not(.nui-ready) { display: none; }
     align-items: center;
     padding: 0.5rem 0.75rem;
     background: var(--color-shade1);
-    border: 1px solid var(--border-shade2);
-    border-radius: 4px;
+    border: thin solid var(--border-shade2);
+    border-radius: 0.25rem;
     cursor: pointer;
     font-size: 0.875rem;
     transition: all 0.2s;
@@ -762,14 +763,14 @@ nui-app:not(.nui-ready) { display: none; }
     display: flex; 
     align-items: center; 
     justify-content: center; 
-    height: 38px; 
-    margin-bottom: 2px; 
+    height: 2.375rem; 
+    margin-bottom: 0.125rem; 
     cursor: help; 
-    padding: 0 8px; 
+    padding: 0 0.5rem; 
 }
 
 /* Responsive: hide context progress on small screens */
-@media (max-width: 600px) {
+@media (max-width: 37.5rem) {
     .context-progress-wrap {
         display: none;
     }
@@ -787,7 +788,7 @@ nui-app:not(.nui-ready) { display: none; }
     flex-shrink: 0;
     display: flex;
     gap: 0;
-    border-bottom: 1px solid var(--border-shade1);
+    border-bottom: thin solid var(--border-shade1);
     margin-bottom: var(--nui-space);
 }
 
@@ -799,8 +800,8 @@ nui-app:not(.nui-ready) { display: none; }
     background: transparent;
     color: var(--text-color);
     cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
+    border-bottom: 0.125rem solid transparent;
+    margin-bottom: -0.0625rem;
     transition: color 0.15s, border-color 0.15s;
 }
 
@@ -827,12 +828,12 @@ nui-app:not(.nui-ready) { display: none; }
     padding: 2rem 1rem;
 }
 .context-tooltip { white-space: nowrap; max-width: none; }
-.progress-status { font-size: 0.85em; color: var(--color-highlight); margin-bottom: 8px; font-style: italic; }
+.progress-status { font-size: 0.85em; color: var(--color-highlight); margin-bottom: 0.5rem; font-style: italic; }
 .chat-attachment { cursor: pointer; }
 
 .app-title { margin: 0; font-size: 1.2rem; font-weight: 600; color: var(--text-color); line-height: 1; }
 
-@media (max-width: 600px) {
+@media (max-width: 37.5rem) {
     .app-title { font-size: 0.7rem; }
     .message-timestamp { display: none; }
     .chat-input-area {
@@ -872,7 +873,7 @@ nui-app:not(.nui-ready) { display: none; }
 
 .streaming-indicator {
     display: none;
-    margin-left: 8px;
+    margin-left: 0.5rem;
 }
 
 .streaming-indicator.visible {
@@ -910,7 +911,7 @@ nui-app:not(.nui-ready) { display: none; }
     display: none;
     font-size: 0.85em;
     color: var(--color-highlight);
-    margin-bottom: 8px;
+    margin-bottom: 0.5rem;
     font-style: italic;
 }
 
@@ -966,7 +967,7 @@ nui-app:not(.nui-ready) { display: none; }
     flex-direction: column;
     flex-grow: 1;
     gap: 0.5rem;
-    min-height: 200px;
+    min-height: 12.5rem;
 }
 
 .edit-label {
@@ -1004,7 +1005,7 @@ nui-rich-text.edit-textarea .nui-rich-text-container:has(.nui-rich-text-editor:f
 
 nui-rich-text.edit-textarea .nui-rich-text-editor {
     flex: 1;
-    min-height: 200px;
+    min-height: 12.5rem;
     max-height: none;
     height: 100%;
     overflow-y: auto;
@@ -1014,28 +1015,23 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 .tool-bubble {
     width: 100%;
     box-sizing: border-box;
-    background: var(--color-shade1, rgba(0,0,0,0.02));
-    border: 1px solid var(--border-shade2);
-    border-radius: var(--border-radius2, 8px);
-    margin: 0.5rem 0 1rem 0;
     overflow: hidden;
 }
 
 .tool-bubble.pending {
-    border: 1px dashed var(--color-shade3);
+    border: thin dashed var(--color-shade3);
     opacity: 0.8;
     animation: pulse 2s infinite;
 }
 
 .tool-header {
-    height: 48px;
+    height: 3rem;
     box-sizing: border-box;
     cursor: pointer;
     display: flex;
     align-items: center;
     gap: 0.75rem;
     padding: 0 1rem;
-    color: var(--color-shade6);
 }
 
 .tool-header.pending {
@@ -1050,7 +1046,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .tool-title {
     font-size: 0.95em;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.03125rem;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1075,8 +1071,8 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .tool-image {
     max-width: 100%;
-    border-radius: var(--border-radius1, 4px);
-    border: 1px solid var(--color-shade3, rgba(0,0,0,0.1));
+    border-radius: var(--border-radius1, 0.25rem);
+    border: thin solid var(--color-shade3, rgba(0,0,0,0.1));
 }
 
 .tool-error {
@@ -1085,7 +1081,7 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .tool-error-actions {
     margin-top: 1rem;
-    border-top: 1px dashed var(--color-shade3, rgba(0,0,0,0.1));
+    border-top: thin dashed var(--color-shade3, rgba(0,0,0,0.1));
     padding-top: 0.75rem;
 }
 
@@ -1175,12 +1171,13 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 .tool-image {
     max-width: 100%;
     border-radius: var(--border-radius1);
-    border: 1px solid var(--color-shade3);
+    border: thin solid var(--color-shade3);
 }
 
 .tool-payload {
-    border-top: 1px solid var(--border-shade1, var(--color-shade2));
+    border-top: thin solid var(--border-shade1, var(--color-shade2));
     padding: 1rem;
+    margin: 1rem;
     background: var(--color-base);
     font-family: monospace;
     font-size: 0.85rem;
@@ -1194,14 +1191,14 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     margin-bottom: 0.5rem;
     text-transform: uppercase;
     font-size: 0.8em;
-    letter-spacing: 1px;
+    letter-spacing: 0.0625rem;
 }
 
 .tool-args {
     color: var(--color-shade7);
     padding-bottom: 0.75rem;
     margin-bottom: 0.75rem;
-    border-bottom: 1px dashed var(--color-shade3);
+    border-bottom: thin dashed var(--color-shade3);
 }
 
 .tool-result {
@@ -1214,7 +1211,9 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 
 .tool-retry-actions {
     margin-top: 1rem;
-    border-top: 1px dashed var(--color-shade3);
+    border-top: thin dashed var(--color-shade3);
     padding-top: 0.75rem;
 }
+
+
 
