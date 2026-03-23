@@ -1,4 +1,4 @@
-// ============================================
+﻿// ============================================
 // LLM Gateway Chat - Main Controller
 // ============================================
 
@@ -852,7 +852,7 @@ function renderExchange(exchange) {
         toolEl.innerHTML = `
             <div class="tool-bubble">
                 <div class="message-header tool-header">
-                    <nui-icon name="api"></nui-icon>
+                    <nui-icon name="extension"></nui-icon>
                     <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
                     <span class="tool-status" style="color: ${statusColor};">${displayStatus}</span>
                 </div>
@@ -1193,7 +1193,7 @@ function showPendingToolUI(exchangeId) {
     toolEl.innerHTML = `
         <div class="tool-bubble pending">
             <div class="message-header tool-header pending">
-                <nui-icon name="api"></nui-icon>
+                <nui-icon name="extension"></nui-icon>
                 <strong class="tool-title">SYSTEM TOOL</strong>
                 <span class="tool-status" style="color: var(--color-highlight);">
                     <span class="tool-spinner"></span> Receiving...
@@ -1238,7 +1238,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
     toolEl.innerHTML = `
           <div class="tool-bubble">
               <div class="message-header tool-header">
-                  <nui-icon name="api"></nui-icon>
+                  <nui-icon name="extension"></nui-icon>
                   <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
                   <span class="tool-status" style="color: var(--color-highlight);"><span class="tool-spinner"></span>&nbsp;Running...</span>
               </div>
@@ -1519,7 +1519,7 @@ function showCompactionIndicator(el, data) {
     if (!compactEl) {
         compactEl = document.createElement('div');
         compactEl.className = 'compaction-indicator';
-        compactEl.innerHTML = '<span class="icon">📝</span> Compacting context...';
+        compactEl.innerHTML = '<span class="icon">ðŸ“</span> Compacting context...';
         contentDiv.insertBefore(compactEl, contentDiv.firstChild);
     }
 }
@@ -2647,6 +2647,7 @@ function openMCPEditDialog(server) {
 // ============================================
 
 init();
+
 
 
 
