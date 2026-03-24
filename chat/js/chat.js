@@ -908,7 +908,7 @@ function renderExchange(exchange) {
     let userContent = renderMarkdown(userParsed.cleanContent);
 
     // Add attachment previews
-    if (exchange.user.attachments?.length > 0) {
+    if (exchange.user?.attachments?.length > 0) {
         userContent += '<div class="message-attachments"><nui-lightbox loop>';
         for (const att of exchange.user.attachments) {
             // blobUrl works for both IndexedDB (blob:) and API (server URL) modes
@@ -942,7 +942,7 @@ function renderExchange(exchange) {
     elements.messages?.appendChild(userEl);
 
     // Initialize Lightbox declarative handlers for attached images
-    if (exchange.user.attachments?.length > 0) {
+    if (exchange.user?.attachments?.length > 0) {
         const lightbox = userEl.querySelector('nui-lightbox');
         if (lightbox) {
             const imgs = lightbox.querySelectorAll('img');
@@ -2012,7 +2012,7 @@ async function exportChatToFile(chatId) {
         for (const ex of exchanges) {
             const exportExchange = { ...ex };
             
-            if (ex.user.attachments?.some(att => att.hasImage)) {
+            if (ex.user?.attachments?.some(att => att.hasImage)) {
                 const images = await imageStore.load(ex.id);
                 exportExchange.user = {
                     ...ex.user,
@@ -2083,7 +2083,7 @@ async function handleChatImport(e) {
             const processedEx = { ...ex };
 
             // Strip dataUrl from attachments for storage, save to IndexedDB
-            if (ex.user.attachments?.some(att => att.dataUrl)) {
+            if (ex.user?.attachments?.some(att => att.dataUrl)) {
                 const attachmentsForDb = ex.user.attachments
                     .filter(att => att.dataUrl)
                     .map(att => ({
