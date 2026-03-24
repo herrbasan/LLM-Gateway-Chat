@@ -43,7 +43,7 @@ LLM Gateway Chat is a **pure frontend vanilla JavaScript client** designed to in
 │       ├── image-store.js     # IndexedDB image storage
 │       ├── markdown.js        # Markdown rendering with syntax highlight
 │       └── config.js          # User configuration (gateway URL, defaults)
-├── shared/vendor/             # Vendored dependencies
+├── chat/vendor/             # Vendored dependencies + update scripts
 │   ├── markdown-it.js
 │   ├── markdown-it-prism.js
 │   ├── prism.js / prism.css

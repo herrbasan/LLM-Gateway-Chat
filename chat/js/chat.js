@@ -911,10 +911,9 @@ function renderExchange(exchange) {
     if (exchange.user.attachments?.length > 0) {
         userContent += '<div class="message-attachments"><nui-lightbox loop>';
         for (const att of exchange.user.attachments) {
-            // Use blobUrl for loaded images, dataUrl for new attachments
-            const displayUrl = att.blobUrl || att.dataUrl || '';
-            const dataUrl = att.getDataUrl ? att.getDataUrl() : att.dataUrl;
-            userContent += `<img src="${displayUrl}" alt="${att.name}" data-lightbox-src="${dataUrl}" class="chat-attachment">`
+            // blobUrl works for both IndexedDB (blob:) and API (server URL) modes
+            const imgSrc = att.blobUrl || att.dataUrl || '';
+            userContent += `<img src="${imgSrc}" alt="${att.name}" data-lightbox-src="${imgSrc}" class="chat-attachment">`
         }
         userContent += '</nui-lightbox></div>';
     }

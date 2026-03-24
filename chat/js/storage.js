@@ -1,8 +1,10 @@
 // ============================================
-// Storage - IndexedDB abstraction layer
+// Storage - Abstraction layer with multiple backends
 // ============================================
 //
-// Provides a unified IndexedDB backend for all chat data.
+// Detects server type and uses appropriate backend:
+// - Node backend: API-based storage (/api/storage)
+// - Browser/default: IndexedDB
 //
 // IndexedDB DB: 'chat-storage'
 //   - 'data' store: key-value for conversations, history, prefs, active chat ID
@@ -11,6 +13,31 @@
 const DB_NAME = 'chat-storage';
 const DB_VERSION = 1;
 const DATA_STORE = 'data';
+
+let _isNodeServer = null;
+
+const IS_NODE_SERVER = () => {
+  if (_isNodeServer === null) {
+    // Will be resolved on first storage access
+    _isNodeServer = false;
+  }
+  return _isNodeServer;
+};
+
+const initServerType = async () => {
+  if (_isNodeServer !== null) return _isNodeServer;
+  try {
+    const res = await fetch('/api/server-type');
+    if (res.ok) {
+      const data = await res.json();
+      _isNodeServer = data.type === 'node-minimal';
+    }
+  } catch {
+    _isNodeServer = false;
+  }
+  console.log('Storage backend:', _isNodeServer ? 'Node (API)' : 'Browser (IndexedDB)');
+  return _isNodeServer;
+};
 
 // ============================================
 // IndexedDB Adapter
@@ -107,7 +134,37 @@ class IndexedDBAdapter {
 }
 
 // ============================================
-// Storage Manager - Unified IndexedDB facade
+// API Adapter (Node backend)
+// ============================================
+
+class ApiAdapter {
+    async get(store, key) {
+        const res = await fetch(`/api/storage/${encodeURIComponent(key)}`);
+        return res.json();
+    }
+
+    async set(store, key, value) {
+        await fetch(`/api/storage/${encodeURIComponent(key)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value }),
+        });
+    }
+
+    async remove(store, key) {
+        await fetch(`/api/storage/${encodeURIComponent(key)}`, { method: 'DELETE' });
+    }
+
+    async getStorageEstimate() {
+        const res = await fetch('/api/storage');
+        const data = await res.json();
+        const totalBytes = JSON.stringify(data).length;
+        return { usage: totalBytes, quota: 0, percent: '0' };
+    }
+}
+
+// ============================================
+// Storage Manager - Unified storage facade
 // ============================================
 
 // Key prefixes for namespacing within the single data store
@@ -118,66 +175,90 @@ const PREFIX_PREF = 'pref:';
 
 class StorageManager {
     constructor() {
-        this.idb = new IndexedDBAdapter();
+        this._backend = null;
+        this._initPromise = null;
+    }
+
+    async _ensureBackend() {
+        if (!this._backend) {
+            await initServerType();
+            this._backend = IS_NODE_SERVER() ? new ApiAdapter() : new IndexedDBAdapter();
+        }
+        return this._backend;
     }
 
     // ---- Conversation data ----
 
     async saveConversation(id, exchanges) {
-        await this.idb.set(DATA_STORE, PREFIX_CONV + id, exchanges);
+        const backend = await this._ensureBackend();
+        await backend.set(DATA_STORE, PREFIX_CONV + id, exchanges);
     }
 
     async loadConversation(id) {
-        return await this.idb.get(DATA_STORE, PREFIX_CONV + id) ?? [];
+        const backend = await this._ensureBackend();
+        return (await backend.get(DATA_STORE, PREFIX_CONV + id)) ?? [];
     }
 
     async deleteConversation(id) {
-        await this.idb.remove(DATA_STORE, PREFIX_CONV + id);
+        const backend = await this._ensureBackend();
+        await backend.remove(DATA_STORE, PREFIX_CONV + id);
     }
 
     // ---- History list ----
 
     async saveHistory(conversations) {
-        await this.idb.set(DATA_STORE, PREFIX_HISTORY, conversations);
+        const backend = await this._ensureBackend();
+        await backend.set(DATA_STORE, PREFIX_HISTORY, conversations);
     }
 
     async loadHistory() {
-        return await this.idb.get(DATA_STORE, PREFIX_HISTORY) ?? [];
+        const backend = await this._ensureBackend();
+        return (await backend.get(DATA_STORE, PREFIX_HISTORY)) ?? [];
     }
 
     // ---- Active chat ID ----
 
     async getActiveChatId() {
-        return await this.idb.get(DATA_STORE, PREFIX_ACTIVE);
+        const backend = await this._ensureBackend();
+        return await backend.get(DATA_STORE, PREFIX_ACTIVE);
     }
 
     async setActiveChatId(id) {
-        await this.idb.set(DATA_STORE, PREFIX_ACTIVE, id);
+        const backend = await this._ensureBackend();
+        await backend.set(DATA_STORE, PREFIX_ACTIVE, id);
     }
 
     // ---- User preferences ----
 
     async getPref(key) {
-        return await this.idb.get(DATA_STORE, PREFIX_PREF + key);
+        const backend = await this._ensureBackend();
+        return await backend.get(DATA_STORE, PREFIX_PREF + key);
     }
 
     async setPref(key, value) {
-        await this.idb.set(DATA_STORE, PREFIX_PREF + key, value);
+        const backend = await this._ensureBackend();
+        await backend.set(DATA_STORE, PREFIX_PREF + key, value);
     }
 
     // ---- MCP config (namespace: 'mcp:') ----
 
     async mcpGet(key) {
-        return await this.idb.get(DATA_STORE, 'mcp:' + key);
+        const backend = await this._ensureBackend();
+        return await backend.get(DATA_STORE, 'mcp:' + key);
     }
 
     async mcpSet(key, value) {
-        await this.idb.set(DATA_STORE, 'mcp:' + key, value);
+        const backend = await this._ensureBackend();
+        await backend.set(DATA_STORE, 'mcp:' + key, value);
     }
 
     // ---- Storage estimate ----
 
     async getStorageEstimate() {
+        if (IS_NODE_SERVER()) {
+            const backend = await this._ensureBackend();
+            return backend.getStorageEstimate();
+        }
         try {
             const estimate = await navigator.storage.estimate();
             return {
