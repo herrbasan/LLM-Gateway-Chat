@@ -41,8 +41,10 @@ export class ChatHistory {
      */
     create() {
         const id = 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
         const conversation = {
             id,
+            sessionId,
             title: 'New Chat',
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -135,6 +137,25 @@ export class ChatHistory {
      */
     get(id) {
         return this.conversations.find(c => c.id === id);
+    }
+
+    /**
+     * Get session ID for a conversation
+     */
+    getSessionId(id) {
+        const meta = this.conversations.find(c => c.id === id);
+        return meta?.sessionId || null;
+    }
+
+    /**
+     * Update session ID for a conversation
+     */
+    updateSessionId(id, sessionId) {
+        const meta = this.conversations.find(c => c.id === id);
+        if (!meta) return false;
+        meta.sessionId = sessionId;
+        this._saveList();
+        return true;
     }
 
     /**

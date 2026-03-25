@@ -61,6 +61,8 @@ export class GatewayClient extends EventEmitter {
     this.wsUrl = base.replace(/^http/, 'ws') + '/v1/realtime';
     
     this.accessKey = options.accessKey || '';
+    // Auto-generate session ID for tracking related requests (e.g., for Kimi CLI Adapter)
+    this.sessionId = options.sessionId || `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     this.socket = null;
     this.streams = new Map();
     this.pendingRequests = new Map();
@@ -204,12 +206,15 @@ export class GatewayClient extends EventEmitter {
       
       this.pendingRequests.set(id, { resolve, reject });
 
-      this.socket.send(JSON.stringify({
+      const message = {
         jsonrpc: '2.0',
         id,
         method,
         params
-      }));
+      };
+      
+      console.log('[GatewayClient] WebSocket sending:', JSON.stringify(message, null, 2));
+      this.socket.send(JSON.stringify(message));
     });
   }
 
@@ -219,9 +224,17 @@ export class GatewayClient extends EventEmitter {
     
     this.streams.set(requestId, stream);
     
+    // Defensive: Ensure sessionId is always set
+    if (!this.sessionId) {
+      console.warn('[GatewayClient] sessionId was missing, regenerating');
+      this.sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    }
+    
+    const paramsWithSession = { ...params, request_id: requestId, session_id: this.sessionId };
+    
     this.connect()
       .then(() => {
-        return this._send(method, { ...params, request_id: requestId }, requestId);
+        return this._send(method, paramsWithSession, requestId);
       })
       .catch((err) => stream.emit('error', err));
       
@@ -411,5 +424,13 @@ export class GatewayClient extends EventEmitter {
       this.maxReconnectAttempts = 0; // Prevent reconnection
       this.socket.close();
     }
+  }
+
+  /**
+   * Update the session ID for tracking related requests.
+   * Used when switching between conversations.
+   */
+  setSessionId(sessionId) {
+    this.sessionId = sessionId;
   }
 }

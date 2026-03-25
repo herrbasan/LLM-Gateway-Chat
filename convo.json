@@ -1,49 +1,25 @@
 {
-  "model": "grok-chat",
+  "model": "kimi-cli-chat",
   "messages": [
     {
       "role": "system",
-      "content": "LLM Gateway Chat v1.0 | User: \"Herrbasan\" | Location: \"Germany\" | Language: \"English\"\nDo not include timestamps in your responses - they are added automatically by the chat system.\n\n\nYou have access to the following tools:\n{\"name\":\"browser_fetch\",\"description\":\"Fetch URL with headless browser. Modes: text (default), html, screenshot, markdown. Use waitFor for dynamic content.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"html\",\"screenshot\",\"markdown\"]},\"waitFor\":{\"type\":\"string\",\"description\":\"CSS selector to wait for\"},\"fullPage\":{\"type\":\"boolean\"},\"viewport\":{\"type\":\"object\",\"properties\":{\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"}}}},\"required\":[\"url\"]}}\n{\"name\":\"browser_click\",\"description\":\"Click element on page and return result\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"selector\":{\"type\":\"string\",\"description\":\"CSS selector\"},\"waitAfter\":{\"type\":\"number\",\"description\":\"Wait ms after click\"},\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"html\",\"screenshot\"]}},\"required\":[\"url\",\"selector\"]}}\n{\"name\":\"browser_fill\",\"description\":\"Fill form fields and optionally submit\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"fields\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"selector\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}}}},\"submit\":{\"type\":\"string\",\"description\":\"Submit button selector\"},\"waitAfter\":{\"type\":\"number\"},\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"html\",\"screenshot\"]}},\"required\":[\"url\",\"fields\"]}}\n{\"name\":\"browser_evaluate\",\"description\":\"Execute JavaScript in page context\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"script\":{\"type\":\"string\",\"description\":\"JS code (must return value)\"},\"waitFor\":{\"type\":\"string\"}},\"required\":[\"url\",\"script\"]}}\n{\"name\":\"browser_pdf\",\"description\":\"Generate PDF of page\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"format\":{\"type\":\"string\",\"enum\":[\"A4\",\"Letter\",\"Legal\",\"Tabloid\"]},\"landscape\":{\"type\":\"boolean\"},\"printBackground\":{\"type\":\"boolean\"}},\"required\":[\"url\"]}}\n{\"name\":\"list_codebases\",\"description\":\"List all indexed codebases with status and file counts\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"list_spaces\",\"description\":\"List available spaces (configured project roots) for indexing codebases. Use this to find space names before calling index_codebase.\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"search_codebase\",\"description\":\"Primary search tool for single codebase. RECOMMENDED over grep_codebase for most searches. Combines semantic (meaning) + keyword (exact) matching. Use strategy:keyword for fast name lookups, strategy:semantic for concept queries. Use analyze:true to get AI-summarized results (saves 50-90% tokens). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"query\":{\"type\":\"string\",\"description\":\"Search query (natural language or keywords)\"},\"strategy\":{\"type\":\"string\",\"enum\":[\"hybrid\",\"semantic\",\"keyword\"],\"default\":\"hybrid\",\"description\":\"hybrid=best overall, keyword=fast exact match, semantic=conceptual similarity\"},\"limit\":{\"type\":\"number\",\"default\":10},\"filter\":{\"type\":\"object\",\"properties\":{\"language\":{\"type\":\"string\"}}},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. Recommended for exploration.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"codebase\",\"query\"]}}\n{\"name\":\"search_semantic\",\"description\":\"Semantic (AI embedding) search - finds conceptually similar code. Best for: \\\"how is X implemented?\\\", \\\"find code that does Y\\\", pattern discovery. Slower than keyword but understands meaning, not just text. Use analyze:true for structured summary. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"query\":{\"type\":\"string\",\"description\":\"Natural language query describing what you are looking for\"},\"limit\":{\"type\":\"number\",\"default\":10},\"filter\":{\"type\":\"object\",\"properties\":{\"language\":{\"type\":\"string\"}}},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. Recommended for exploration.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"codebase\",\"query\"]}}\n{\"name\":\"search_keyword\",\"description\":\"FAST indexed keyword search. Best for: exact function names, class names, variable names, imports. Searches file paths AND content. Much faster than grep_codebase (<100ms vs 1-3s). Use this INSTEAD of grep_codebase when searching for specific identifiers. Use analyze:true for AI summary. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"query\":{\"type\":\"string\",\"description\":\"Keywords to search (function names, class names, etc.)\"},\"limit\":{\"type\":\"number\",\"default\":20},\"searchContent\":{\"type\":\"boolean\",\"default\":true,\"description\":\"Search file content (not just paths). Slightly slower but more thorough.\"},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary (reduces token cost for calling LLM)\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis (increases token usage)\"}},\"required\":[\"codebase\",\"query\"]}}\n{\"name\":\"grep_codebase\",\"description\":\"Live regex search using ripgrep. ALWAYS CURRENT (searches filesystem directly). Use ONLY when: (1) You need regex patterns like \\\"function.*predict\\\\(\\\", (2) You need exact line numbers for editing, (3) You suspect index is stale. OTHERWISE prefer search_keyword (faster for names) or search_semantic (for concepts). Slower than indexed search (1-3s vs <200ms). Use analyze:true to get structured analysis. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (regex or literal string)\"},\"regex\":{\"type\":\"boolean\",\"default\":true,\"description\":\"Use regex pattern matching. Set to false for literal string search (faster)\"},\"limit\":{\"type\":\"number\",\"default\":50,\"description\":\"Max total results to return\"},\"maxMatchesPerFile\":{\"type\":\"number\",\"default\":5,\"description\":\"Max matches per file (-1 for unlimited, 1 for \\\"find files only\\\")\"},\"caseSensitive\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Case-sensitive search\"},\"pathPattern\":{\"type\":\"string\",\"description\":\"Filter by file path glob (e.g., \\\"*.js\\\", \\\"src/**\\\")\"},\"noCache\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Skip cache and force fresh search\"},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"codebase\",\"pattern\"]}}\n{\"name\":\"search_all_codebases\",\"description\":\"[RECOMMENDED] Search across ALL indexed codebases at once. Perfect for finding \\\"how is X implemented across different projects?\\\" Strategies: hybrid (default, best overall), semantic (conceptual), keyword (fast exact match). AVOID strategy:grep unless you need regex - it is 10x slower. Use analyze:true (strongly recommended) to get AI-summarized insights instead of 50+ raw snippets (saves 50-90% tokens).\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (natural language, keywords, or grep pattern)\"},\"strategy\":{\"type\":\"string\",\"enum\":[\"hybrid\",\"semantic\",\"keyword\",\"grep\"],\"default\":\"hybrid\",\"description\":\"hybrid=best overall (default), keyword=fastest, semantic=conceptual, grep=slow regex (avoid unless needed)\"},\"limit\":{\"type\":\"number\",\"default\":20,\"description\":\"Total result limit across all codebases\"},\"perCodebaseLimit\":{\"type\":\"number\",\"default\":5,\"description\":\"Max results per codebase\"},\"concurrency\":{\"type\":\"number\",\"default\":10,\"description\":\"Number of codebases to search in parallel\"},\"filter\":{\"type\":\"object\",\"properties\":{\"language\":{\"type\":\"string\"}}},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. STRONGLY RECOMMENDED for cross-codebase exploration.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"query\"]}}\n{\"name\":\"get_file_info\",\"description\":\"Get file structure (functions, classes, imports) without content. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"path\":{\"type\":\"string\"}},\"required\":[\"codebase\",\"path\"]}}\n{\"name\":\"get_file\",\"description\":\"Get file content with staleness check. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"path\":{\"type\":\"string\"}},\"required\":[\"codebase\",\"path\"]}}\n{\"name\":\"check_codebase_status\",\"description\":\"Check staleness status of a codebase (stale files, missing files). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"}},\"required\":[\"codebase\"]}}\n{\"name\":\"check_file_stale\",\"description\":\"Check if a specific file is stale (changed since indexing). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"path\":{\"type\":\"string\",\"description\":\"File path relative to codebase root\"}},\"required\":[\"codebase\",\"path\"]}}\n{\"name\":\"get_codebase_description\",\"description\":\"Get LLM-generated project description with staleness check. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"}},\"required\":[\"name\"]}}\n{\"name\":\"get_prioritized_files\",\"description\":\"Get files ordered by importance (high/medium/low priority). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"}},\"required\":[\"name\"]}}\n{\"name\":\"get_documentation\",\"description\":\"Get the main orchestrator documentation (tools guide). Equivalent to read_document({name: 'orchestrator'}).\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"list_documents\",\"description\":\"List all available documentation files in the mcp_documentation folder.\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"read_document\",\"description\":\"Read a specific documentation file by name (without .md extension).\",\"parameters\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Document name without extension (e.g., 'orchestrator', 'coding-philosophy')\"}},\"required\":[\"name\"]}}\n{\"name\":\"inspect_code\",\"description\":\"Analyze existing code files iteratively. Finds bugs, explains architecture, or suggests improvements. File paths must be absolute.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Absolute paths of files to inspect (e.g. 'D:\\\\Project\\\\src\\\\main.js').\"},\"prompt\":{\"type\":\"string\",\"description\":\"Specific question or analysis request for these files.\"}},\"required\":[\"files\",\"prompt\"]}}\n{\"name\":\"query_model\",\"description\":\"Query the local LLM. To include files, use absolute paths.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"systemPrompt\":{\"type\":\"string\",\"description\":\"Optional system prompt. Overrides the default assistant prompt.\"}},\"required\":[\"prompt\"]}}\n{\"name\":\"remember\",\"description\":\"Store a memory. Categories: proven, anti_patterns, hypotheses, context, observed. Use domain for project-specific memories.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Memory content\"},\"category\":{\"type\":\"string\",\"description\":\"Category\"},\"domain\":{\"type\":\"string\",\"description\":\"Optional project scope\"}},\"required\":[\"text\",\"category\"]}}\n{\"name\":\"recall\",\"description\":\"Search memories. Results show confidence: [v]=proven, ~=promising, ?=hypothesis.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"number\",\"description\":\"Max results (default: 5)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter by category\"},\"domain\":{\"type\":\"string\",\"description\":\"Filter by project\"}},\"required\":[\"query\"]}}\n{\"name\":\"forget\",\"description\":\"Delete a memory by ID\",\"parameters\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"number\"}},\"required\":[\"id\"]}}\n{\"name\":\"list_memories\",\"description\":\"List all memories. Filter by category/domain.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},\"domain\":{\"type\":\"string\"}}}}\n{\"name\":\"update_memory\",\"description\":\"Update a memory by ID\",\"parameters\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"number\"},\"text\":{\"type\":\"string\"},\"category\":{\"type\":\"string\"},\"domain\":{\"type\":\"string\"}},\"required\":[\"id\",\"text\"]}}\n{\"name\":\"reflect_on_session\",\"description\":\"USER-INITIATED. Analyze session for quality improvements. Returns proposed changes.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionSummary\":{\"type\":\"string\"}},\"required\":[\"sessionSummary\"]}}\n{\"name\":\"apply_reflection_changes\",\"description\":\"Apply changes from reflection\",\"parameters\":{\"type\":\"object\",\"properties\":{\"changes\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"update\",\"reinforce\",\"decrease\"]},\"id\":{\"type\":\"number\",\"description\":\"Memory ID (for update/reinforce/decrease)\"},\"text\":{\"type\":\"string\",\"description\":\"Memory text (for create/update)\"},\"category\":{\"type\":\"string\",\"description\":\"Category (for create/update)\"},\"domain\":{\"type\":\"string\",\"description\":\"Optional project scope\"},\"reason\":{\"type\":\"string\",\"description\":\"Reason for the change\"}},\"required\":[\"action\"]}}},\"required\":[\"changes\"]}}\n{\"name\":\"research_topic\",\"description\":\"Research a topic via web search. Multi-phase: search, scrape, synthesize with citations.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (quote terms, use site: filters)\"},\"engines\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"enum\":[\"google\",\"duckduckgo\",\"bing\"]}},\"max_pages\":{\"type\":\"number\",\"description\":\"Max pages (default: 10)\"}},\"required\":[\"query\"]}}\n\nTo invoke a tool, you MUST output a single line with the exact following syntax, self-delimited, without any surrounding markdown formatting or text on that line:\n__TOOL_CALL__({\"name\": \"tool_name\", \"args\": {\"param1\": \"value\"}})\n\nAfter you output a tool call, the system will execute it and provide you with a new message containing the result formatted like this:\n<tool_result>\n  <tool_name>...</tool_name>\n  <status>success|error</status>\n  <output>...</output>\n</tool_result>\nDo not attempt to guess or hallucinate the tool's result."
+      "content": "LLM Gateway Chat v1.0 | User: \"Herrbasan\" | Location: \"Germany\" | Language: \"English\"\nDo not include timestamps in your responses - they are added automatically by the chat system.\n\n\nYou have access to the following tools:\n{\"name\":\"browser_fetch\",\"description\":\"Fetch URL with headless browser. Modes: text (default), html, screenshot, markdown. Use waitFor for dynamic content.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"html\",\"screenshot\",\"markdown\"]},\"waitFor\":{\"type\":\"string\",\"description\":\"CSS selector to wait for\"},\"fullPage\":{\"type\":\"boolean\"},\"viewport\":{\"type\":\"object\",\"description\":\"Override default viewport size. Defaults to 1920x1080.\",\"properties\":{\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"}}}},\"required\":[\"url\"]}}\n{\"name\":\"browser_evaluate\",\"description\":\"Execute JavaScript in page context\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"script\":{\"type\":\"string\",\"description\":\"JS code (must return value)\"},\"waitFor\":{\"type\":\"string\"}},\"required\":[\"url\",\"script\"]}}\n{\"name\":\"browser_pdf\",\"description\":\"Generate PDF of page\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"format\":{\"type\":\"string\",\"enum\":[\"A4\",\"Letter\",\"Legal\",\"Tabloid\"]},\"landscape\":{\"type\":\"boolean\"},\"printBackground\":{\"type\":\"boolean\"}},\"required\":[\"url\"]}}\n{\"name\":\"browser_session_create\",\"description\":\"Create a persistent browser session. Returns a sessionId in the response text. Use this sessionId in all subsequent browser_session_* calls (goto, content, click, fill, evaluate, scroll, metadata, close). Example: call this first, then use browser_session_goto with the returned sessionId.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"viewport\":{\"type\":\"object\",\"description\":\"Override default viewport size\",\"properties\":{\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"}}},\"userAgent\":{\"type\":\"string\",\"description\":\"Custom user agent string\"}}}}\n{\"name\":\"browser_session_list\",\"description\":\"List all active browser sessions\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"browser_session_close\",\"description\":\"Close a specific browser session\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\",\"description\":\"Session ID to close\"}},\"required\":[\"sessionId\"]}}\n{\"name\":\"browser_session_goto\",\"description\":\"Navigate to a URL. Requires sessionId from browser_session_create. Returns confirmation with the URL navigated to. Has built-in retry with exponential backoff for flaky loads.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"url\":{\"type\":\"string\"},\"waitFor\":{\"type\":\"string\",\"description\":\"CSS selector to wait for after navigation\"},\"timeout\":{\"type\":\"number\",\"description\":\"Navigation timeout in ms (default 30000)\"},\"retries\":{\"type\":\"number\",\"description\":\"Max retries on failure (default 2)\"}},\"required\":[\"sessionId\",\"url\"]}}\n{\"name\":\"browser_session_content\",\"description\":\"Get page content. mode 'text' extracts readable text, 'screenshot' returns base64 image, 'html' returns raw HTML, 'markdown' returns markdown-formatted content. Requires sessionId from browser_session_create.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"html\",\"markdown\",\"screenshot\"]}},\"required\":[\"sessionId\"]}}\n{\"name\":\"browser_session_click\",\"description\":\"Click an element by CSS selector. Returns page content after the click (use mode to get screenshot or text). Requires sessionId from browser_session_create. Has built-in retry for flaky elements.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"selector\":{\"type\":\"string\"},\"waitAfter\":{\"type\":\"number\"},\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"html\",\"screenshot\"]},\"retries\":{\"type\":\"number\",\"description\":\"Max retries on failure (default 2)\"}},\"required\":[\"sessionId\",\"selector\"]}}\n{\"name\":\"browser_session_fill\",\"description\":\"Fill form fields and optionally submit. Each field has a CSS selector and value. If submit selector is provided, clicks it after filling. Returns page content. Requires sessionId from browser_session_create. Has built-in retry for flaky forms.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"fields\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"selector\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}}}},\"submit\":{\"type\":\"string\"},\"waitAfter\":{\"type\":\"number\"},\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"html\",\"screenshot\"]},\"retries\":{\"type\":\"number\",\"description\":\"Max retries on failure (default 2)\"}},\"required\":[\"sessionId\",\"fields\"]}}\n{\"name\":\"browser_session_evaluate\",\"description\":\"Execute JavaScript in the page context. Script must return a value (string, number, or JSON-serializable object). Requires sessionId from browser_session_create.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"script\":{\"type\":\"string\"},\"waitFor\":{\"type\":\"string\"}},\"required\":[\"sessionId\",\"script\"]}}\n{\"name\":\"browser_session_scroll\",\"description\":\"Scroll the page. direction 'down' or 'up', amount in pixels (default 500). Requires sessionId from browser_session_create.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"direction\":{\"type\":\"string\",\"enum\":[\"up\",\"down\"]},\"amount\":{\"type\":\"number\",\"description\":\"Pixels to scroll (default 500)\"}},\"required\":[\"sessionId\"]}}\n{\"name\":\"browser_session_type\",\"description\":\"Type text into a focused element or simulate keystrokes. Sends key events character-by-character, which triggers input validators and dynamic form handlers better than direct value setting. Use for CAPTCHAs, autocomplete, or sites that validate on key events.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"selector\":{\"type\":\"string\",\"description\":\"CSS selector to focus before typing (optional - if omitted, types into currently focused element)\"},\"text\":{\"type\":\"string\",\"description\":\"Text to type\"},\"delay\":{\"type\":\"number\",\"description\":\"Delay between keystrokes in ms (default 0, use 50-100 for slow sites)\"},\"keystrokes\":{\"type\":\"array\",\"description\":\"Special key presses: Enter, Tab, Escape, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Delete, Home, End, PageUp, PageDown\",\"items\":{\"type\":\"string\"}}},\"required\":[\"sessionId\"]}}\n{\"name\":\"browser_session_inspect\",\"description\":\"Get detailed info about an element: tag, attributes, text content, position, visibility, and an optional sub-screenshot cropped to the element. Useful for debugging selectors and understanding element state.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"selector\":{\"type\":\"string\"},\"screenshot\":{\"type\":\"boolean\",\"description\":\"Include sub-screenshot of element (default false)\"}},\"required\":[\"sessionId\",\"selector\"]}}\n{\"name\":\"browser_session_console\",\"description\":\"Get console messages and errors captured from the page JavaScript since last call or session start. Buffers messages per session. Returns all accumulated messages and clears the buffer.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"}},\"required\":[\"sessionId\"]}}\n{\"name\":\"browser_session_wait\",\"description\":\"Enhanced waiting with multiple options: wait for CSS selector (with OR logic for multiple), text content in page, URL pattern matching, or custom condition via JS. More flexible than waitFor in goto.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"selectors\":{\"type\":\"array\",\"description\":\"CSS selectors - waits for ANY to appear (OR logic)\"},\"text\":{\"type\":\"string\",\"description\":\"Text to wait for in page content\"},\"urlPattern\":{\"type\":\"string\",\"description\":\"Regex pattern to match against current URL\"},\"condition\":{\"type\":\"string\",\"description\":\"JS expression that must evaluate to truthy\"},\"timeout\":{\"type\":\"number\",\"description\":\"Max wait in ms (default 15000)\"}},\"required\":[\"sessionId\"]}}\n{\"name\":\"browser_session_metadata\",\"description\":\"Get current page metadata: URL, title, and viewport dimensions. Useful to verify navigation succeeded. Requires sessionId from browser_session_create.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionId\":{\"type\":\"string\"}},\"required\":[\"sessionId\"]}}\n{\"name\":\"list_codebases\",\"description\":\"List all indexed codebases with status and file counts\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"list_spaces\",\"description\":\"List available spaces (configured project roots) for indexing codebases. Use this to find space names before calling index_codebase.\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"search_codebase\",\"description\":\"[RECOMMENDED] Primary focused search tool for a single codebase. Very fast. Combines semantic (meaning) + keyword (exact) matching. ALWAYS use this first before falling back to search_all_codebases. Use strategy:keyword for fast exact name lookups, strategy:semantic for conceptual queries. Use analyze:true to get an AI-summarized response (saves tokens). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"query\":{\"type\":\"string\",\"description\":\"Search query (natural language or keywords)\"},\"strategy\":{\"type\":\"string\",\"enum\":[\"hybrid\",\"semantic\",\"keyword\"],\"default\":\"hybrid\",\"description\":\"hybrid=best overall, keyword=fast exact match, semantic=conceptual similarity\"},\"limit\":{\"type\":\"number\",\"default\":10},\"filter\":{\"type\":\"object\",\"properties\":{\"language\":{\"type\":\"string\"}}},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. Recommended for exploration.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"codebase\",\"query\"]}}\n{\"name\":\"search_semantic\",\"description\":\"Semantic (AI embedding) search - finds conceptually similar code. Best for: \\\"how is X implemented?\\\", \\\"find code that does Y\\\", pattern discovery. Slower than keyword but understands meaning, not just text. Use analyze:true for structured summary. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"query\":{\"type\":\"string\",\"description\":\"Natural language query describing what you are looking for\"},\"limit\":{\"type\":\"number\",\"default\":10},\"filter\":{\"type\":\"object\",\"properties\":{\"language\":{\"type\":\"string\"}}},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. Recommended for exploration.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"codebase\",\"query\"]}}\n{\"name\":\"search_keyword\",\"description\":\"[FASTEST] Indexed keyword search. Best for: exact function names, class names, variable names, imports. Searches file paths AND content. Much faster than grep_codebase (<100ms vs 1-3s). Use this INSTEAD of grep_codebase when searching for specific identifiers. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"query\":{\"type\":\"string\",\"description\":\"Keywords to search (function names, class names, etc.)\"},\"limit\":{\"type\":\"number\",\"default\":20},\"searchContent\":{\"type\":\"boolean\",\"default\":true,\"description\":\"Search file content (not just paths). Slightly slower but more thorough.\"},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary (reduces token cost for calling LLM)\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis (increases token usage)\"}},\"required\":[\"codebase\",\"query\"]}}\n{\"name\":\"grep_codebase\",\"description\":\"Live regex search using ripgrep. ALWAYS CURRENT (searches filesystem directly). Slowest single-codebase search. Use ONLY when: (1) You need complex regex patterns, (2) You need exact line numbers for editing, (3) You strongly suspect the index is stale. OTHERWISE prefer search_keyword (faster for exact names) or search_semantic (for concepts). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (regex or literal string)\"},\"regex\":{\"type\":\"boolean\",\"default\":true,\"description\":\"Use regex pattern matching. Set to false for literal string search (faster)\"},\"limit\":{\"type\":\"number\",\"default\":50,\"description\":\"Max total results to return\"},\"maxMatchesPerFile\":{\"type\":\"number\",\"default\":5,\"description\":\"Max matches per file (-1 for unlimited, 1 for \\\"find files only\\\")\"},\"caseSensitive\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Case-sensitive search\"},\"pathPattern\":{\"type\":\"string\",\"description\":\"Filter by file path glob (e.g., \\\"*.js\\\", \\\"src/**\\\")\"},\"noCache\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Skip cache and force fresh search\"},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"codebase\",\"pattern\"]}}\n{\"name\":\"search_all_codebases\",\"description\":\"[AVOID IF POSSIBLE] Slowest search method. Search across ALL indexed codebases at once. ONLY use this as a last resort when focused searches on individual codebases have failed, or for extremely broad queries like \\\"how is X implemented across different projects?\\\" Use analyze:true to get AI-summarized insights instead of raw snippets.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (natural language, keywords, or grep pattern)\"},\"strategy\":{\"type\":\"string\",\"enum\":[\"hybrid\",\"semantic\",\"keyword\",\"grep\"],\"default\":\"hybrid\",\"description\":\"hybrid=best overall (default), keyword=fastest, semantic=conceptual, grep=slow regex (avoid unless needed)\"},\"limit\":{\"type\":\"number\",\"default\":20,\"description\":\"Total result limit across all codebases\"},\"perCodebaseLimit\":{\"type\":\"number\",\"default\":5,\"description\":\"Max results per codebase\"},\"concurrency\":{\"type\":\"number\",\"default\":10,\"description\":\"Number of codebases to search in parallel\"},\"filter\":{\"type\":\"object\",\"properties\":{\"language\":{\"type\":\"string\"}}},\"analyze\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. STRONGLY RECOMMENDED for cross-codebase exploration.\"},\"includeRaw\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.\"}},\"required\":[\"query\"]}}\n{\"name\":\"get_file_info\",\"description\":\"Get file structure (functions, classes, imports) without content. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"path\":{\"type\":\"string\"}},\"required\":[\"codebase\",\"path\"]}}\n{\"name\":\"get_file\",\"description\":\"Get file content with staleness check. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"path\":{\"type\":\"string\"}},\"required\":[\"codebase\",\"path\"]}}\n{\"name\":\"check_codebase_status\",\"description\":\"Check staleness status of a codebase (stale files, missing files). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"}},\"required\":[\"codebase\"]}}\n{\"name\":\"check_file_stale\",\"description\":\"Check if a specific file is stale (changed since indexing). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"codebase\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"},\"path\":{\"type\":\"string\",\"description\":\"File path relative to codebase root\"}},\"required\":[\"codebase\",\"path\"]}}\n{\"name\":\"get_codebase_description\",\"description\":\"Get LLM-generated project description with staleness check. Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"}},\"required\":[\"name\"]}}\n{\"name\":\"get_prioritized_files\",\"description\":\"Get files ordered by importance (high/medium/low priority). Codebase name supports partial matching.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Codebase name (partial match supported)\"}},\"required\":[\"name\"]}}\n{\"name\":\"get_documentation\",\"description\":\"Get the main orchestrator documentation (tools guide). Equivalent to read_document({name: 'orchestrator'}).\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"list_documents\",\"description\":\"List all available documentation files in the mcp_documentation folder.\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"read_document\",\"description\":\"Read a specific documentation file by name (without .md extension).\",\"parameters\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Document name without extension (e.g., 'orchestrator', 'coding-philosophy')\"}},\"required\":[\"name\"]}}\n{\"name\":\"inspect_code\",\"description\":\"Analyze existing code files iteratively. Finds bugs, explains architecture, or suggests improvements. File paths must be absolute.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Absolute paths of files to inspect (e.g. 'D:\\\\Project\\\\src\\\\main.js').\"},\"prompt\":{\"type\":\"string\",\"description\":\"Specific question or analysis request for these files.\"}},\"required\":[\"files\",\"prompt\"]}}\n{\"name\":\"query_model\",\"description\":\"Query the local LLM. To include files, use absolute paths.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"systemPrompt\":{\"type\":\"string\",\"description\":\"Optional system prompt. Overrides the default assistant prompt.\"}},\"required\":[\"prompt\"]}}\n{\"name\":\"remember\",\"description\":\"Store a memory. Categories: proven, anti_patterns, hypotheses, context, observed. Use domain for project-specific memories.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Memory content\"},\"category\":{\"type\":\"string\",\"description\":\"Category\"},\"domain\":{\"type\":\"string\",\"description\":\"Optional project scope\"}},\"required\":[\"text\",\"category\"]}}\n{\"name\":\"recall\",\"description\":\"Search memories. Results show confidence: [v]=proven, ~=promising, ?=hypothesis.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"number\",\"description\":\"Max results (default: 5)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter by category\"},\"domain\":{\"type\":\"string\",\"description\":\"Filter by project\"}},\"required\":[\"query\"]}}\n{\"name\":\"forget\",\"description\":\"Delete a memory by ID\",\"parameters\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"number\"}},\"required\":[\"id\"]}}\n{\"name\":\"list_memories\",\"description\":\"List all memories. Filter by category/domain.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},\"domain\":{\"type\":\"string\"}}}}\n{\"name\":\"update_memory\",\"description\":\"Update a memory by ID\",\"parameters\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"number\"},\"text\":{\"type\":\"string\"},\"category\":{\"type\":\"string\"},\"domain\":{\"type\":\"string\"}},\"required\":[\"id\",\"text\"]}}\n{\"name\":\"reflect_on_session\",\"description\":\"USER-INITIATED. Analyze session for quality improvements. Returns proposed changes.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"sessionSummary\":{\"type\":\"string\"}},\"required\":[\"sessionSummary\"]}}\n{\"name\":\"apply_reflection_changes\",\"description\":\"Apply changes from reflection\",\"parameters\":{\"type\":\"object\",\"properties\":{\"changes\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"update\",\"reinforce\",\"decrease\"]},\"id\":{\"type\":\"number\",\"description\":\"Memory ID (for update/reinforce/decrease)\"},\"text\":{\"type\":\"string\",\"description\":\"Memory text (for create/update)\"},\"category\":{\"type\":\"string\",\"description\":\"Category (for create/update)\"},\"domain\":{\"type\":\"string\",\"description\":\"Optional project scope\"},\"reason\":{\"type\":\"string\",\"description\":\"Reason for the change\"}},\"required\":[\"action\"]}}},\"required\":[\"changes\"]}}\n{\"name\":\"research_topic\",\"description\":\"Research a topic via web search. Multi-phase: search, scrape, synthesize with citations.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (quote terms, use site: filters)\"},\"engines\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"enum\":[\"google\",\"duckduckgo\",\"bing\"]}},\"max_pages\":{\"type\":\"number\",\"description\":\"Max pages (default: 10)\"}},\"required\":[\"query\"]}}\n{\"name\":\"vision_create_session\",\"description\":\"Create a new image session for analysis. Returns a session_id to use with vision_analyze. The session stores the original image and accumulates analyses over time.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"image_url\":{\"type\":\"string\",\"description\":\"Image URL (remote or data URL). Either this or image_data is required.\"},\"image_data\":{\"type\":\"string\",\"description\":\"Base64-encoded image data. Alternative to image_url.\"},\"image_mime_type\":{\"type\":\"string\",\"description\":\"MIME type (e.g., 'image/jpeg', 'image/png'). Required if using image_data.\"}},\"oneOf\":[{\"required\":[\"image_url\"]},{\"required\":[\"image_data\",\"image_mime_type\"]}]}}\n{\"name\":\"vision_analyze\",\"description\":\"Analyze an image. Previous analyses are included as context, enabling ever-sharpening detail. Use 'focus' to zoom into specific regions for higher resolution analysis of that area.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"session_id\":{\"type\":\"string\",\"description\":\"Session ID from vision_create_session\"},\"query\":{\"type\":\"string\",\"description\":\"What to analyze. Examples: 'Describe everything', 'What is the person wearing?', 'Read the text on the sign'\"},\"focus\":{\"type\":\"object\",\"description\":\"Optional: Region to focus on for higher resolution analysis\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Free text focus: 'top-left corner', 'person on the left', 'the sign in the background'\"},\"grid\":{\"type\":\"object\",\"description\":\"Grid-based focus: divide image into cols x rows, analyze specific cells\",\"properties\":{\"cols\":{\"type\":\"number\",\"description\":\"Number of columns (e.g., 2 for 2x2 grid)\"},\"rows\":{\"type\":\"number\",\"description\":\"Number of rows (e.g., 2 for 2x2 grid)\"},\"cells\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Cell indices to analyze (0=top-left, read left-to-right, top-to-bottom)\"}}},\"region\":{\"type\":\"object\",\"description\":\"Normalized pixel region for precise cropping\",\"properties\":{\"left\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1},\"top\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1},\"right\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1},\"bottom\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1}}},\"centerCrop\":{\"oneOf\":[{\"type\":\"number\",\"description\":\"Crop to center N% (e.g., 50 = keep center 50%)\"},{\"type\":\"object\",\"description\":\"Asymmetric center crop\",\"properties\":{\"widthPercent\":{\"type\":\"number\"},\"heightPercent\":{\"type\":\"number\"}}}]}}},\"include_context\":{\"type\":\"boolean\",\"default\":true,\"description\":\"Whether to include previous analyses as context\"}},\"required\":[\"session_id\"]}}\n{\"name\":\"vision_close_session\",\"description\":\"Close an image session and free memory. Sessions auto-expire after 30 minutes of inactivity, but this frees resources immediately.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"session_id\":{\"type\":\"string\",\"description\":\"Session ID to close\"}},\"required\":[\"session_id\"]}}\n{\"name\":\"vision_list_sessions\",\"description\":\"List all active image sessions\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}\n{\"name\":\"vision_get_session\",\"description\":\"Get details about a session including accumulated analyses\",\"parameters\":{\"type\":\"object\",\"properties\":{\"session_id\":{\"type\":\"string\",\"description\":\"Session ID to inspect\"}},\"required\":[\"session_id\"]}}\n\nTo invoke a tool, you MUST output a single line with the exact following syntax, self-delimited, without any surrounding markdown formatting or text on that line:\n__TOOL_CALL__({\"name\": \"tool_name\", \"args\": {\"param1\": \"value\"}})\n\nAfter you output a tool call, the system will execute it and provide you with a new message containing the result formatted like this:\n<tool_result>\n  <tool_name>...</tool_name>\n  <status>success|error</status>\n  <output>...</output>\n</tool_result>\nDo not attempt to guess or hallucinate the tool's result."
     },
     {
       "role": "user",
-      "content": "I'm testing the mcp integration into my chat app, can you tell me what MCP tools are available to you?"
+      "content": "Hello Kimi"
     },
     {
       "role": "assistant",
-      "content": "Hello Herrbasan! Here are all the MCP tools available to me, organized by category:\n\n## 🌐 Browser Tools\n- **browser_fetch** - Fetch URLs with headless browser (text/html/screenshot/markdown modes)\n- **browser_click** - Click elements on pages and return results\n- **browser_fill** - Fill form fields and optionally submit\n- **browser_evaluate** - Execute JavaScript in page context\n- **browser_pdf** - Generate PDF of a webpage\n\n## 💻 Codebase Tools\n- **list_codebases** - List all indexed codebases with status\n- **list_spaces** - List available project spaces for indexing\n- **search_codebase** - Primary hybrid (semantic + keyword) search in single codebase\n- **search_semantic** - AI embedding search for conceptual similarity\n- **search_keyword** - Fast indexed keyword search for exact matches\n- **grep_codebase** - Live regex search using ripgrep\n- **search_all_codebases** - Search across ALL indexed codebases at once\n- **get_file_info** - Get file structure without content\n- **get_file** - Get file content with staleness check\n- **check_codebase_status** - Check stale/missing files in a codebase\n- **check_file_stale** - Check if specific file changed since indexing\n- **get_codebase_description** - Get LLM-generated project description\n- **get_prioritized_files** - Get files ordered by importance\n\n## 📚 Documentation Tools\n- **get_documentation** - Get main orchestrator documentation (tools guide)\n- **list_documents** - List all available docs in mcp_documentation folder\n- **read_document** - Read specific documentation file by name\n\n## 🔍 Analysis Tools\n- **inspect_code** - Analyze code files for bugs, architecture, improvements\n- **query_model** - Query the local LLM (with optional file context)\n\n## 🧠 Memory Tools\n- **remember** - Store a memory with category and optional domain\n- **recall** - Search memories by query/category/domain\n- **forget** - Delete a memory by ID\n- **list_memories** - List all memories with filters\n- **update_memory** - Update existing memory by ID\n- **reflect_on_session** - Analyze session for quality improvements\n- **apply_reflection_changes** - Apply changes from reflection\n\n## 🌍 Research Tools\n- **research_topic** - Multi-phase web research (search, scrape, synthesize with citations)\n\n---\n\nYou can test these tools by giving me commands like:\n- \"List my codebases\" → `list_codebases`\n- \"Search for 'authentication' across all projects\" → `search_all_codebases`\n- \"Read the orchestrator documentation\" → `get_documentation`\n- \"Research 'MCP protocol 2024'\" → `research_topic`\n\nWhat would you like to test first?"
+      "content": "Hello! How can I help you today?"
     },
     {
       "role": "user",
-      "content": "Test the research tool"
+      "content": "Just chatting :)"
     },
     {
       "role": "assistant",
-      "content": "__TOOL_CALL__({\"name\": \"research_topic\", \"args\": {\"query\":\"Model Context Protocol MCP integration best practices 2024\",\"engines\":[\"google\",\"duckduckgo\"],\"max_pages\":5}})"
-    },
-    {
-      "role": "user",
-      "content": "<tool_result>\n  <tool_name>research_topic</tool_name>\n  <status>success</status>\n  <output>\n# Model Context Protocol (MCP) Integration Best Practices 2024\n\n## Executive Summary\n\nThe Model Context Protocol (MCP) is an open protocol that standardizes how applications provide context and capabilities to Large Language Models (LLMs). Introduced by Anthropic in late 2024, MCP addresses the challenge of fragmented AI integrations by providing a unified interface—often described as the \"USB-C\" of AI integrations [4]—for connecting AI systems to external tools, data repositories, and business applications.\n\n## Key Architecture Principles\n\n### Single Responsibility Principle\nEach MCP server should have one clear, well-defined purpose. Organizations should avoid building monolithic \"mega-servers\" that handle multiple concerns. Instead, deploy focused services with clear boundaries (e.g., separate servers for databases, files, APIs, email). This approach improves maintainability, enables independent scaling, prevents cascading failures, and establishes clear team ownership [5].\n\n### Protocol Foundation\nMCP uses JSON-RPC 2.0 as its base protocol with stateful connections and server/client capability negotiation [2]. The architecture consists of three components:\n- **Hosts**: LLM applications that initiate connections\n- **Clients**: Connectors within the host application\n- **Servers**: Services that provide context and capabilities [2]\n\n### Server Capabilities\nMCP servers offer three primary feature types:\n- **Resources**: Context and data for the AI model\n- **Prompts**: Templated messages and workflows\n- **Tools**: Functions for the AI model to execute [2]\n\n## Security Best Practices\n\n### Defense in Depth\nOrganizations should implement layered security controls throughout their architecture [1][5]:\n\n| Layer | Controls |\n|-------|----------|\n| Network | Firewall rules, VPN access, local binding (127.0.0.1) |\n| Authentication | Strong identity verification (JWT, OAuth) |\n| Authorization | Granular permission controls, capability-based ACLs |\n| Validation | Input sanitization and strict schema enforcement |\n| Monitoring | Comprehensive audit logging and alerting |\n\n### Critical Security Considerations\n**Important**: MCP does not prescribe protocol-specific security standards [4]. The protocol enables powerful capabilities through arbitrary data access and code execution paths, requiring implementors to carefully address security at the application level [2].\n\nKey security requirements include:\n- **User Consent**: Users must explicitly consent to all data access and operations before execution [2]\n- **Tool Safety**: Tools represent arbitrary code execution and must be treated with caution; tool descriptions should be considered untrusted unless from verified servers [2]\n- **Scoped Credentials**: Implement token isolation and scoped-down credentials that limit access (e.g., read-only, create-only) to prevent catastrophic actions like accidental database deletion [1]\n- **Sampling Controls**: Users must explicitly approve any LLM sampling requests and control what prompts are sent and what results servers can see [2]\n\n### Regulated Workflows\nFor compliance-heavy industries, embed validation logic directly into MCP tools. Examples include healthcare pipelines requiring HIPAA validation and PII anonymization before processing patient data [1].\n\n## Governance and Optimization\n\n### Centralized Governance\nWithout centralized governance, organizations cannot answer audit questions about which agents accessed which data, with what permissions, and when [1]. Governance provides:\n- Version enforcement to prevent outdated local MCP servers with known vulnerabilities\n- Policy enforcement and tool usage tracking across all agents from a single pane [1]\n- Improved task accuracy (28-32% in peer-reviewed benchmarks) [1]\n\n### Cost and Performance Optimization\n\n**Token Efficiency**: Every tool definition consumes context window tokens. At 20 tools, organizations spend 5,000-10,000 tokens per invocation on descriptions alone, increasing latency and LLM inference costs while degrading accuracy [1].\n\n**Optimization Strategies**:\n- Use workflow-scoped tools instead of raw endpoints [1]\n- Implement tool filtering and semantic search to reduce context window usage [1]\n- Build reusable MCP servers shared across teams to eliminate redundant development [1]\n- Design structured tool wrappers, which are approximately 3x more accurate on database tasks than direct API access [1]\n\n## Implementation Best Practices\n\n### Configuration Management\nExternalize all configuration with environment-specific overrides. Use structured configuration with validation (e.g., Pydantic settings) and environment variable support with consistent prefixes [5].\n\n### Error Handling\nImplement structured error handling with proper classification:\n- **Client errors** (4xx): Validation failures, access denied\n- **Server errors** (5xx): Internal failures, database unavailable\n- **External errors**: Dependency failures with retry guidance [5]\n\n### Resilience Patterns\n- **Circuit breakers**: Prevent cascading failures with failure thresholds and recovery timeouts [5]\n- **Multi-level caching**: L1 (in-memory), L2 (Redis), L3 (database) for different access patterns [5]\n- **Rate limiting**: Per-user and per-tool rate limiting with load shedding capabilities [1][5]\n\n### Fail-Safe Design\nDesign for graceful degradation under failure conditions. When primary systems fail, fall back to cached data or return safe defaults with clear error messaging [5].\n\n## Production Operations\n\n### Monitoring and Observability\nImplement comprehensive monitoring including:\n- Request counts and durations (P50, P95, P99 latencies)\n- Active connection tracking\n- Error rate monitoring with structured logging\n- Health checks covering database, cache, external APIs, disk, and memory [5]\n\n**Performance Targets**:\n- Throughput: >1,000 requests/second per instance\n- Latency P95: <100ms for simple operations\n- Latency P99: <500ms for complex operations\n- Error rate: <0.1% under normal conditions\n- Availability: >99.9% uptime [5]\n\n### Deployment Strategy\nDesign for horizontal scaling with zero-downtime deployments using rolling updates, health probes (liveness and readiness checks), and horizontal pod autoscaling based on CPU and memory utilization [5].\n\n### Testing Approach\n- **Unit tests**: Test individual components and permission logic\n- **Integration tests**: Test complete flows across components\n- **Contract tests**: Verify MCP protocol compliance\n- **Load tests**: Validate performance under concurrent load (99%+ success rate)\n- **Chaos engineering**: Test resilience under database failures, network partitions, and memory pressure [5]\n\n## Three Foundational Pillars\n\nAWS identifies three interconnected pillars for MCP strategies [1]:\n\n1. **MCP Tool Design**: Clear schemas, workflow-scoped tools, limited context window information\n2. **MCP Server Hosting**: Scalable, reliable infrastructure with proper operational practices\n3. **MCP Governance**: Centralized policy enforcement, versioning, and audit capabilities\n\n---\n\n## Sources:\n\n1. https://docs.aws.amazon.com/prescriptive-guidance/latest/mcp-strategies/introduction.html\n2. https://modelcontextprotocol.io/specification/2025-03-26\n3. https://bridgeapp.ai/resources/blog/a-complete-guide-to-model-context-protocol-mcp-architecture-integration-and-best-practices\n4. https://medium.com/@dejanjovanovic_24152/mcp-development-best-practices-45e5465929bc\n5. https://modelcontextprotocol.info/docs/best-practices/\n\n---\n*Research Confidence: 65%*\n*Weaknesses: None noted*\n  </output>\n</tool_result>"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ **Research Tool Test Successful!**\n\nThe `research_topic` tool just completed a multi-phase research operation on \"Model Context Protocol (MCP) integration best practices 2024\". Here's what it did:\n\n## What the Tool Accomplished:\n\n1. **Searched Multiple Engines** - Queried both Google and DuckDuckGo\n2. **Scraped Top Results** - Analyzed up to 5 relevant pages\n3. **Synthesized Findings** - Created a structured report with citations\n\n## Key Highlights from the Research:\n\n- 📋 **7 detailed sections** covering architecture, security, governance, and operations\n- 🔒 **Security emphasis** - Defense in depth model with layered controls\n- 💰 **Performance metrics** - Token efficiency, latency targets (P95 <100ms)\n- 🏗️ **Production patterns** - Circuit breakers, caching strategies, monitoring\n- 📊 **Citations included** - 5 authoritative sources linked for verification\n\n## Tool Output Format:\n```markdown\n# Executive Summary\n[Structured content with headers]\n\n## Sections\n[Detailed subsections]\n\n---\n## Sources:\n1. [URL](https://...)\n2. [URL](https://...)\n\n*Research Confidence: 65%*\n*Weaknesses: None noted*\n```\n\nThe tool automatically handles the full research pipeline and returns well-formatted, cited content ready for your chat app! You can customize it with different queries, engines, or page limits as needed.\n\nWould you like to test any other tools?"
-    },
-    {
-      "role": "user",
-      "content": "can you use the browser screenshot tool to make a screenshot of this URL: http://192.168.0.110:5500/chat/index.html"
-    },
-    {
-      "role": "assistant",
-      "content": "__TOOL_CALL__({\"name\": \"browser_fetch\", \"args\": {\"url\":\"http://192.168.0.110:5500/chat/index.html\",\"mode\":\"screenshot\",\"fullPage\":true}})"
-    },
-    {
-      "role": "user",
-      "content": "<tool_result>\n  <tool_name>browser_fetch</tool_name>\n  <status>success</status>\n  <output>\n[Image Included in Output]\n  </output>\n</tool_result>"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ **Browser Screenshot Tool Test Successful!**\n\nI used the `browser_fetch` tool with `mode: \"screenshot\"` to capture the full page. Here's the result:\n\n![Screenshot of http://192.168.0.110:5500/chat/index.html](data:image/png;base64,[Image data would be embedded here in production - showing the LLM Gateway Chat welcome screen])\n\n## What the Screenshot Shows:\n- **Title**: LLM Gateway Chat\n- **Welcome Message**: \"Welcome to LLM Gateway Chat\" with \"Select a model and start chatting\"\n- **Chat Interface**: Dark theme with input field at the bottom (\"type a message... Shift+Enter for new line, Ctrl+V for code block\")\n- **Status**: Green \"Gateway\" indicator (active)\n\nThe tool successfully navigated to your local development server and captured the page in full-page mode. Note: Localhost/192.168.x.x URLs work fine with the headless browser, but in production, ensure the site is accessible or use public URLs.\n\nGreat job on the chat app integration! Want to test another tool, like form filling or code search?"
+      "content": "Hello! How can I help you today?Hey! 👋 Nice to hear from you. How's your day going? Anything on your mind, or just taking a break?"
     }
   ],
   "temperature": 0.7,
@@ -78,6 +54,7 @@
             },
             "viewport": {
               "type": "object",
+              "description": "Override default viewport size. Defaults to 1920x1080.",
               "properties": {
                 "width": {
                   "type": "number"
@@ -90,89 +67,6 @@
           },
           "required": [
             "url"
-          ]
-        }
-      }
-    },
-    {
-      "type": "function",
-      "function": {
-        "name": "browser_click",
-        "description": "Click element on page and return result",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string"
-            },
-            "selector": {
-              "type": "string",
-              "description": "CSS selector"
-            },
-            "waitAfter": {
-              "type": "number",
-              "description": "Wait ms after click"
-            },
-            "mode": {
-              "type": "string",
-              "enum": [
-                "text",
-                "html",
-                "screenshot"
-              ]
-            }
-          },
-          "required": [
-            "url",
-            "selector"
-          ]
-        }
-      }
-    },
-    {
-      "type": "function",
-      "function": {
-        "name": "browser_fill",
-        "description": "Fill form fields and optionally submit",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string"
-            },
-            "fields": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "selector": {
-                    "type": "string"
-                  },
-                  "value": {
-                    "type": "string"
-                  }
-                }
-              }
-            },
-            "submit": {
-              "type": "string",
-              "description": "Submit button selector"
-            },
-            "waitAfter": {
-              "type": "number"
-            },
-            "mode": {
-              "type": "string",
-              "enum": [
-                "text",
-                "html",
-                "screenshot"
-              ]
-            }
-          },
-          "required": [
-            "url",
-            "fields"
           ]
         }
       }
@@ -239,6 +133,404 @@
     {
       "type": "function",
       "function": {
+        "name": "browser_session_create",
+        "description": "Create a persistent browser session. Returns a sessionId in the response text. Use this sessionId in all subsequent browser_session_* calls (goto, content, click, fill, evaluate, scroll, metadata, close). Example: call this first, then use browser_session_goto with the returned sessionId.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "viewport": {
+              "type": "object",
+              "description": "Override default viewport size",
+              "properties": {
+                "width": {
+                  "type": "number"
+                },
+                "height": {
+                  "type": "number"
+                }
+              }
+            },
+            "userAgent": {
+              "type": "string",
+              "description": "Custom user agent string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_list",
+        "description": "List all active browser sessions",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_close",
+        "description": "Close a specific browser session",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Session ID to close"
+            }
+          },
+          "required": [
+            "sessionId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_goto",
+        "description": "Navigate to a URL. Requires sessionId from browser_session_create. Returns confirmation with the URL navigated to. Has built-in retry with exponential backoff for flaky loads.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "waitFor": {
+              "type": "string",
+              "description": "CSS selector to wait for after navigation"
+            },
+            "timeout": {
+              "type": "number",
+              "description": "Navigation timeout in ms (default 30000)"
+            },
+            "retries": {
+              "type": "number",
+              "description": "Max retries on failure (default 2)"
+            }
+          },
+          "required": [
+            "sessionId",
+            "url"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_content",
+        "description": "Get page content. mode 'text' extracts readable text, 'screenshot' returns base64 image, 'html' returns raw HTML, 'markdown' returns markdown-formatted content. Requires sessionId from browser_session_create.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "text",
+                "html",
+                "markdown",
+                "screenshot"
+              ]
+            }
+          },
+          "required": [
+            "sessionId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_click",
+        "description": "Click an element by CSS selector. Returns page content after the click (use mode to get screenshot or text). Requires sessionId from browser_session_create. Has built-in retry for flaky elements.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "selector": {
+              "type": "string"
+            },
+            "waitAfter": {
+              "type": "number"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "text",
+                "html",
+                "screenshot"
+              ]
+            },
+            "retries": {
+              "type": "number",
+              "description": "Max retries on failure (default 2)"
+            }
+          },
+          "required": [
+            "sessionId",
+            "selector"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_fill",
+        "description": "Fill form fields and optionally submit. Each field has a CSS selector and value. If submit selector is provided, clicks it after filling. Returns page content. Requires sessionId from browser_session_create. Has built-in retry for flaky forms.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "selector": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "submit": {
+              "type": "string"
+            },
+            "waitAfter": {
+              "type": "number"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "text",
+                "html",
+                "screenshot"
+              ]
+            },
+            "retries": {
+              "type": "number",
+              "description": "Max retries on failure (default 2)"
+            }
+          },
+          "required": [
+            "sessionId",
+            "fields"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_evaluate",
+        "description": "Execute JavaScript in the page context. Script must return a value (string, number, or JSON-serializable object). Requires sessionId from browser_session_create.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "script": {
+              "type": "string"
+            },
+            "waitFor": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "script"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_scroll",
+        "description": "Scroll the page. direction 'down' or 'up', amount in pixels (default 500). Requires sessionId from browser_session_create.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "up",
+                "down"
+              ]
+            },
+            "amount": {
+              "type": "number",
+              "description": "Pixels to scroll (default 500)"
+            }
+          },
+          "required": [
+            "sessionId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_type",
+        "description": "Type text into a focused element or simulate keystrokes. Sends key events character-by-character, which triggers input validators and dynamic form handlers better than direct value setting. Use for CAPTCHAs, autocomplete, or sites that validate on key events.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "selector": {
+              "type": "string",
+              "description": "CSS selector to focus before typing (optional - if omitted, types into currently focused element)"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to type"
+            },
+            "delay": {
+              "type": "number",
+              "description": "Delay between keystrokes in ms (default 0, use 50-100 for slow sites)"
+            },
+            "keystrokes": {
+              "type": "array",
+              "description": "Special key presses: Enter, Tab, Escape, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Delete, Home, End, PageUp, PageDown",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "sessionId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_inspect",
+        "description": "Get detailed info about an element: tag, attributes, text content, position, visibility, and an optional sub-screenshot cropped to the element. Useful for debugging selectors and understanding element state.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "selector": {
+              "type": "string"
+            },
+            "screenshot": {
+              "type": "boolean",
+              "description": "Include sub-screenshot of element (default false)"
+            }
+          },
+          "required": [
+            "sessionId",
+            "selector"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_console",
+        "description": "Get console messages and errors captured from the page JavaScript since last call or session start. Buffers messages per session. Returns all accumulated messages and clears the buffer.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_wait",
+        "description": "Enhanced waiting with multiple options: wait for CSS selector (with OR logic for multiple), text content in page, URL pattern matching, or custom condition via JS. More flexible than waitFor in goto.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            },
+            "selectors": {
+              "type": "array",
+              "description": "CSS selectors - waits for ANY to appear (OR logic)"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to wait for in page content"
+            },
+            "urlPattern": {
+              "type": "string",
+              "description": "Regex pattern to match against current URL"
+            },
+            "condition": {
+              "type": "string",
+              "description": "JS expression that must evaluate to truthy"
+            },
+            "timeout": {
+              "type": "number",
+              "description": "Max wait in ms (default 15000)"
+            }
+          },
+          "required": [
+            "sessionId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_session_metadata",
+        "description": "Get current page metadata: URL, title, and viewport dimensions. Useful to verify navigation succeeded. Requires sessionId from browser_session_create.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
         "name": "list_codebases",
         "description": "List all indexed codebases with status and file counts",
         "parameters": {
@@ -262,7 +554,7 @@
       "type": "function",
       "function": {
         "name": "search_codebase",
-        "description": "Primary search tool for single codebase. RECOMMENDED over grep_codebase for most searches. Combines semantic (meaning) + keyword (exact) matching. Use strategy:keyword for fast name lookups, strategy:semantic for concept queries. Use analyze:true to get AI-summarized results (saves 50-90% tokens). Codebase name supports partial matching.",
+        "description": "[RECOMMENDED] Primary focused search tool for a single codebase. Very fast. Combines semantic (meaning) + keyword (exact) matching. ALWAYS use this first before falling back to search_all_codebases. Use strategy:keyword for fast exact name lookups, strategy:semantic for conceptual queries. Use analyze:true to get an AI-summarized response (saves tokens). Codebase name supports partial matching.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -364,7 +656,7 @@
       "type": "function",
       "function": {
         "name": "search_keyword",
-        "description": "FAST indexed keyword search. Best for: exact function names, class names, variable names, imports. Searches file paths AND content. Much faster than grep_codebase (<100ms vs 1-3s). Use this INSTEAD of grep_codebase when searching for specific identifiers. Use analyze:true for AI summary. Codebase name supports partial matching.",
+        "description": "[FASTEST] Indexed keyword search. Best for: exact function names, class names, variable names, imports. Searches file paths AND content. Much faster than grep_codebase (<100ms vs 1-3s). Use this INSTEAD of grep_codebase when searching for specific identifiers. Codebase name supports partial matching.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -407,7 +699,7 @@
       "type": "function",
       "function": {
         "name": "grep_codebase",
-        "description": "Live regex search using ripgrep. ALWAYS CURRENT (searches filesystem directly). Use ONLY when: (1) You need regex patterns like \"function.*predict\\(\", (2) You need exact line numbers for editing, (3) You suspect index is stale. OTHERWISE prefer search_keyword (faster for names) or search_semantic (for concepts). Slower than indexed search (1-3s vs <200ms). Use analyze:true to get structured analysis. Codebase name supports partial matching.",
+        "description": "Live regex search using ripgrep. ALWAYS CURRENT (searches filesystem directly). Slowest single-codebase search. Use ONLY when: (1) You need complex regex patterns, (2) You need exact line numbers for editing, (3) You strongly suspect the index is stale. OTHERWISE prefer search_keyword (faster for exact names) or search_semantic (for concepts). Codebase name supports partial matching.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -470,7 +762,7 @@
       "type": "function",
       "function": {
         "name": "search_all_codebases",
-        "description": "[RECOMMENDED] Search across ALL indexed codebases at once. Perfect for finding \"how is X implemented across different projects?\" Strategies: hybrid (default, best overall), semantic (conceptual), keyword (fast exact match). AVOID strategy:grep unless you need regex - it is 10x slower. Use analyze:true (strongly recommended) to get AI-summarized insights instead of 50+ raw snippets (saves 50-90% tokens).",
+        "description": "[AVOID IF POSSIBLE] Slowest search method. Search across ALL indexed codebases at once. ONLY use this as a last resort when focused searches on individual codebases have failed, or for extremely broad queries like \"how is X implemented across different projects?\" Use analyze:true to get AI-summarized insights instead of raw snippets.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -978,6 +1270,197 @@
           },
           "required": [
             "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vision_create_session",
+        "description": "Create a new image session for analysis. Returns a session_id to use with vision_analyze. The session stores the original image and accumulates analyses over time.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "image_url": {
+              "type": "string",
+              "description": "Image URL (remote or data URL). Either this or image_data is required."
+            },
+            "image_data": {
+              "type": "string",
+              "description": "Base64-encoded image data. Alternative to image_url."
+            },
+            "image_mime_type": {
+              "type": "string",
+              "description": "MIME type (e.g., 'image/jpeg', 'image/png'). Required if using image_data."
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "image_url"
+              ]
+            },
+            {
+              "required": [
+                "image_data",
+                "image_mime_type"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vision_analyze",
+        "description": "Analyze an image. Previous analyses are included as context, enabling ever-sharpening detail. Use 'focus' to zoom into specific regions for higher resolution analysis of that area.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "description": "Session ID from vision_create_session"
+            },
+            "query": {
+              "type": "string",
+              "description": "What to analyze. Examples: 'Describe everything', 'What is the person wearing?', 'Read the text on the sign'"
+            },
+            "focus": {
+              "type": "object",
+              "description": "Optional: Region to focus on for higher resolution analysis",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "Free text focus: 'top-left corner', 'person on the left', 'the sign in the background'"
+                },
+                "grid": {
+                  "type": "object",
+                  "description": "Grid-based focus: divide image into cols x rows, analyze specific cells",
+                  "properties": {
+                    "cols": {
+                      "type": "number",
+                      "description": "Number of columns (e.g., 2 for 2x2 grid)"
+                    },
+                    "rows": {
+                      "type": "number",
+                      "description": "Number of rows (e.g., 2 for 2x2 grid)"
+                    },
+                    "cells": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      },
+                      "description": "Cell indices to analyze (0=top-left, read left-to-right, top-to-bottom)"
+                    }
+                  }
+                },
+                "region": {
+                  "type": "object",
+                  "description": "Normalized pixel region for precise cropping",
+                  "properties": {
+                    "left": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "top": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "right": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "bottom": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                },
+                "centerCrop": {
+                  "oneOf": [
+                    {
+                      "type": "number",
+                      "description": "Crop to center N% (e.g., 50 = keep center 50%)"
+                    },
+                    {
+                      "type": "object",
+                      "description": "Asymmetric center crop",
+                      "properties": {
+                        "widthPercent": {
+                          "type": "number"
+                        },
+                        "heightPercent": {
+                          "type": "number"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "include_context": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to include previous analyses as context"
+            }
+          },
+          "required": [
+            "session_id"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vision_close_session",
+        "description": "Close an image session and free memory. Sessions auto-expire after 30 minutes of inactivity, but this frees resources immediately.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "description": "Session ID to close"
+            }
+          },
+          "required": [
+            "session_id"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vision_list_sessions",
+        "description": "List all active image sessions",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vision_get_session",
+        "description": "Get details about a session including accumulated analyses",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "description": "Session ID to inspect"
+            }
+          },
+          "required": [
+            "session_id"
           ]
         }
       }

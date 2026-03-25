@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="color-scheme" content="light dark">
+    <title>Chat Arena</title>
+
+    <!-- NUI Theme -->
+    <link rel="stylesheet" href="../nui_wc2/NUI/css/nui-theme.css">
+    <link rel="stylesheet" href="../nui_wc2/NUI/css/modules/nui-syntax-highlight.css">
+
+    <!-- Vendor -->
+    <link rel="stylesheet" href="../chat/vendor/prism.css">
+
+    <!-- Chat Styles -->
+    <link rel="stylesheet" href="../chat/css/chat.css">
+
+    <!-- Arena Styles -->
+    <link rel="stylesheet" href="js/arena.css">
+</head>
+<body>
+    <nui-app nui-vars-sidebar_width="16rem" nui-vars-sidebar_force-breakpoint="50rem" nui-vars-sidebar-right_width="20rem" nui-vars-sidebar-right_force-breakpoint="none">
+        <nui-app-header>
+            <div slot="left">
+                <nui-button data-action="toggle-sidebar">
+                    <button type="button" aria-label="Toggle menu">
+                        <nui-icon name="menu"></nui-icon>
+                    </button>
+                </nui-button>
+            </div>
+            <div slot="center">
+                <h1 class="app-title">Chat Arena</h1>
+            </div>
+            <div slot="right">
+                <nui-button data-action="toggle-theme" id="theme-toggle">
+                    <button type="button" aria-label="Toggle theme">
+                        <nui-icon name="brightness"></nui-icon>
+                    </button>
+                </nui-button>
+                <nui-button data-action="toggle-sidebar:right">
+                    <button type="button" aria-label="Toggle settings">
+                        <nui-icon name="settings"></nui-icon>
+                    </button>
+                </nui-button>
+            </div>
+        </nui-app-header>
+
+        <nui-sidebar>
+            <div class="sidebar-layout">
+                <div class="sidebar-action-area">
+                    <nui-button id="new-arena-btn" variant="primary">
+                        <button type="button"><nui-icon name="add"></nui-icon> New Arena</button>
+                    </nui-button>
+                    <nui-button id="import-arena-btn" title="Import Arena">
+                        <button type="button"><nui-icon name="upload"></nui-icon></button>
+                    </nui-button>
+                </div>
+
+                <h3>Saved Arenas</h3>
+                <div class="arena-history-list" id="arena-history-list">
+                    <!-- Arena history items injected here -->
+                </div>
+            </div>
+        </nui-sidebar>
+
+        <nui-sidebar position="right">
+            <div class="sidebar-content">
+                <span class="title">Configuration</span>
+
+                <div class="sidebar-section">
+                    <label>Topic</label>
+                    <nui-textarea>
+                        <textarea id="topic-input" placeholder="Enter a topic for the conversation..." rows="2"></textarea>
+                    </nui-textarea>
+                </div>
+
+                <div class="sidebar-section">
+                    <label>Participant A</label>
+                    <nui-select id="model-a-select" searchable data-label="Select model...">
+                        <select>
+                            <option value="">Loading models...</option>
+                        </select>
+                    </nui-select>
+                </div>
+
+                <div class="sidebar-section">
+                    <label>Participant B</label>
+                    <nui-select id="model-b-select" searchable data-label="Select model...">
+                        <select>
+                            <option value="">Loading models...</option>
+                        </select>
+                    </nui-select>
+                </div>
+
+                <div class="sidebar-section">
+                    <label>Max Turns</label>
+                    <nui-input>
+                        <input type="number" id="max-turns" min="1" max="50" value="10">
+                    </nui-input>
+                </div>
+
+                <div class="sidebar-section">
+                    <div class="checkbox-group">
+                        <nui-checkbox>
+                            <input type="checkbox" id="auto-advance" checked>
+                        </nui-checkbox>
+                        <label for="auto-advance">Auto-advance</label>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <div class="checkbox-group">
+                        <nui-checkbox>
+                            <input type="checkbox" id="roleplay-checkbox">
+                        </nui-checkbox>
+                        <label for="roleplay-checkbox">Roleplay Mode</label>
+                    </div>
+                </div>
+
+                <div id="roleplay-section" class="roleplay-section" style="display: none;">
+                    <div class="sidebar-section">
+                        <label>Participant A System Prompt</label>
+                        <nui-textarea>
+                            <textarea id="system-prompt-a" rows="3">You are in a conversation. Your identity: {modelName}.
+You are speaking with {otherParticipantName} (model: {otherModelName}).
+Topic: {topic}
+Speak naturally as if in a thoughtful conversation.</textarea>
+                        </nui-textarea>
+                    </div>
+                    <div class="sidebar-section">
+                        <label>Participant B System Prompt</label>
+                        <nui-textarea>
+                            <textarea id="system-prompt-b" rows="3">You are in a conversation. Your identity: {modelName}.
+You are speaking with {otherParticipantName} (model: {otherModelName}).
+Topic: {topic}
+Speak naturally as if in a thoughtful conversation.</textarea>
+                        </nui-textarea>
+                    </div>
+                </div>
+
+                <nui-button variant="primary" id="start-btn" style="margin-top: 1rem;">
+                    <button type="button">Start Conversation</button>
+                </nui-button>
+            </div>
+        </nui-sidebar>
+
+        <nui-content>
+            <nui-main>
+                <div class="arena-messages" id="arena-messages">
+                    <div class="welcome-message" id="arena-welcome">
+                        <h2>Welcome to Chat Arena</h2>
+                        <p>Configure your arena in the sidebar and click Start to begin</p>
+                    </div>
+                    <nui-button id="scroll-to-bottom" class="scroll-to-bottom" style="display: none;">
+                        <button type="button"><nui-icon name="arrow"></nui-icon></button>
+                    </nui-button>
+                </div>
+
+                <footer class="arena-footer" id="arena-footer" style="display: none;">
+                    <div class="arena-flow-controls">
+                        <span class="turn-info" id="turn-info">Turn 0/0</span>
+                        <span class="context-usage" id="context-usage" title="Context window usage (limiting factor)">-- / --</span>
+                        <span class="speaker-indicator" id="speaker-indicator"></span>
+                        <div class="arena-flow-actions">
+                            <nui-button variant="outline" size="small" id="auto-advance-toggle" class="active">
+                                <button type="button">
+                                    <nui-icon name="play"></nui-icon>
+                                    Auto
+                                </button>
+                            </nui-button>
+                            <nui-button variant="outline" size="small" id="next-turn-btn" style="display: none;">
+                                <button type="button">
+                                    <nui-icon name="redo"></nui-icon>
+                                    Next
+                                </button>
+                            </nui-button>
+                            <nui-button variant="primary" size="small" id="extend-turns-btn" style="display: none;">
+                                <button type="button">
+                                    <nui-icon name="add"></nui-icon>
+                                    Extend
+                                </button>
+                            </nui-button>
+                            <nui-button variant="primary" size="small" id="stop-btn">
+                                <button type="button">
+                                    <nui-icon name="close"></nui-icon>
+                                    Stop
+                                </button>
+                            </nui-button>
+                            <div class="export-dropdown">
+                                <nui-button variant="outline" size="small" id="export-btn">
+                                    <button type="button">
+                                        <nui-icon name="download"></nui-icon>
+                                        Export
+                                    </button>
+                                </nui-button>
+                                <div class="export-dropdown-menu">
+                                    <button data-export="json">Export as JSON</button>
+                                    <button data-export="markdown">Export as Markdown</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="arena-prompt-area">
+                        <nui-textarea>
+                            <textarea id="arena-prompt-input" rows="2" placeholder="Send a message to both models or use flow controls above..."></textarea>
+                        </nui-textarea>
+                        <nui-button variant="primary" id="arena-send-btn" title="Send to current speaker">
+                            <button type="button"><nui-icon name="send"></nui-icon></button>
+                        </nui-button>
+                    </div>
+                </footer>
+            </nui-main>
+        </nui-content>
+    </nui-app>
+
+    <!-- Vendor Scripts -->
+    <script src="../chat/vendor/prism.js"></script>
+    <script src="../chat/vendor/markdown-it.js"></script>
+    <script src="../chat/vendor/purify.js"></script>
+    <script src="../chat/vendor/markdown-it-prism.js"></script>
+
+    <!-- Arena Config -->
+    <script src="js/config.js"></script>
+
+    <!-- NUI Library -->
+    <script src="../nui_wc2/NUI/nui.js" type="module"></script>
+
+    <!-- Arena App -->
+    <script type="module" src="js/arena.js"></script>
+
+    <script>
+        // NUI specific interactions for app shell
+        document.addEventListener('click', (e) => {
+            const actionEl = e.target.closest('[data-action]');
+            if (!actionEl) return;
+
+            const action = actionEl.dataset.action;
+            const app = document.querySelector('nui-app');
+
+            switch (action) {
+                case 'toggle-sidebar':
+                    e.preventDefault();
+                    if (app) app.toggleSideNav();
+                    break;
+                case 'toggle-sidebar:right':
+                    e.preventDefault();
+                    if (app) app.toggleSideNav('right');
+                    break;
+                case 'toggle-theme':
+                    e.preventDefault();
+                    if (app) app.toggleTheme();
+                    break;
+            }
+        });
+
+        // Toggle thinking block visibility
+        window.toggleThinking = function(id) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.classList.toggle('collapsed');
+            }
+        };
+    </script>
+</body>
+</html>

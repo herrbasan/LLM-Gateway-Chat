@@ -273,6 +273,28 @@ export class Conversation {
     // API Format
     // ============================================
 
+    // Helper to strip base64 data from tool args for API messages
+    _sanitizeToolArgs(args) {
+        if (!args || typeof args !== 'object') return args;
+        
+        const sanitized = {};
+        for (const [key, value] of Object.entries(args)) {
+            // Detect base64 image data (long strings starting with common base64 patterns)
+            if (typeof value === 'string' && value.length > 1000 && 
+                (/^[A-Za-z0-9+/]{100,}/.test(value) || 
+                 value.startsWith('/9j/') ||  // JPEG
+                 value.startsWith('iVBOR') || // PNG
+                 value.startsWith('R0lGOD') || // GIF
+                 value.startsWith('UEsDB')    // Common binary
+                )) {
+                sanitized[key] = `[BASE64_DATA](${value.length} chars)`;
+            } else {
+                sanitized[key] = value;
+            }
+        }
+        return sanitized;
+    }
+
     getMessagesForApi(systemPrompt = '') {
         const rawMessages = [];
         
@@ -296,9 +318,11 @@ export class Conversation {
             if (exchange.type === 'tool') {
                 if (exchange.tool.status === 'success' || exchange.tool.status === 'error') {
                     // 1) First, insert the assistant's tool call so the LLM remembers what it did
+                    // Strip base64 data from tool args to prevent bloating context
+                    const sanitizedArgs = this._sanitizeToolArgs(exchange.tool.args);
                     rawMessages.push({
                         role: 'assistant',
-                        content: `__TOOL_CALL__({"name": "${exchange.tool.name}", "args": ${JSON.stringify(exchange.tool.args)}})`
+                        content: `__TOOL_CALL__({"name": "${exchange.tool.name}", "args": ${JSON.stringify(sanitizedArgs)}})`
                     });
 
                     // 2) Then, provide the tool result back as the user

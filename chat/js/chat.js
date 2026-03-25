@@ -27,6 +27,7 @@ let currentModel = '';
 let isStreaming = false;
 let currentExchangeId = null;
 let attachedImages = []; // Array of {dataUrl, name, type}
+let useVisionAnalysis = false; // Toggle for using vision tool instead of direct image upload
 
 // DOM Elements
 const elements = {
@@ -68,6 +69,39 @@ const elements = {
     mcpServersList: document.getElementById('mcp-servers-list')
 };
 
+// Create vision toggle container if not exists
+function ensureVisionToggleUI() {
+    if (!elements.attachmentPreview) return;
+    
+    let visionToggle = document.getElementById('vision-toggle-container');
+    if (!visionToggle) {
+        visionToggle = document.createElement('div');
+        visionToggle.id = 'vision-toggle-container';
+        visionToggle.className = 'vision-toggle-container';
+        visionToggle.style.display = 'none';
+        visionToggle.innerHTML = `
+            <nui-checkbox variant="switch" title="Automatically create vision sessions for images, allowing the AI to analyze them using vision_analyze tool">
+                <input type="checkbox" id="vision-toggle-input">
+            </nui-checkbox>
+            <label for="vision-toggle-input">Auto Vision</label>
+        `;
+        
+        // Insert after attachment preview in the images row
+        const imagesRow = document.getElementById('images-row');
+        if (imagesRow) {
+            imagesRow.appendChild(visionToggle);
+        } else {
+            elements.attachmentPreview.parentNode?.insertBefore(visionToggle, elements.attachmentPreview);
+        }
+        
+        // Add event listener
+        const checkbox = visionToggle.querySelector('input');
+        checkbox?.addEventListener('change', (e) => {
+            useVisionAnalysis = e.target.checked;
+        });
+    }
+}
+
 // ============================================
 // Initialization
 // ============================================
@@ -87,6 +121,9 @@ async function init() {
         await setTheme(prefersDark ? 'dark' : 'light');
     }
 
+    // Ensure chat history is loaded
+    await chatHistory.ready();
+    
     // Get or create active conversation
     let activeId = await chatHistory.getActiveId();
     if (!activeId || !chatHistory.has(activeId)) {
@@ -96,12 +133,27 @@ async function init() {
     currentChatId = activeId;
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     await conversation.load();
+    
+    // Set session ID for this conversation (generate if missing for backwards compat)
+    const chatInfo = chatHistory.get(currentChatId);
+    if (chatInfo?.sessionId) {
+        client.setSessionId(chatInfo.sessionId);
+    } else if (chatInfo) {
+        // Old conversation without sessionId - generate and save one
+        const newSessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        console.log(`[Chat] Generated new session ID for old conversation: ${newSessionId}`);
+        chatHistory.updateSessionId(currentChatId, newSessionId);
+        client.setSessionId(newSessionId);
+    }
 
     // Apply default config values (needs history loaded first for async prefs)
     await applyDefaultConfig();
 
     // Setup event listeners first
     setupEventListeners();
+
+    // Create vision toggle UI
+    ensureVisionToggleUI();
 
     // Wait for NUI to be ready, then load models
     await waitForNUI();
@@ -277,6 +329,7 @@ function populateModelSelect() {
             currentModel = e.detail.values[0] || '';
             console.log('[Chat] Selected model:', currentModel);
             updateOverallContext();
+            updateVisionToggleVisibility();
         });
     } else {
         // Fallback if NUI not loaded yet
@@ -325,6 +378,7 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
         currentModel = e.target.value;
         console.log('[Chat] Selected model:', currentModel);
         updateOverallContext();
+        updateVisionToggleVisibility();
     });
 }
 
@@ -553,15 +607,266 @@ async function sendMessage() {
         updateChatTitle(currentChatId, content);
     }
 
+    // Store images for potential auto-vision before clearing
+    const imagesForAutoVision = [...attachedImages];
+    const shouldAutoCreateVisionSessions = imagesForAutoVision.length > 0 && areVisionToolsAvailable() && useVisionAnalysis;
+    
     // Clear input and attachments
     editor.setMarkdown('');
     clearAttachments();
+    useVisionAnalysis = false; // Reset for next message
+    updateVisionToggleVisibility();
     
     // Render user message
     renderExchange(conversation.getExchange(currentExchangeId));
     
+    // AUTO-VISION: If images attached and vision tools available, create sessions automatically
+    // This happens AFTER user message is rendered, BEFORE LLM responds
+    
+    if (shouldAutoCreateVisionSessions) {
+        try {
+            await autoCreateVisionSessions(currentExchangeId, imagesForAutoVision);
+        } catch (err) {
+            console.error('[Vision] Auto session creation failed:', err);
+            // Continue with normal flow - LLM might still handle it
+        }
+    }
+    
     // Start streaming response
     await streamResponse(currentExchangeId);
+}
+
+// ============================================
+// Vision Tool Integration
+// ============================================
+
+// Note: The vision workflow has changed:
+// - OLD: Pre-process images through vision before sending to LLM
+// - NEW: Auto-create vision sessions after user message, let LLM call vision_analyze
+// 
+// Functions kept for potential manual use:
+// - analyzeImagesWithVision: Can be called manually if needed
+
+function getVisionToolName(baseName) {
+    // Check if tool exists with exact name first
+    if (mcpClient.toolRegistry.has(baseName)) {
+        return baseName;
+    }
+    
+    // Try to find tool by suffix (handles server-prefixed names like orchestrator__vision_create_session)
+    for (const [llmName, record] of mcpClient.toolRegistry.entries()) {
+        if (record.originalName === baseName) {
+            return llmName;
+        }
+    }
+    
+    // Fall back to base name - will fail gracefully with "Unknown tool" error
+    return baseName;
+}
+
+function areVisionToolsAvailable() {
+    const createSessionTool = getVisionToolName('vision_create_session');
+    const analyzeTool = getVisionToolName('vision_analyze');
+    return mcpClient.toolRegistry.has(createSessionTool) && 
+           mcpClient.toolRegistry.has(analyzeTool);
+}
+
+async function analyzeImagesWithVision(images) {
+    const results = [];
+    
+    // Verify vision tools are available
+    if (!areVisionToolsAvailable()) {
+        throw new Error('Vision tools not available. Please connect to an MCP server with vision capabilities.');
+    }
+    
+    const createSessionToolName = getVisionToolName('vision_create_session');
+    const analyzeToolName = getVisionToolName('vision_analyze');
+    
+    for (const img of images) {
+        // Extract base64 data from dataUrl
+        const base64Match = img.dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
+        if (!base64Match) {
+            throw new Error(`Invalid image data format for ${img.name}`);
+        }
+        
+        const mimeType = img.dataUrl.match(/^data:([^;]+);/)?.[1] || 'image/jpeg';
+        const base64Data = base64Match[1];
+        
+        // Create vision session
+        const sessionResult = await mcpClient.executeTool(createSessionToolName, {
+            image_data: base64Data,
+            image_mime_type: mimeType
+        });
+        
+        if (!sessionResult || !sessionResult.session_id) {
+            throw new Error('Failed to create vision session');
+        }
+        
+        // Analyze the image
+        const analysisResult = await mcpClient.executeTool(analyzeToolName, {
+            session_id: sessionResult.session_id,
+            query: 'Describe this image in detail. Include all visible objects, text, people, and context.'
+        });
+        
+        // Extract text from result
+        let analysisText = '';
+        if (analysisResult?.content && Array.isArray(analysisResult.content)) {
+            analysisText = analysisResult.content
+                .filter(c => c.type === 'text')
+                .map(c => c.text)
+                .join('\n');
+        } else if (typeof analysisResult === 'string') {
+            analysisText = analysisResult;
+        } else {
+            analysisText = JSON.stringify(analysisResult);
+        }
+        
+        results.push(analysisText);
+    }
+    
+    return results;
+}
+
+// ============================================
+// Auto Vision Session Creation
+// ============================================
+
+async function autoCreateVisionSessions(userExchangeId, images) {
+    // Verify vision tools are available
+    if (!areVisionToolsAvailable()) {
+        console.log('[AutoVision] Vision tools not available, skipping auto session creation');
+        return;
+    }
+    
+    const createSessionToolName = getVisionToolName('vision_create_session');
+    
+    for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        
+        try {
+            // Extract base64 data from dataUrl
+            const base64Match = img.dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
+            if (!base64Match) {
+                console.warn(`[AutoVision] Invalid image data format for ${img.name}, skipping`);
+                continue;
+            }
+            
+            const mimeType = img.dataUrl.match(/^data:([^;]+);/)?.[1] || 'image/jpeg';
+            const base64Data = base64Match[1];
+            
+            // Create vision session tool call args
+            const toolArgs = {
+                image_data: base64Data,
+                image_mime_type: mimeType
+            };
+            
+            // Add tool exchange to conversation (similar to handleToolExecution)
+            const toolExchangeId = await conversation.addToolExchange(createSessionToolName, toolArgs);
+            const exchange = conversation.getExchange(toolExchangeId);
+            
+            // Render the tool call UI
+            const toolEl = document.createElement('div');
+            toolEl.className = 'chat-message tool';
+            toolEl.dataset.exchangeId = toolExchangeId;
+            toolEl.dataset.mcpToolName = createSessionToolName;
+            
+            toolEl.innerHTML = `
+                <div class="tool-bubble">
+                    <div class="message-header tool-header">
+                        <nui-icon name="extension"></nui-icon>
+                        <strong class="tool-title">SYSTEM TOOL: ${createSessionToolName}</strong>
+                        <nui-badge variant="primary" class="tool-status">Running</nui-badge>
+                    </div>
+                    <div class="tool-notifications" style="display: block;">
+                        <span class="tool-spinner"></span> Creating vision session for image ${i + 1}${img.name ? ` (${img.name})` : ''}...
+                    </div>
+                    <div class="message-content tool-payload" style="display: none;">
+                        <div class="tool-section-title">Arguments</div>
+                        <div class="tool-args">${JSON.stringify(toolArgs, null, 2)}</div>
+                        <div class="tool-section-title">Execution Result</div>
+                        <div class="tool-result"></div>
+                    </div>
+                </div>
+            `;
+            
+            elements.messages?.appendChild(toolEl);
+            scrollToBottom();
+            
+            // Toggle expand/collapse
+            toolEl.querySelector('.message-header').addEventListener('click', (e) => {
+                if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
+                const payloadBox = toolEl.querySelector('.tool-payload');
+                payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+            });
+            
+            // Execute the tool
+            const result = await mcpClient.executeTool(createSessionToolName, toolArgs);
+            
+            // Extract result text
+            let resultText = '';
+            if (result && typeof result === 'object') {
+                if (result.content && Array.isArray(result.content)) {
+                    resultText = result.content.map(c => c.type === 'text' ? c.text : JSON.stringify(c)).join('\n');
+                } else if (result.session_id) {
+                    resultText = `Session created: ${result.session_id}`;
+                } else {
+                    resultText = JSON.stringify(result);
+                }
+            } else {
+                resultText = String(result);
+            }
+            
+            // Update exchange with result
+            exchange.tool.status = 'success';
+            exchange.tool.content = resultText;
+            conversation.save();
+            
+            // Update UI
+            toolEl.querySelector('.tool-status').setAttribute('variant', 'success');
+            toolEl.querySelector('.tool-status').innerHTML = 'Success';
+            toolEl.querySelector('.tool-notifications').style.display = 'none';
+            toolEl.querySelector('.tool-result').innerHTML = resultText;
+            
+            console.log(`[AutoVision] Created session for image ${i + 1}:`, resultText);
+            
+        } catch (err) {
+            console.error(`[AutoVision] Failed to create session for image ${i + 1}:`, err);
+            
+            // Add error exchange
+            const toolArgs = { image_data: '[base64 data]', image_mime_type: img.type || 'image/jpeg' };
+            const toolExchangeId = await conversation.addToolExchange(createSessionToolName, toolArgs);
+            const exchange = conversation.getExchange(toolExchangeId);
+            exchange.tool.status = 'error';
+            exchange.tool.content = err.message || 'Failed to create vision session';
+            conversation.save();
+            
+            // Render error UI
+            const toolEl = document.createElement('div');
+            toolEl.className = 'chat-message tool';
+            toolEl.dataset.exchangeId = toolExchangeId;
+            toolEl.dataset.mcpToolName = createSessionToolName;
+            
+            toolEl.innerHTML = `
+                <div class="tool-bubble">
+                    <div class="message-header tool-header">
+                        <nui-icon name="extension"></nui-icon>
+                        <strong class="tool-title">SYSTEM TOOL: ${createSessionToolName}</strong>
+                        <nui-badge variant="danger" class="tool-status">Failed</nui-badge>
+                    </div>
+                    <div class="tool-notifications" style="display: none;"></div>
+                    <div class="message-content tool-payload" style="display: block;">
+                        <div class="tool-section-title">Arguments</div>
+                        <div class="tool-args">${jsonStringifyForDisplay(toolArgs)}</div>
+                        <div class="tool-section-title">Execution Result</div>
+                        <div class="tool-result"><span class="tool-error">${err.message}</span></div>
+                    </div>
+                </div>
+            `;
+            
+            elements.messages?.appendChild(toolEl);
+            scrollToBottom();
+        }
+    }
 }
 
 async function streamResponse(exchangeId) {
@@ -1255,7 +1560,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
                   <div class="tool-images" style="display: none;"></div>
               <div class="message-content tool-payload" style="display: none;">
                   <div class="tool-section-title">Arguments</div>
-                  <div class="tool-args">${JSON.stringify(parsedObj.args, null, 2)}</div>
+                  <div class="tool-args">${jsonStringifyForDisplay(parsedObj.args)}</div>
                   <div class="tool-section-title">Execution Result</div>
                   <div class="tool-result"></div>
     `;
@@ -1843,9 +2148,19 @@ async function switchChat(chatId) {
     storage.setActiveChatId(currentChatId).catch(() => {});
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     await conversation.load();
+    
+    // Set session ID for this conversation (generate if missing for backwards compat)
+    const chatInfo = chatHistory.get(currentChatId);
+    if (chatInfo?.sessionId) {
+        client.setSessionId(chatInfo.sessionId);
+    } else if (chatInfo) {
+        // Old conversation without sessionId - generate and save one
+        const newSessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        chatHistory.updateSessionId(currentChatId, newSessionId);
+        client.setSessionId(newSessionId);
+    }
 
     // Restore the model if saved in history
-    const chatInfo = chatHistory.get(currentChatId);
     if (chatInfo && chatInfo.model && elements.modelSelect) {
         // Ensure the model actually exists to avoid setting invalid state
         const modelExists = models.some(m => m.id === chatInfo.model);
@@ -1924,7 +2239,7 @@ async function exportChatAsJson(chatId, btn) {
                 if (ex.tool?.status === 'success' || ex.tool?.status === 'error') {
                     rawMessages.push({
                         role: 'assistant',
-                        content: `__TOOL_CALL__({"name": "${ex.tool.name}", "args": ${JSON.stringify(ex.tool.args)}})`
+                        content: `__TOOL_CALL__({"name": "${ex.tool.name}", "args": ${jsonStringifyForDisplay(ex.tool.args, null)}})`
                     });
                     rawMessages.push({
                         role: 'user',
@@ -2295,28 +2610,70 @@ function handleFileSelect(e) {
     e.target.value = '';
 }
 
+// ============================================
+// Vision Capability Detection
+// ============================================
+
+function currentModelSupportsVision() {
+    if (!currentModel) return false;
+    const modelConfig = models.find(m => m.id === currentModel);
+    return modelConfig?.capabilities?.vision === true;
+}
+
+function updateVisionToggleVisibility() {
+    const visionToggle = document.getElementById('vision-toggle-container');
+    if (!visionToggle) return;
+    
+    const hasImages = attachedImages.length > 0;
+    const visionToolsAvailable = areVisionToolsAvailable();
+    
+    // Show toggle when:
+    // - Images are attached
+    // - Vision tools are available from MCP
+    if (hasImages && visionToolsAvailable) {
+        visionToggle.style.display = 'flex';
+        visionToggle.querySelector('input').disabled = false;
+    } else {
+        visionToggle.style.display = 'none';
+    }
+}
+
 function addAttachmentPreview(dataUrl, name) {
     const item = document.createElement('div');
     item.className = 'attachment-item';
+    item.title = name;
     item.innerHTML = `
         <img src="${dataUrl}" alt="${name}">
         <button class="remove" title="Remove">&times;</button>
     `;
     
-    item.querySelector('.remove').addEventListener('click', () => {
+    // Remove button
+    item.querySelector('.remove').addEventListener('click', (e) => {
+        e.stopPropagation();
         const idx = attachedImages.findIndex(img => img.dataUrl === dataUrl);
         if (idx > -1) attachedImages.splice(idx, 1);
         item.remove();
+        updateVisionToggleVisibility();
+    });
+    
+    // Lightbox click - open full image
+    item.addEventListener('click', () => {
+        if (nui.components?.lightbox) {
+            nui.components.lightbox.show([{ src: dataUrl, title: name }], 0);
+        }
     });
     
     elements.attachmentPreview?.appendChild(item);
+    updateVisionToggleVisibility();
 }
 
 function clearAttachments() {
     attachedImages = [];
+    useVisionAnalysis = false;
     if (elements.attachmentPreview) {
         elements.attachmentPreview.innerHTML = '';
     }
+    updateVisionToggleVisibility();
 }
 
 // ============================================
@@ -2418,6 +2775,77 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// ============================================
+// Base64 Sanitization for Display
+// ============================================
+
+/**
+ * Detects if a string is base64-encoded data (typically images or binary)
+ * Uses fast heuristics to avoid expensive regex on large strings
+ */
+function isBase64Data(str) {
+    if (typeof str !== 'string' || str.length < 100) return false;
+    
+    // Fast path: check length first (base64 images are typically >1KB)
+    if (str.length < 1000) return false;
+    
+    // Check for common image signatures (first few chars)
+    const start = str.substring(0, 20);
+    if (start.startsWith('/9j/') ||           // JPEG
+        start.startsWith('iVBOR') ||          // PNG  
+        start.startsWith('R0lGOD') ||         // GIF
+        start.startsWith('UEsDB') ||          // Binary/Zip
+        start.startsWith('JVBERi0') ||        // PDF
+        start.startsWith('Qk')) {             // BMP
+        return true;
+    }
+    
+    // Fallback: check if it looks like base64 (long alphanumeric + /+)
+    // Only check first 100 chars for performance
+    const sample = str.substring(0, 100);
+    return /^[A-Za-z0-9+/]{100}/.test(sample);
+}
+
+/**
+ * Sanitizes an object for display by replacing base64 data with placeholders
+ * Recursively processes nested objects and arrays
+ * @param {*} value - Value to sanitize
+ * @returns {*} Sanitized value safe for JSON.stringify
+ */
+function sanitizeForDisplay(value) {
+    if (value === null || value === undefined) return value;
+    
+    if (typeof value === 'string') {
+        if (isBase64Data(value)) {
+            return `[BASE64_DATA](${value.length} chars)`;
+        }
+        return value;
+    }
+    
+    if (Array.isArray(value)) {
+        return value.map(item => sanitizeForDisplay(item));
+    }
+    
+    if (typeof value === 'object') {
+        const sanitized = {};
+        for (const [key, val] of Object.entries(value)) {
+            sanitized[key] = sanitizeForDisplay(val);
+        }
+        return sanitized;
+    }
+    
+    return value;
+}
+
+/**
+ * Safe JSON.stringify that sanitizes base64 data first
+ * Use this for UI display to avoid freezing on large base64 strings
+ */
+function jsonStringifyForDisplay(obj, space = 2) {
+    const sanitized = sanitizeForDisplay(obj);
+    return JSON.stringify(sanitized, null, space);
 }
 
 function scrollToBottom() {
