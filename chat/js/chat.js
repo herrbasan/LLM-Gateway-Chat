@@ -177,8 +177,9 @@ function buildExchangeElement(exchange) {
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
         });
 
-        // Assistant message after tool
+        // Assistant message after tool - create as sibling, not child
         if (exchange.assistant.content || exchange.assistant.isStreaming) {
+
             const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
             const assistantParsed = parseTimestamp(cleanedContent);
             const assistantTimestamp = assistantParsed.timestamp || '';
@@ -190,12 +191,19 @@ function buildExchangeElement(exchange) {
                 assistantEl.dataset.timestampStripped = 'true';
             }
             updateAssistantContent(assistantEl, assistantParsed.cleanContent);
-            toolEl.appendChild(assistantEl);
 
             if (exchange.assistant.isComplete) {
                 finalizeAssistantElement(assistantEl, exchange.id);
             }
+            
+            // Return a DocumentFragment containing both elements as siblings
+            const fragment = document.createDocumentFragment();
+            fragment.appendChild(toolEl);
+            fragment.appendChild(assistantEl);
+
+            return fragment;
         }
+
         return toolEl;
     }
 
@@ -235,7 +243,7 @@ function buildExchangeElement(exchange) {
         renderConversation();
     });
 
-    // Assistant message
+    // Assistant message - return as sibling in fragment, not child
     if (exchange.assistant?.content || exchange.assistant?.isStreaming) {
         const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
         const assistantParsed = parseTimestamp(cleanedContent);
@@ -248,11 +256,16 @@ function buildExchangeElement(exchange) {
             assistantEl.dataset.timestampStripped = 'true';
         }
         updateAssistantContent(assistantEl, assistantParsed.cleanContent);
-        userEl.appendChild(assistantEl);
 
         if (exchange.assistant.isComplete) {
             finalizeAssistantElement(assistantEl, exchange.id);
         }
+        
+        // Return a DocumentFragment containing both elements as siblings
+        const fragment = document.createDocumentFragment();
+        fragment.appendChild(userEl);
+        fragment.appendChild(assistantEl);
+        return fragment;
     }
 
     return userEl;
@@ -411,22 +424,12 @@ async function applyDefaultConfig() {
 
 function waitForNUI() {
     return new Promise((resolve) => {
-        // Check if NUI is already ready
         if (window.nui?.ready) {
             resolve();
             return;
         }
-        
-        // Wait for custom elements to be defined
-        const check = () => {
-            if (customElements.get('nui-select')) {
-                // Give a small delay for components to upgrade
-                setTimeout(resolve, 100);
-            } else {
-                setTimeout(check, 50);
-            }
-        };
-        check();
+        // Wait for the key NUI component to be defined, then a micro-tick for full upgrade
+        customElements.whenDefined('nui-select').then(() => queueMicrotask(resolve));
     });
 }
 
@@ -516,7 +519,6 @@ function populateModelSelect() {
         if (modelToSelect) {
             currentModel = modelToSelect;
             elements.modelSelect.setValue(modelToSelect);
-            console.log('[Chat] Selected model:', modelToSelect);
         }
         
         // Bind change event via NUI
@@ -566,7 +568,6 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
     if (modelToSelect) {
         currentModel = modelToSelect;
         select.value = modelToSelect;
-        console.log('[Chat] Selected model:', modelToSelect);
     }
     
     select.addEventListener('change', (e) => {
@@ -582,12 +583,6 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
 // ============================================
 
 function setupEventListeners() {
-    // Model selection
-    elements.modelSelect?.addEventListener('change', (e) => {
-        currentModel = e.target.value;
-        console.log('[Chat] Selected model:', currentModel);
-    });
-    
     // Session metadata - save to storage on change
     elements.userName?.querySelector('input')?.addEventListener('change', (e) => {
         storage.setPref('user-name', e.target.value).catch(() => {});
@@ -1408,7 +1403,7 @@ function renderExchange(exchange) {
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
         });
 
-        // Assistant message (if exists after tool)
+        // Assistant message (if exists after tool) - append as sibling after the tool element
         if (exchange.assistant.content || exchange.assistant.isStreaming) {
             const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
             const assistantParsed = parseTimestamp(cleanedContent);
@@ -1421,8 +1416,9 @@ function renderExchange(exchange) {
                 assistantEl.dataset.timestampStripped = 'true';
             }
             updateAssistantContent(assistantEl, assistantParsed.cleanContent);
-            getActiveContainer()?.appendChild(assistantEl);
-
+            // In renderExchange, toolEl is already in DOM, so we can insert assistant as sibling
+            // This keeps tool and assistant as separate message bubbles
+            toolEl.insertAdjacentElement('afterend', assistantEl);
             if (exchange.assistant.isComplete) {
                 finalizeAssistantElement(assistantEl, exchange.id);
             }
@@ -3187,6 +3183,9 @@ function isNearBottom(threshold = 100) {
 // ============================================
 
 function initMCP() {
+    // Set up global callback for MCP client to refresh UI when tools are loaded
+    window.refreshMCPServersUI = () => renderMCPServers();
+    
     // 1. Initial render
     renderMCPServers();
 
@@ -3253,8 +3252,10 @@ function initMCP() {
 function renderMCPServers() {
     if (!elements.mcpServersList) return;
     elements.mcpServersList.innerHTML = ''; // basic clear
+    console.log(`[MCP UI] Rendering ${mcpClient.servers.length} servers`);
 
     mcpClient.servers.forEach(server => {
+        console.log(`[MCP UI] Server ${server.name}: status=${server.status}, tools=${server.tools?.length || 0}`);
         const card = document.createElement('nui-card');
         card.className = "mcp-server-card";
         

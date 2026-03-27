@@ -153,179 +153,188 @@ class MCPClient {
                 }
             }
         }
-        console.log("MCP Tool Registry Built:", this.availableTools);
+
     }
 
     /**
-     * Connects to a specific MCP server using standard SSE (Server-Sent Events) pattern
-     * Based on official @modelcontextprotocol/sdk/client/sse.js flow
+     * Connects to a specific MCP server using SSE transport.
+     * Uses fetch() instead of EventSource so we can set Accept: text/event-stream.
      * @param {Object} server The server config object
      */
     async connectToServer(server) {
-        console.log(`Connecting to MCP server via SSE: ${server.name} at ${server.url}`);
-        this.logTraffic('OUT', { action: 'Connecting..', url: server.url, transport: 'SSE/EventSource' });
-        
+        // The server exposes /sse for SSE endpoint discovery and /message for POST requests
+        // Derive the SSE URL from the server URL (replace /mcp or /message with /sse if needed)
+        let sseUrl = server.url;
+        if (sseUrl.includes('/message')) {
+            sseUrl = sseUrl.replace('/message', '/sse');
+        } else if (sseUrl.endsWith('/mcp')) {
+            sseUrl = sseUrl.replace('/mcp', '/sse');
+        }
+
+        console.log(`[${server.name}] Connecting SSE at ${sseUrl}`);
+
         return new Promise((resolve, reject) => {
-            // 1. Establish the SSE connection
-            // The standard MCP SSEServerTransport expects a GET request without special headers
-            const eventSource = new EventSource(server.url);
-            let postEndpoint = server.url; // Fallback if server doesn't provide one
-            let endpointReceived = false;
+            fetch(sseUrl, {
+                headers: { 'Accept': 'text/event-stream' }
+            }).then(async (response) => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                if (!response.body) throw new Error('No response body');
 
-            // Connection timeout heuristic if server doesn't emit 'endpoint'
-            const connectTimeout = setTimeout(() => {
-                if (endpointReceived) return; // Don't timeout if we already got it
-                this.logTraffic('IN', { note: `No endpoint event received after 5s. Falling back to using base URL for POST routing...` });
-                console.warn(`[${server.name}] No 'endpoint' event received after 5s. Falling back to base URL: ${server.url}`);
-
-                // Fallback: try using the url directly if the server isn't standard SSE compliant
-                server.postEndpoint = server.url;
                 server.status = 'connected';
+                server.eventSource = { close: () => {} }; // compat shim
 
-                this.refreshServerTools(server).then(() => {
-                    server.eventSource = eventSource;
-                    resolve();
-                }).catch(err => {
-                    server.status = 'error';
-                    eventSource.close();
-                    this.logTraffic('IN', { error: 'Fallback POST failed. Ensure this is an MCP server.', details: err.message });
-                    reject(new Error(`SSE endpoint event missing -> Fallback POST to ${server.url} failed: ${err.message}`));
-                });
-            }, 5000);
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
 
-            eventSource.onopen = () => {
-                this.logTraffic('IN', { status: 'SSE Connection opened', note: 'Waiting for endpoint event...' });
-                console.log(`[${server.name}] SSE Connection opened. Waiting for 'endpoint' event...`);
-                server.status = 'connected';
-                server.eventSource = eventSource;
-            };
+                const read = () => {
+                    reader.read().then(({ done, value }) => {
+                        if (done) return;
+                        buffer += decoder.decode(value, { stream: true });
 
-            // 2. Listen for the specific "endpoint" event that MCP servers send to tell us where to POST
-            eventSource.addEventListener('endpoint', (e) => {
-                clearTimeout(connectTimeout);
-                endpointReceived = true;
-                postEndpoint = e.data;
-                
-                // The MCP Spec may return relative paths like `/message?sessionId=123` or absolute URLs
-                if (postEndpoint.startsWith('/')) {
-                    const baseUrl = new URL(server.url);
-                    postEndpoint = `${baseUrl.protocol}//${baseUrl.host}${postEndpoint}`;
-                }
+                        // SSE messages are separated by blank lines (\n\n or \r\n\r\n)
+                        // Normalise CRLF -> LF first
+                        buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-                server.postEndpoint = postEndpoint;
-                this.logTraffic('IN', { event: 'endpoint', postEndpoint: postEndpoint });
-                console.log(`[${server.name}] Received POST endpoint: ${postEndpoint}. Fetching tools...`);
+                        while (buffer.includes('\n\n')) {
+                            const msgEnd = buffer.indexOf('\n\n');
+                            const rawMsg = buffer.slice(0, msgEnd);
+                            buffer = buffer.slice(msgEnd + 2);
 
-                // Set status BEFORE refresh so rebuildToolRegistry can see it
-                server.status = 'connected';
+                            // Parse: "event: <type>\ndata: <payload>"
+                            let eventType = '';
+                            let eventData = '';
+                            for (const line of rawMsg.split('\n')) {
+                                if (line.startsWith('event:')) {
+                                    eventType = line.slice(6).trim();
+                                } else if (line.startsWith('data:')) {
+                                    eventData = line.slice(5).trim();
+                                }
+                            }
 
-                // Now that we have the endpoint, we can fetch tools
-                this.refreshServerTools(server).then(() => {
-                    resolve();
-                }).catch(reject);
-            });
+                            // Skip comment lines (start with :)
+                            if (rawMsg.startsWith(':')) continue;
+                            // Skip events with no data
+                            if (!eventData) continue;
 
-            // 3. Listen for general messages (JSON-RPC responses and progress updates)
-            // Using addEventListener for 'message' to ensure we get events with explicit "event: message" line
-            eventSource.addEventListener('message', (e) => {
-                console.log(`[${server.name}] SSE 'message' event received, data:`, e.data);
-                try {
-                    const data = JSON.parse(e.data);
-                    this.logTraffic('IN', data);
-                    console.log(`[${server.name}] Parsed JSON-RPC message:`, data);
-
-                    // Fallback to extract endpoint if server sent it as a generic message payload
-                    if (data.endpoint && !server.postEndpoint) {
-                        clearTimeout(connectTimeout);
-                        endpointReceived = true;
-                        let ep = data.endpoint;
-                        if (ep.startsWith('/')) {
-                            const baseUrl = new URL(server.url);
-                            ep = `${baseUrl.protocol}//${baseUrl.host}${ep}`;
+                            if (eventType === 'endpoint') {
+                                // POST endpoint is relative or absolute
+                                let postEndpoint = eventData;
+                                if (postEndpoint.startsWith('/')) {
+                                    const base = new URL(sseUrl);
+                                    postEndpoint = `${base.protocol}//${base.host}${postEndpoint}`;
+                                }
+                                server.postEndpoint = postEndpoint;
+                                console.log(`[${server.name}] POST endpoint: ${postEndpoint}. Fetching tools...`);
+                                this.refreshServerTools(server).then(resolve).catch(reject);
+                            } else if (eventType === 'message') {
+                                // JSON-RPC response on the SSE stream
+                                try {
+                                    const data = JSON.parse(eventData);
+                                    if (data.method === 'notifications/progress') {
+                                        this.handleProgress(server, data.params);
+                                    }
+                                    if (data.id) {
+                                        // Check if this is a pending tools/list response
+                                        if (server._pendingToolListRequest && String(data.id) === String(server._pendingToolListRequest.requestId)) {
+                                            server._pendingToolListRequest.onResponse(data);
+                                        } else {
+                                            this.handleResponse(server, data);
+                                        }
+                                    }
+                                } catch (err) {
+                                    // Ignore malformed JSON
+                                }
+                            }
                         }
-                        server.postEndpoint = ep;
-                        console.log(`[${server.name}] Recovered POST endpoint from generic message: ${ep}`);
-                        this.refreshServerTools(server).then(() => {
-                            server.status = 'connected';
-                            resolve();
-                        }).catch(reject);
-                        return; // exit early
-                    }
 
-                    // Handle progress notifications for long-running tools
-                    if (data.method === 'notifications/progress') {
-                        this.handleProgress(server, data.params);
-                    }
+                        read();
+                    }).catch(err => {
+                        console.error(`[${server.name}] SSE read error:`, err);
+                        server.status = 'error';
+                        this.rebuildToolRegistry();
+                        reject(err);
+                    });
+                };
 
-                    // Handle JSON-RPC responses
-                    if (data.id) {
-                        console.log(`[${server.name}] Handling response for requestId: ${data.id}, pendingRequests has:`, [...this.pendingRequests.keys()]);
-                        this.handleResponse(server, data);
-                    }
-                } catch (err) {
-                    this.logTraffic('IN', { rawEventData: e.data, parsingError: err.message });
-                    console.warn(`[${server.name}] Error parsing message or raw data received:`, e.data);
-                }
-            });
-
-            // Fallback: also onmessage for browsers that deliver 'event: message' to default handler
-            eventSource.onmessage = (e) => {
-                console.log(`[${server.name}] SSE onmessage (default) received, data:`, e.data);
-            };
-
-            eventSource.onerror = (err) => {
-                clearTimeout(connectTimeout);
-                console.error(`[${server.name}] SSE connection error:`, err);
-                
-                // Keep the state in memory, but report it
-                server.status = 'error'; 
+                read();
+            }).catch(err => {
+                console.error(`[${server.name}] SSE connection failed:`, err);
+                server.status = 'error';
                 this.rebuildToolRegistry();
-                eventSource.close();
-                
-                // If it's a UI callback, log it
-                this.logTraffic('IN', { error: 'SSE Connection Failed or Closed', details: (err && err.message) ? err.message : 'Unknown network failure' });
-                
                 reject(err);
-            };
-            
-            // Map resolvers for tracking responses
-            server.pendingRequests = new Map();
+            });
         });
     }
 
     /**
      * Internal: Fetches tools using the discovered POST endpoint
+     * For legacy SSE transport, the response comes on the main SSE stream, not the POST response
      */
     async refreshServerTools(server) {
         if (!server.postEndpoint) throw new Error("No POST endpoint discovered for server");
-        
+
+        const requestId = Date.now().toString();
         const payload = {
             jsonrpc: '2.0',
-            id: Date.now().toString(),
+            id: requestId,
             method: 'tools/list',
             params: {}
         };
-        this.logTraffic('OUT', payload);
 
-        const response = await fetch(server.postEndpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+        // For legacy SSE transport, register a one-time handler for the response on the main SSE stream
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                delete server._pendingToolListRequest;
+                reject(new Error('Timeout waiting for tools/list response'));
+            }, 10000);
+
+            // Store the pending request handler on the server object
+            // The connectToServer SSE handler will check for this
+            server._pendingToolListRequest = {
+                requestId: requestId,
+                onResponse: (data) => {
+                    clearTimeout(timeoutId);
+                    delete server._pendingToolListRequest;
+                    if (data.error) {
+                        reject(new Error(`MCP error: ${data.error.message}`));
+                    } else if (data.result?.tools) {
+                        server.tools = data.result.tools;
+                        this.rebuildToolRegistry();
+                        // Notify UI to refresh server display with new tool counts
+                        if (typeof window !== 'undefined' && window.refreshMCPServersUI) {
+                            window.refreshMCPServersUI();
+                        }
+                        resolve();
+                    } else {
+                        reject(new Error('Unexpected response format'));
+                    }
+                }
+            };
+
+            // Send the POST request (response will come via main SSE stream)
+            fetch(server.postEndpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                },
+                body: JSON.stringify(payload)
+            }).then(response => {
+                if (!response.ok) {
+                    clearTimeout(timeoutId);
+                    delete server._pendingToolListRequest;
+                    return response.text().then(text => {
+                        reject(new Error(`HTTP ${response.status}: ${text}`));
+                    });
+                }
+
+            }).catch(err => {
+                clearTimeout(timeoutId);
+                delete server._pendingToolListRequest;
+                reject(err);
+            });
         });
-
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        // We'll receive the actual response asynchronously via SSE (or the fetch response depending on server implementation)
-        // Standard MCP actually sends responses back in the HTTP response body for tool calls, 
-        // while using SSE for progress and notifications.
-        const data = await response.json();
-        this.logTraffic('IN', data);
-        if (data.result && data.result.tools) {
-            server.tools = data.result.tools;
-            console.log(`[${server.name}] Tools loaded:`, server.tools);
-            
-            // PHASE-0: Rebuild the tool registry cache now that we have updated tools
-            this.rebuildToolRegistry();
-        }
     }
 
     /**
@@ -391,7 +400,10 @@ class MCPClient {
         try {
             response = await fetch(server.postEndpoint, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                },
                 body: JSON.stringify(payload)
             });
         } catch (err) {
@@ -399,65 +411,61 @@ class MCPClient {
             throw new Error(`Fetch failed: ${err.message}. CORS issue?`);
         }
 
-        console.log(`[${server.name}] Response status: ${response.status}, content-type: ${response.headers.get('content-type')}`);
-
         if (!response.ok) {
             const text = await response.text();
-            console.error(`[${server.name}] HTTP error response:`, text);
             throw new Error(`HTTP ${response.status}: ${text}`);
         }
 
         // Response is SSE (text/event-stream) - parse manually from fetch stream
-        // SSE format: "event: <type>\ndata: <json>\n\n"
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
 
-            buffer += decoder.decode(value, { stream: true });
+                const chunk = decoder.decode(value, { stream: true });
+                buffer += chunk;
 
-            // Process complete SSE messages (separated by \n\n)
-            while (buffer.includes('\n\n')) {
-                const msgEnd = buffer.indexOf('\n\n');
-                const msg = buffer.slice(0, msgEnd);
-                buffer = buffer.slice(msgEnd + 2);
+                // Normalise line endings
+                buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-                // Parse SSE fields (event: xxx\ndata: yyy)
-                const fields = {};
-                for (const line of msg.split('\n')) {
-                    const colonIdx = line.indexOf(':');
-                    if (colonIdx === -1) continue;
-                    const key = line.slice(0, colonIdx).trim();
-                    const val = line.slice(colonIdx + 1).trim();
-                    fields[key] = val;
-                }
+                while (buffer.includes('\n\n')) {
+                    const msgEnd = buffer.indexOf('\n\n');
+                    const msg = buffer.slice(0, msgEnd);
+                    buffer = buffer.slice(msgEnd + 2);
 
-                if (fields.data) {
+                    if (msg.startsWith(':')) continue; // skip comment lines
+
+                    const fields = {};
+                    for (const line of msg.split('\n')) {
+                        const colonIdx = line.indexOf(':');
+                        if (colonIdx === -1) continue;
+                        fields[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
+                    }
+
+                    if (!fields.data) continue;
+
                     try {
                         const data = JSON.parse(fields.data);
-                        this.logTraffic('IN', { source: 'sse', event: fields.event, data });
-                        console.log(`[${server.name}] SSE message (${fields.event}):`, data);
-
-                        // Handle server-side notifications (method but no id)
                         if (data.method && !data.id) {
                             if (data.method === 'notifications/progress') {
                                 this.handleProgress(server, data.params);
                             }
                             continue;
                         }
-
-                        // Handle JSON-RPC response
                         if (data.id) {
                             this.handleResponse(server, data);
                         }
                     } catch (e) {
-                        console.warn(`[${server.name}] Failed to parse SSE data JSON:`, fields.data, e);
+                        // Ignore malformed JSON in SSE stream
                     }
                 }
             }
+        } catch (e) {
+            console.error(`[${server.name}] SSE read error:`, e);
         }
     }
 
@@ -494,7 +502,6 @@ class MCPClient {
                 _meta: { progressToken }
             }
         };
-        this.logTraffic('OUT', payload);
 
         // Register pending request for progress/cancel callbacks
         const pendingPromise = new Promise((resolve, reject) => {
