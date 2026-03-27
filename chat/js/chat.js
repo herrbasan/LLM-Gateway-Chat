@@ -21,6 +21,11 @@ const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
 let currentChatId = null;
 let conversation = null;
 
+// Multi-conversation: per-chat DOM containers (hidden containers for background chats)
+const chatContainers = new Map(); // chatId -> HTMLDivElement
+// Multi-conversation: in-memory conversation objects (avoid re-loading from IndexedDB)
+const activeConversations = new Map(); // chatId -> Conversation
+
 let client = new GatewayClient({ baseUrl: GATEWAY_URL });
 let models = [];
 let currentModel = '';
@@ -68,6 +73,190 @@ const elements = {
     mcpLogsTextarea: document.getElementById('mcp-logs-textarea'),
     mcpServersList: document.getElementById('mcp-servers-list')
 };
+
+// ============================================
+// Multi-Conversation: DOM Container Management
+// ============================================
+
+/**
+ * Gets the container for a given chat, creating it if it doesn't exist.
+ * The container is hidden by default; use getActiveContainer() for the visible one.
+ */
+function getOrCreateContainer(chatId) {
+    if (chatContainers.has(chatId)) {
+        return chatContainers.get(chatId);
+    }
+    const container = document.createElement('div');
+    container.className = 'conversation-container';
+    container.dataset.chatId = chatId;
+    container.style.display = 'none'; // Hidden by default; switchChat sets 'flex' for active
+    elements.messages.appendChild(container);
+    chatContainers.set(chatId, container);
+    return container;
+}
+
+/**
+ * Gets the currently active (visible) chat's container.
+ * For use in DOM operations within the active conversation.
+ */
+function getActiveContainer() {
+    return chatContainers.get(currentChatId) || elements.messages;
+}
+
+/**
+ * Builds the historical DOM for a chat's container (one-time on first view).
+ * Does NOT use renderConversation — builds directly from conversation data.
+ */
+async function buildHistoricalDomForChat(conv, container) {
+    if (conv.length === 0) {
+        container.innerHTML = `
+            <div class="welcome-message">
+                <h2>Welcome to LLM Gateway Chat</h2>
+                <p>Select a model and start chatting</p>
+            </div>
+        `;
+        return;
+    }
+    for (const exchange of conv.getAll()) {
+        const el = buildExchangeElement(exchange);
+        if (el) container.appendChild(el);
+    }
+}
+
+/**
+ * Builds a single exchange DOM element (used for historical DOM building).
+ * Similar to renderExchange but doesn't append — returns the element.
+ */
+function buildExchangeElement(exchange) {
+    if (exchange.type === 'tool') {
+        const parsedObj = { name: exchange.tool.name, args: exchange.tool.args };
+        const toolEl = document.createElement('div');
+        toolEl.className = 'chat-message tool';
+        toolEl.dataset.exchangeId = exchange.id;
+        toolEl.dataset.mcpToolName = parsedObj.name;
+
+        const isSuccess = exchange.tool.status === 'success';
+        const isError = exchange.tool.status === 'error';
+        const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : 'Pending');
+        const badgeVariant = isSuccess ? 'success' : (isError ? 'danger' : 'primary');
+
+        let hasImages = exchange.tool.images && exchange.tool.images.length > 0;
+        let imagesHtml = '';
+        if (hasImages) {
+            imagesHtml = `<div class="tool-images-container">`;
+            exchange.tool.images.forEach(img => {
+                imagesHtml += `<img src="${img}" class="tool-image" />`;
+            });
+            imagesHtml += `</div>`;
+        }
+
+        let resultHtml = '';
+        if (isSuccess) resultHtml = `<strong>Result:</strong><br>${exchange.tool.content}`;
+        else if (isError) resultHtml = `<strong>Error:</strong> ${exchange.tool.content}`;
+
+        toolEl.innerHTML = `
+            <div class="tool-bubble">
+                <div class="message-header tool-header">
+                    <nui-icon name="extension"></nui-icon>
+                    <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
+                    <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
+                </div>
+                <div class="tool-notifications"></div>
+                <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
+                <div class="message-content tool-payload" style="display: none;">
+                    <div class="tool-section-title">Arguments</div>
+                    <div class="tool-args">${jsonStringifyForDisplay(parsedObj.args)}</div>
+                    <div class="tool-section-title">Execution Result</div>
+                    <div class="tool-result">${resultHtml}</div>
+                </div>
+            </div>
+        `;
+
+        toolEl.querySelector('.message-header').addEventListener('click', () => {
+            const payloadBox = toolEl.querySelector('.tool-payload');
+            payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+        });
+
+        // Assistant message after tool
+        if (exchange.assistant.content || exchange.assistant.isStreaming) {
+            const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
+            const assistantParsed = parseTimestamp(cleanedContent);
+            const assistantTimestamp = assistantParsed.timestamp || '';
+            const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+
+            const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
+            if (tsLen > 0) {
+                assistantEl.dataset.timestampLen = tsLen.toString();
+                assistantEl.dataset.timestampStripped = 'true';
+            }
+            updateAssistantContent(assistantEl, assistantParsed.cleanContent);
+            toolEl.appendChild(assistantEl);
+
+            if (exchange.assistant.isComplete) {
+                finalizeAssistantElement(assistantEl, exchange.id);
+            }
+        }
+        return toolEl;
+    }
+
+    // Regular user + assistant exchange
+    const userParsed = parseTimestamp(exchange.user.content);
+    const userTimestamp = userParsed.timestamp || new Date(exchange.timestamp).toISOString().slice(0, 16).replace('T', ' @ ');
+
+    let userContent = renderMarkdown(userParsed.cleanContent);
+    if (exchange.user?.attachments?.length > 0) {
+        userContent += '<div class="message-attachments"><nui-lightbox loop>';
+        for (const att of exchange.user.attachments) {
+            const imgSrc = att.blobUrl || att.dataUrl || '';
+            userContent += `<img src="${imgSrc}" alt="${att.name}" data-lightbox-src="${imgSrc}" class="chat-attachment">`;
+        }
+        userContent += '</nui-lightbox></div>';
+    }
+
+    const userEl = document.createElement('div');
+    userEl.className = 'chat-message user';
+    userEl.dataset.exchangeId = exchange.id;
+    userEl.innerHTML = `
+        <div class="message-header">
+            You <span class="message-timestamp">${userTimestamp}</span>
+            <span class="user-pending-indicator visible">
+                <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
+            </span>
+        </div>
+        <div class="message-content">${userContent}</div>
+        <div class="message-actions-user">
+            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
+            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
+        </div>
+    `;
+    userEl.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchange.id, 'user'));
+    userEl.querySelector('.delete-message')?.addEventListener('click', () => {
+        conversation.deleteExchange(exchange.id);
+        renderConversation();
+    });
+
+    // Assistant message
+    if (exchange.assistant?.content || exchange.assistant?.isStreaming) {
+        const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
+        const assistantParsed = parseTimestamp(cleanedContent);
+        const assistantTimestamp = assistantParsed.timestamp || '';
+        const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+
+        const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
+        if (tsLen > 0) {
+            assistantEl.dataset.timestampLen = tsLen.toString();
+            assistantEl.dataset.timestampStripped = 'true';
+        }
+        updateAssistantContent(assistantEl, assistantParsed.cleanContent);
+        userEl.appendChild(assistantEl);
+
+        if (exchange.assistant.isComplete) {
+            finalizeAssistantElement(assistantEl, exchange.id);
+        }
+    }
+
+    return userEl;
+}
 
 // Create vision toggle container if not exists
 function ensureVisionToggleUI() {
@@ -133,7 +322,10 @@ async function init() {
     currentChatId = activeId;
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     await conversation.load();
-    
+
+    // Cache in activeConversations for multi-conversation support
+    activeConversations.set(currentChatId, conversation);
+
     // Set session ID for this conversation (generate if missing for backwards compat)
     const chatInfo = chatHistory.get(currentChatId);
     if (chatInfo?.sessionId) {
@@ -161,6 +353,8 @@ async function init() {
 
     // Restore conversation
     renderHistoryList();
+    // Create container for the initial chat (renderConversation uses getActiveContainer)
+    getOrCreateContainer(currentChatId);
     renderConversation();
 
     // Check gateway status
@@ -406,7 +600,7 @@ function setupEventListeners() {
     
     // Send message / Toggle Stop
     elements.sendBtn?.addEventListener('click', (e) => {
-        if (isStreaming) {
+        if (client.hasActiveStream(currentChatId)) {
             abortStream();
         } else {
             sendMessage();
@@ -586,14 +780,14 @@ async function sendMessage() {
     const editor = elements.messageInput;
     const content = editor?.getMarkdown().trim();
     
-    if ((!content && attachedImages.length === 0) || isStreaming) return;
+    if ((!content && attachedImages.length === 0) || client.hasActiveStream(currentChatId)) return;
     if (!currentModel) {
         nui.components.dialog.alert('Model Required', 'Please select a model first.');
         return;
     }
     
     // Clear welcome message if present
-    const welcome = elements.messages?.querySelector('.welcome-message');
+    const welcome = getActiveContainer()?.querySelector('.welcome-message');
     if (welcome) welcome.remove();
     
     // Add user message to conversation
@@ -625,7 +819,7 @@ async function sendMessage() {
     
     if (shouldAutoCreateVisionSessions) {
         try {
-            await autoCreateVisionSessions(currentExchangeId, imagesForAutoVision);
+            await autoCreateVisionSessions(currentExchangeId, imagesForAutoVision, currentChatId);
         } catch (err) {
             console.error('[Vision] Auto session creation failed:', err);
             // Continue with normal flow - LLM might still handle it
@@ -788,17 +982,17 @@ async function autoCreateVisionSessions(userExchangeId, images) {
                     </div>
                 </div>
             `;
-            
-            elements.messages?.appendChild(toolEl);
+
+            getActiveContainer()?.appendChild(toolEl);
             scrollToBottom();
-            
+
             // Toggle expand/collapse
             toolEl.querySelector('.message-header').addEventListener('click', (e) => {
                 if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
                 const payloadBox = toolEl.querySelector('.tool-payload');
                 payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
             });
-            
+
             // Execute the tool
             const result = await mcpClient.executeTool(createSessionToolName, toolArgs);
             
@@ -862,20 +1056,35 @@ async function autoCreateVisionSessions(userExchangeId, images) {
                     </div>
                 </div>
             `;
-            
-            elements.messages?.appendChild(toolEl);
+
+            getActiveContainer()?.appendChild(toolEl);
             scrollToBottom();
         }
     }
 }
 
-async function streamResponse(exchangeId) {
+async function streamResponse(exchangeId, streamChatId, origUserExchangeId = null) {
+    // Use provided chatId if given (for background tool continuations), otherwise use current
+    const chatId = streamChatId || currentChatId;
+
+    // Ensure conversation is synced to the correct chat in case user switched tabs during an async operation
+    // This is critical for tool continuations where handleToolExecution awaited while user switched chats
+    conversation = activeConversations.get(chatId) || conversation;
+
+    // Track original user exchange ID for chained tool calls.
+    // origUserExchangeId is passed when this stream is a tool continuation (so we know the original user exchange).
+    // When null, exchangeId IS the user exchange (first tool in a user exchange).
+    const originalUserExchangeId = origUserExchangeId || exchangeId;
+
     isStreaming = true;
+    markChatAsStreaming(chatId, true);
     updateSendButton();
-    
+
     const exchange = conversation.getExchange(exchangeId);
-    
-    // Prepend timestamp to assistant response for LLM context
+
+    // Guard: skip operations on missing exchanges and tool exchanges (they have no user message)
+    const isToolExchange = exchange && exchange.type === 'tool';
+
     const assistantTimestamp = conversation._formatTimestamp();
     const timestampWithSpace = assistantTimestamp + ' ';
     conversation.updateAssistantResponse(exchangeId, timestampWithSpace);
@@ -885,12 +1094,13 @@ async function streamResponse(exchangeId) {
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
-    
-    // Get or create assistant message element
-    let assistantEl = elements.messages?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
+
+    // Get or create assistant message element in the correct chat's container
+    const targetContainer = getOrCreateContainer(chatId);
+    let assistantEl = targetContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
     if (!assistantEl) {
         assistantEl = createAssistantElement(exchangeId);
-        elements.messages?.appendChild(assistantEl);
+        targetContainer?.appendChild(assistantEl);
     }
     // Store timestamp info for stripping during rendering (reset on regeneration)
     const tsLen = timestampWithSpace.length;
@@ -928,8 +1138,8 @@ async function streamResponse(exchangeId) {
             requestBody.tools = mcpTools;
         }
 
-        // Add image processing if images attached
-        if (exchange.user?.attachments?.length > 0) {
+        // Add image processing if images attached (skip for tool exchanges - they have no user message)
+        if (!isToolExchange && exchange && exchange.user?.attachments?.length > 0) {
             requestBody.image_processing = {
                 resize: 'auto',
                 transcode: 'jpg',
@@ -949,7 +1159,7 @@ async function streamResponse(exchangeId) {
         let toolCallIntercepted = false;
         let isReceivingTool = false;
 
-        for await (const event of client.streamChatIterable(requestBody)) {
+        for await (const event of client.streamChatIterable(requestBody, chatId, false, conversation)) {
             if (toolCallIntercepted) break; // Halts the iterable immediately
 
             switch (event.type) {
@@ -959,7 +1169,7 @@ async function streamResponse(exchangeId) {
                     if (statusEl) statusEl.classList.remove('visible');
 
                     // Hide user bubble pending indicator once assistant starts responding
-                    const userPendingEl = elements.messages?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
+                    const userPendingEl = targetContainer?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
                     if (userPendingEl) userPendingEl.classList.remove('visible');
 
                     contentBuffer += event.content;
@@ -968,7 +1178,7 @@ async function streamResponse(exchangeId) {
                     const toolCallIndex = contentBuffer.indexOf('__TOOL_CALL__');
                     if (toolCallIndex !== -1 && !isReceivingTool) {
                         isReceivingTool = true;
-                        showPendingToolUI(exchangeId);
+                        showPendingToolUI(exchangeId, chatId);
                     }
 
                     // Check for __TOOL_CALL__ pattern in accumulated content
@@ -979,7 +1189,7 @@ async function streamResponse(exchangeId) {
                             const parsedObj = JSON.parse(rawJson);
                             if (parsedObj.name && parsedObj.args) {
                                 toolCallIntercepted = true;
-                                handleToolExecution(exchangeId, parsedObj);
+                                handleToolExecution(exchangeId, parsedObj, chatId, originalUserExchangeId);
                                 break;
                             }
                         } catch (e) {
@@ -1023,6 +1233,7 @@ async function streamResponse(exchangeId) {
                     updateAssistantContent(assistantEl, errorFullContent);
                     showError(assistantEl, event.error);
                     conversation.setAssistantError(exchangeId, event.error);
+                    conversation.save();
                     break;
                     
                 case 'aborted':
@@ -1031,6 +1242,8 @@ async function streamResponse(exchangeId) {
                     const abortFullContent = abortTsMatch ? abortTsMatch[0] + contentBuffer : contentBuffer;
                     updateAssistantContent(assistantEl, stripExtraTimestamps(abortFullContent));
                     showError(assistantEl, 'Stopped');
+                    conversation.setAssistantError(exchangeId, 'Stopped');
+                    conversation.save();
                     break;
                     
                 case 'done':
@@ -1063,6 +1276,8 @@ async function streamResponse(exchangeId) {
                     conversation.setAssistantComplete(exchangeId, event.usage, event.context);
                     finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context);
                     scrollToBottom();
+                    // Save immediately - the correct conversation is still in scope here
+                    conversation.save();
                     break;
                 case 'progress':
                     if (event.data?.phase === 'context_stats') {
@@ -1095,6 +1310,7 @@ async function streamResponse(exchangeId) {
         conversation.setAssistantError(exchangeId, error.message);
     } finally {
         isStreaming = false;
+        markChatAsStreaming(chatId, false);
         updateSendButton();
         currentExchangeId = null;
     }
@@ -1105,10 +1321,22 @@ async function streamResponse(exchangeId) {
 // ============================================
 
 function renderConversation() {
-    elements.messages.innerHTML = '';
-    
+    const container = getActiveContainer();
+
+    // Multi-conversation: If container already has DOM (previously viewed), don't rebuild.
+    // Just append any new exchanges that might not be in the DOM yet.
+    // Rebuild only happens for: new empty container (startNewChat case).
+    if (container.children.length > 0) {
+        // Container already has DOM — skip full rebuild.
+        // New exchanges added by send/edit will call renderExchange directly.
+        updateOverallContext();
+        return;
+    }
+
+    container.innerHTML = '';
+
     if (conversation.length === 0) {
-        elements.messages.innerHTML = `
+        container.innerHTML = `
             <div class="welcome-message">
                 <h2>Welcome to LLM Gateway Chat</h2>
                 <p>Select a model and start chatting</p>
@@ -1172,7 +1400,7 @@ function renderExchange(exchange) {
                 </div>
             </div>
         `;
-        elements.messages?.appendChild(toolEl);
+        getActiveContainer()?.appendChild(toolEl);
 
         toolEl.querySelector('.message-header').addEventListener('click', () => {
             const payloadBox = toolEl.querySelector('.tool-payload');
@@ -1185,14 +1413,14 @@ function renderExchange(exchange) {
             const assistantParsed = parseTimestamp(cleanedContent);
             const assistantTimestamp = assistantParsed.timestamp || '';
             const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
-            
+
             const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
             if (tsLen > 0) {
                 assistantEl.dataset.timestampLen = tsLen.toString();
                 assistantEl.dataset.timestampStripped = 'true';
             }
             updateAssistantContent(assistantEl, assistantParsed.cleanContent);
-            elements.messages?.appendChild(assistantEl);
+            getActiveContainer()?.appendChild(assistantEl);
 
             if (exchange.assistant.isComplete) {
                 finalizeAssistantElement(assistantEl, exchange.id);
@@ -1244,7 +1472,7 @@ function renderExchange(exchange) {
         renderConversation();
     });
 
-    elements.messages?.appendChild(userEl);
+    getActiveContainer()?.appendChild(userEl);
 
     // Initialize Lightbox declarative handlers for attached images
     if (exchange.user?.attachments?.length > 0) {
@@ -1275,8 +1503,8 @@ function renderExchange(exchange) {
             assistantEl.dataset.timestampStripped = 'true';
         }
         updateAssistantContent(assistantEl, assistantParsed.cleanContent);
-        elements.messages?.appendChild(assistantEl);
-        
+        getActiveContainer()?.appendChild(assistantEl);
+
         if (exchange.assistant.isComplete) {
             finalizeAssistantElement(assistantEl, exchange.id);
         }
@@ -1496,9 +1724,11 @@ function updateOverallContext(contextData = null) {
 // PHASE-3: MCP Tool Execution Logic
 // ============================================
 
-function showPendingToolUI(exchangeId) {
+function showPendingToolUI(exchangeId, chatId) {
     // Hide user bubble pending indicator when tool is detected
-    const userPendingEl = elements.messages?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
+    // Use getOrCreateContainer with chatId since tool belongs to that chat (may differ from current if user switched)
+    const container = getOrCreateContainer(chatId);
+    const userPendingEl = container?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
     if (userPendingEl) userPendingEl.classList.remove('visible');
 
     const toolEl = document.createElement('div');
@@ -1514,39 +1744,57 @@ function showPendingToolUI(exchangeId) {
             </div>
         </div>
     `;
-    elements.messages.appendChild(toolEl);
+    container?.appendChild(toolEl);
     scrollToBottom();
 }
 
-async function handleToolExecution(originalExchangeId, parsedObj) {
+async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, origUserExchangeId = null) {
     console.log('[Tool Call Intercepted]', parsedObj);
-    
+
+    // Use forcedChatId if provided (passed from streamResponse which knows the correct chat),
+    // otherwise fall back to currentChatId for backward compatibility
+    const toolChatId = forcedChatId || currentChatId;
+    // Use this specific chat's container for all DOM operations (not getActiveContainer which may be different if user switched tabs)
+    const toolContainer = getOrCreateContainer(toolChatId);
+    // Always use the conversation for toolChatId - it might differ from global `conversation` if user switched chats during an async operation
+    const toolConversation = activeConversations.get(toolChatId);
+
+    // Determine the original user exchange ID.
+    // origUserExchangeId is passed from streamResponse when this is a chained tool continuation.
+    // If not passed, originalExchangeId IS the user exchange ID (first tool in a user exchange).
+    const userExchangeId = origUserExchangeId || originalExchangeId;
+
     // 1. Finalize the current assistant message
-    const oldEx = conversation.getExchange(originalExchangeId);
+    const oldEx = toolConversation.getExchange(originalExchangeId);
+    // oldEx could be undefined if the user switched chats and this exchange doesn't exist in the new chat's conversation
+    if (!oldEx) {
+        console.warn('[handleToolExecution] Original exchange not found, likely from a different chat context');
+        return;
+    }
     // Strip partial tool call fragments that may have leaked into the UI during streaming
     oldEx.assistant.content = oldEx.assistant.content.replace(/__TOOL_CALL__\([\s\S]*$/, '').trim();
-    conversation.setAssistantComplete(originalExchangeId);
-    
-    let originalEl = elements.messages?.querySelector(`.chat-message.assistant[data-exchange-id="${originalExchangeId}"]`);
+    toolConversation.setAssistantComplete(originalExchangeId);
+
+    let originalEl = toolContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${originalExchangeId}"]`);
     if (originalEl) {
         updateAssistantContent(originalEl, oldEx.assistant.content);
     }
 
-    const pendingEl = elements.messages?.querySelector(`.pending-tool-element[data-pending-exchange-id="${originalExchangeId}"]`);
+    const pendingEl = toolContainer?.querySelector(`.pending-tool-element[data-pending-exchange-id="${originalExchangeId}"]`);
     if (pendingEl) {
         pendingEl.remove();
     }
 
-    // 2. Create the tool exchange
-    const toolExchangeId = await conversation.addToolExchange(parsedObj.name, parsedObj.args);
-    const exchange = conversation.getExchange(toolExchangeId);
-    
+    // 2. Create the tool exchange (pass userExchangeId so chained tools know the original)
+    const toolExchangeId = await toolConversation.addToolExchange(parsedObj.name, parsedObj.args, userExchangeId);
+    const exchange = toolConversation.getExchange(toolExchangeId);
+
     // 3. Render Tool UI
     const toolEl = document.createElement('div');
     toolEl.className = 'chat-message tool';
     toolEl.dataset.exchangeId = toolExchangeId;
     toolEl.dataset.mcpToolName = parsedObj.name;
-    
+
     // Build collapsible box UI
     toolEl.innerHTML = `
           <div class="tool-bubble">
@@ -1565,7 +1813,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
                   <div class="tool-result"></div>
     `;
 
-    elements.messages.appendChild(toolEl);
+    toolContainer?.appendChild(toolEl);
     scrollToBottom();
 
 // Toggle expand/collapse
@@ -1591,7 +1839,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
                 notifEl.style.display = 'block';
                 notifEl.innerHTML = '<span class="tool-spinner"></span> ' + statusText;
             }
-        });
+        }, toolChatId);
 
         exchange.tool.status = 'success';
         // Extract the actual content from MCP result structure
@@ -1602,11 +1850,17 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
             if (result.content && Array.isArray(result.content)) {
                 resultText = result.content.map(c => {
                     if (c.type === 'text') return c.text;
-                    if (c.type === 'image' && c.data) {
+                    if (c.type === 'image') {
                         const mime = c.mimeType || 'image/png';
-                        // Keep image data outside the text payload to prevent blowing up the token string directly
-                        resultImages.push(`data:${mime};base64,${c.data}`);
-                        return '[Image Included in Output]';
+                        if (c.data) {
+                            // Base64 image data - store as data URI
+                            resultImages.push(`data:${mime};base64,${c.data}`);
+                            return '[Image Included in Output]';
+                        } else if (c.url) {
+                            // Image URL - store directly, will be rendered as img src
+                            resultImages.push(c.url);
+                            return '[Image Included in Output]';
+                        }
                     }
                     return JSON.stringify(c);
                 }).join('\n');
@@ -1624,7 +1878,7 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         if (resultImages.length > 0) {
             exchange.tool.images = resultImages;
         }
-        conversation.save(); // persist
+        toolConversation.save(); // persist
 
         toolEl.querySelector('.tool-status').setAttribute('variant', 'success');
           toolEl.querySelector('.tool-status').innerHTML = 'Success';
@@ -1646,13 +1900,21 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         // 5. Automatically resume stream!
         // We will start a new pseudo-assistant stream using the toolExchangeId
         // The LLM will receive the shimmed 'user' message and continue generating
-        await streamResponse(toolExchangeId);
+        // Ensure sessionId and model are correct so server routes continuation WS messages to this chat
+        const toolChatInfo = chatHistory.get(toolChatId);
+        if (toolChatInfo?.sessionId) {
+            client.setSessionId(toolChatInfo.sessionId);
+        }
+        if (toolChatInfo?.model) {
+            currentModel = toolChatInfo.model;
+        }
+        await streamResponse(toolExchangeId, toolChatId, userExchangeId);
         
     } catch (err) {
         console.error('Tool execution error', err);
         exchange.tool.status = 'error';
         exchange.tool.content = err.message || String(err);
-        conversation.save();
+        toolConversation.save();
 
         toolEl.querySelector('.tool-status').setAttribute('variant', 'danger');
           toolEl.querySelector('.tool-status').innerHTML = 'Failed';
@@ -1677,7 +1939,15 @@ async function handleToolExecution(originalExchangeId, parsedObj) {
         
         toolEl.querySelector('.dismiss-tool')?.addEventListener('click', () => {
             // Dismiss tool implies just continuing without tool result
-            streamResponse(toolExchangeId);
+            // Ensure sessionId and model are correct so server routes continuation WS messages to this chat
+            const dismissChatInfo = chatHistory.get(toolChatId);
+            if (dismissChatInfo?.sessionId) {
+                client.setSessionId(dismissChatInfo.sessionId);
+            }
+            if (dismissChatInfo?.model) {
+                currentModel = dismissChatInfo.model;
+            }
+            streamResponse(toolExchangeId, toolChatId, userExchangeId);
             toolEl.querySelector('.dismiss-tool').parentElement.style.display = 'none';
         });
     }
@@ -1957,7 +2227,7 @@ function updateVersionControls(el, exchangeId) {
 // ============================================
 
 async function regenerate(exchangeId) {
-    if (isStreaming) return;
+    if (client.hasActiveStream(currentChatId)) return;
     
     conversation.regenerateResponse(exchangeId);
     
@@ -2009,8 +2279,8 @@ async function copyMessageToClipboard(exchangeId, btn) {
 }
 
 async function startEditMode(exchangeId, role = 'user') {
-    // Block editing only if this specific exchange is currently streaming
-    if (isStreaming && currentExchangeId === exchangeId) return;
+    // Block editing only if this specific exchange in the current chat is currently streaming
+    if (client.hasActiveStream(currentChatId) && currentExchangeId === exchangeId) return;
 
     const exchange = conversation.getExchange(exchangeId);
     if (!exchange) return;
@@ -2124,14 +2394,26 @@ function commitEdit(exchangeId, role, newContent) {
 // ============================================
 
 function startNewChat() {
-    if (isStreaming) {
-        client.abortCurrentIterableStream();
+    // Note: we do NOT abort background streams when starting a new chat.
+    // Each chat's stream continues in its hidden container.
+
+    const newChatId = chatHistory.create();
+    currentChatId = newChatId;
+
+    // Cache the new conversation
+    conversation = new Conversation(`chat-conversation-${currentChatId}`);
+    activeConversations.set(currentChatId, conversation);
+
+    // Create container for the new chat (hidden until shown)
+    const newContainer = getOrCreateContainer(currentChatId);
+
+    // Toggle: show new chat, hide others
+    for (const [id, container] of chatContainers.entries()) {
+        container.style.display = id === currentChatId ? 'flex' : 'none';
     }
 
-    currentChatId = chatHistory.create();
-    conversation = new Conversation(`chat-conversation-${currentChatId}`);
     renderHistoryList();
-    renderConversation();
+    renderConversation(); // container is empty, will show welcome
 
     // Auto-focus input
     setTimeout(() => {
@@ -2140,29 +2422,44 @@ function startNewChat() {
     }, 100);
 }
 
-async function switchChat(chatId) {
-    if (isStreaming) {
-        client.abortCurrentIterableStream();
-    }
-    currentChatId = chatId;
+async function switchChat(targetChatId) {
+    currentChatId = targetChatId;
     storage.setActiveChatId(currentChatId).catch(() => {});
-    conversation = new Conversation(`chat-conversation-${currentChatId}`);
-    await conversation.load();
-    
-    // Set session ID for this conversation (generate if missing for backwards compat)
-    const chatInfo = chatHistory.get(currentChatId);
+
+    // 1. Get or create the container for this chat (creates DOM node if first time)
+    const targetContainer = getOrCreateContainer(targetChatId);
+
+    // 2. Load conversation from cache or IndexedDB
+    let conv = activeConversations.get(targetChatId);
+    if (!conv) {
+        conv = new Conversation(`chat-conversation-${targetChatId}`);
+        await conv.load();
+        activeConversations.set(targetChatId, conv);
+    }
+    conversation = conv;
+
+    // 3. Sync session ID for the SDK
+    const chatInfo = chatHistory.get(targetChatId);
     if (chatInfo?.sessionId) {
         client.setSessionId(chatInfo.sessionId);
     } else if (chatInfo) {
-        // Old conversation without sessionId - generate and save one
         const newSessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-        chatHistory.updateSessionId(currentChatId, newSessionId);
+        chatHistory.updateSessionId(targetChatId, newSessionId);
         client.setSessionId(newSessionId);
     }
 
-    // Restore the model if saved in history
+    // 4. Build historical DOM if this is the first time viewing this session
+    if (targetContainer.children.length === 0) {
+        await buildHistoricalDomForChat(conversation, targetContainer);
+    }
+
+    // 5. Toggle container visibility — all other streams continue in their hidden containers
+    for (const [id, container] of chatContainers.entries()) {
+        container.style.display = id === targetChatId ? 'flex' : 'none';
+    }
+
+    // 6. Restore the model if saved in history
     if (chatInfo && chatInfo.model && elements.modelSelect) {
-        // Ensure the model actually exists to avoid setting invalid state
         const modelExists = models.some(m => m.id === chatInfo.model);
         if (modelExists) {
             currentModel = chatInfo.model;
@@ -2175,8 +2472,19 @@ async function switchChat(chatId) {
         }
     }
 
+    // 7. Update UI without wiping background containers
     renderHistoryList();
-    renderConversation();
+    updateOverallContext();
+
+    // 8. Sync send button state with whether THIS chat has an active stream
+    // The input area is shared across chats, so we must show correct state for the visible chat
+    const targetChatIsStreaming = client.hasActiveStream(targetChatId);
+    const btn = elements.sendBtn?.querySelector('button');
+    if (btn) {
+        btn.innerHTML = targetChatIsStreaming
+            ? '<nui-icon name="close"></nui-icon>'
+            : '<nui-icon name="send"></nui-icon>';
+    }
 }
 
 async function deleteChat(chatId, e) {
@@ -2202,6 +2510,17 @@ async function deleteChat(chatId, e) {
     // Delete from chat history (handles IndexedDB deletion)
     chatHistory.delete(chatId);
 
+    // Abort any ongoing stream for this chat
+    client.abortStream(chatId);
+
+    // Clean up multi-conversation state
+    activeConversations.delete(chatId);
+    const container = chatContainers.get(chatId);
+    if (container) {
+        container.remove();
+        chatContainers.delete(chatId);
+    }
+
     if (currentChatId === chatId) {
         const allChats = chatHistory.getAll();
         if (allChats.length > 0) {
@@ -2215,84 +2534,67 @@ async function deleteChat(chatId, e) {
 }
 
 async function exportChatAsJson(chatId, btn) {
-    // Export the request body as it would be sent to the gateway (for debugging)
-    const exchanges = await storage.loadConversation(chatId);
+    // Export from in-memory conversation object (source of truth for current session state)
+    const conv = activeConversations.get(chatId);
+    const exchanges = conv ? conv.getAll() : [];
     if (!exchanges || exchanges.length === 0) return;
 
     try {
         const chatInfo = chatHistory.get(chatId);
 
-        // Build messages array exactly like getMessagesForApi does
-        const systemPrompt = getSystemPromptWithMetadata();
-        const rawMessages = [];
-
-        if (systemPrompt?.trim()) {
-            rawMessages.push({ role: 'system', content: systemPrompt.trim() });
-        }
-
-        const lastExchangeIndex = exchanges.length - 1;
-        for (let i = 0; i < exchanges.length; i++) {
-            const ex = exchanges[i];
-
+        // Build complete exchange data, stripping tool args to avoid noise
+        const exportExchanges = exchanges.map(ex => {
             if (ex.type === 'tool') {
-                // Tool results
-                if (ex.tool?.status === 'success' || ex.tool?.status === 'error') {
-                    rawMessages.push({
-                        role: 'assistant',
-                        content: `__TOOL_CALL__({"name": "${ex.tool.name}", "args": ${jsonStringifyForDisplay(ex.tool.args, null)}})`
-                    });
-                    rawMessages.push({
-                        role: 'user',
-                        content: `<tool_result>\n  <tool_name>${ex.tool.name}</tool_name>\n  <status>${ex.tool.status}</status>\n  <output>\n${ex.tool.content || ''}\n  </output>\n</tool_result>`
-                    });
-                }
-            } else {
-                const cleanUserContent = ex.user ? (ex.user.content || '') : '';
-                
-                // User message (strip timestamps for export)
-                const userContent = cleanUserContent.replace(/^\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g, '');
-                if (userContent) {
-                    rawMessages.push({ role: 'user', content: userContent });
-                }
+                // Strip tool args/content from tool exchanges
+                return {
+                    id: ex.id,
+                    type: ex.type,
+                    timestamp: ex.timestamp,
+                    tool: {
+                        name: ex.tool?.name,
+                        status: ex.tool?.status,
+                        // args and content stripped for cleaner export
+                    },
+                    assistant: ex.assistant ? {
+                        content: ex.assistant.content,
+                        isComplete: ex.assistant.isComplete,
+                        isStreaming: ex.assistant.isStreaming,
+                        usage: ex.assistant.usage,
+                        context: ex.assistant.context,
+                    } : null,
+                };
             }
+            return {
+                id: ex.id,
+                type: ex.type,
+                timestamp: ex.timestamp,
+                user: ex.user ? {
+                    content: ex.user.content,
+                    attachments: ex.user.attachments,
+                } : null,
+                assistant: ex.assistant ? {
+                    content: ex.assistant.content,
+                    isComplete: ex.assistant.isComplete,
+                    isStreaming: ex.assistant.isStreaming,
+                    usage: ex.assistant.usage,
+                    context: ex.assistant.context,
+                } : null,
+            };
+        });
 
-            // Assistant message (if complete)
-            if (ex.assistant?.isComplete && ex.assistant.content) {
-                const cleanAssistantContent = ex.assistant.content
-                    .replace(/^\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g, '')
-                    .replace(/<think>[\s\S]*?<\/think>/g, '')
-                    .trim();
-                if (cleanAssistantContent) {
-                    rawMessages.push({ role: 'assistant', content: cleanAssistantContent });
-                }
-            }
-        }
-
-        // Merge back-to-back messages of the same role
-        const messages = [];
-        for (const msg of rawMessages) {
-            if (messages.length > 0 && messages[messages.length - 1].role === msg.role && typeof msg.content === 'string' && typeof messages[messages.length - 1].content === 'string') {
-                messages[messages.length - 1].content += '\n' + msg.content;
-            } else {
-                messages.push(msg);
-            }
-        }
-
-        // Build request body
-        const requestBody = {
-            model: chatInfo?.model || currentModel || 'unknown',
-            messages,
-            temperature: parseFloat(elements.temperature?.value) || 0.7,
-            stream: true
+        const exportData = {
+            chatId,
+            chatInfo: {
+                id: chatInfo?.id,
+                title: chatInfo?.title,
+                model: chatInfo?.model,
+                sessionId: chatInfo?.sessionId,
+                timestamp: chatInfo?.timestamp,
+            },
+            exchanges: exportExchanges,
         };
 
-        // Add tools if available
-        const mcpTools = mcpClient.getFormattedToolsForLLM();
-        if (mcpTools.length > 0) {
-            requestBody.tools = mcpTools;
-        }
-
-        const formattedJson = JSON.stringify(requestBody, null, 2);
+        const formattedJson = JSON.stringify(exportData, null, 2);
         navigator.clipboard.writeText(formattedJson).then(() => {
             if (btn) {
                 const originalHtml = btn.innerHTML;
@@ -2493,6 +2795,20 @@ function updateChatModel(chatId, modelId) {
     }
 }
 
+// ============================================
+// Sidebar Streaming Indicators
+// ============================================
+
+/**
+ * Shows a pulsing indicator on a chat in the sidebar when it's streaming in the background.
+ */
+function markChatAsStreaming(chatId, isStreaming) {
+    const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${chatId}"]`);
+    if (item) {
+        item.classList.toggle('streaming', isStreaming);
+    }
+}
+
 function renderHistoryList() {
     if (!elements.chatHistoryList) return;
 
@@ -2513,7 +2829,8 @@ function renderHistoryList() {
     allChats.forEach(chat => {
         const item = document.createElement('div');
         item.className = 'chat-history-item' + (chat.id === currentChatId ? ' active' : '');
-        
+        item.dataset.chatId = chat.id;
+
         const titleSpan = document.createElement('span');
         titleSpan.className = 'chat-history-item-title';
         titleSpan.textContent = chat.title || 'New Chat';
@@ -2525,7 +2842,7 @@ function renderHistoryList() {
         const exportJsonBtn = document.createElement('nui-button');
         exportJsonBtn.className = 'chat-history-item-action';
         exportJsonBtn.innerHTML = '<button type="button"><nui-icon name="content_copy"></nui-icon></button>';
-        exportJsonBtn.title = 'Copy JSON to clipboard (debug, no images)';
+        exportJsonBtn.title = 'Copy conversation JSON to clipboard';
         exportJsonBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             exportChatAsJson(chat.id, exportJsonBtn);
@@ -2574,14 +2891,16 @@ function renderHistoryList() {
 function updateSendButton() {
     const btn = elements.sendBtn?.querySelector('button');
     if (btn) {
-        btn.innerHTML = isStreaming
+        const chatIsStreaming = client.hasActiveStream(currentChatId);
+        btn.innerHTML = chatIsStreaming
             ? '<nui-icon name="close"></nui-icon>'
             : '<nui-icon name="send"></nui-icon>';
     }
 }
 
 function abortStream() {
-    client.abortCurrentIterableStream();
+    // Abort only the active chat's stream, not background chats
+    client.abortStream(currentChatId);
 }
 
 // ============================================
@@ -2849,14 +3168,16 @@ function jsonStringifyForDisplay(obj, space = 2) {
 }
 
 function scrollToBottom() {
-    if (elements.messages) {
-        elements.messages.scrollTop = elements.messages.scrollHeight;
+    const container = getActiveContainer();
+    if (container) {
+        container.scrollTop = container.scrollHeight;
     }
 }
 
 function isNearBottom(threshold = 100) {
-    if (!elements.messages) return true;
-    const { scrollTop, scrollHeight, clientHeight } = elements.messages;
+    const container = getActiveContainer();
+    if (!container) return true;
+    const { scrollTop, scrollHeight, clientHeight } = container;
     return scrollHeight - scrollTop - clientHeight < threshold;
 }
 

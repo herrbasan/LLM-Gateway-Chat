@@ -466,8 +466,9 @@ class MCPClient {
      * @param {String} llmToolName The LLM-friendly name of the tool (post-collision prefixing)
      * @param {Object} parameters The arguments to pass to the tool
      * @param {Function} onProgress Optional callback for progress updates
+     * @param {String} chatId Optional - the chat this tool execution belongs to (for multi-chat tracking)
      */
-    async executeTool(llmToolName, parameters, onProgress = null) {
+    async executeTool(llmToolName, parameters, onProgress = null, chatId = null) {
         const record = this.toolRegistry.get(llmToolName);
         if (!record) {
             throw new Error(`Unknown tool: ${llmToolName}`);
@@ -517,7 +518,7 @@ class MCPClient {
                 if (timeoutId) clearTimeout(timeoutId);
             }
 
-            this.pendingRequests.set(requestId, { resolve, reject, resetTimeout, cancelTimeout, onProgress, server });
+            this.pendingRequests.set(requestId, { resolve, reject, resetTimeout, cancelTimeout, onProgress, server, chatId });
         });
 
         // Use streamableHTTP (streaming response)

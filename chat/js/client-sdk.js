@@ -51,6 +51,11 @@ export class ChatStream extends EventEmitter {
   cancel() {
     this.client._send('chat.cancel', { request_id: this.requestId });
   }
+
+  // Handle server's cancel acknowledgment - emit 'done' so iterator terminates
+  _onCancel() {
+    this.emit('cancel', {});
+  }
 }
 
 export class GatewayClient extends EventEmitter {
@@ -65,6 +70,7 @@ export class GatewayClient extends EventEmitter {
     this.sessionId = options.sessionId || `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     this.socket = null;
     this.streams = new Map();
+    this._streamRegistry = new Map(); // chatId -> { stream, isAborted }
     this.pendingRequests = new Map();
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
@@ -212,8 +218,7 @@ export class GatewayClient extends EventEmitter {
         method,
         params
       };
-      
-      console.log('[GatewayClient] WebSocket sending:', JSON.stringify(message, null, 2));
+
       this.socket.send(JSON.stringify(message));
     });
   }
@@ -250,7 +255,9 @@ export class GatewayClient extends EventEmitter {
   }
 
   // Modern Async Iterator natively in the SDK
-  async *streamChatIterable(params, useAppend = false) {
+  // chatId: optional - if provided, registers stream in _streamRegistry for per-chat abort
+  // conv: optional - the conversation object to save when the stream finishes
+  async *streamChatIterable(params, chatId, useAppend = false, conv = null) {
     let resolveNext;
     let nextPromise = new Promise(r => resolveNext = r);
     const eventQueue = [];
@@ -260,12 +267,17 @@ export class GatewayClient extends EventEmitter {
       nextPromise = new Promise(r => resolveNext = r);
     };
 
-    const stream = useAppend 
-      ? this.chatAppendStream({...params, stream: true}) 
+    const stream = useAppend
+      ? this.chatAppendStream({...params, stream: true})
       : this.chatStream({...params, stream: true});
     let isAborted = false;
 
-    // We attach an abort method directly so consumers can cancel it
+    // Register stream for per-chat abort support
+    const entry = { stream, isAborted: false, conv };
+    if (chatId) {
+      this._streamRegistry.set(chatId, entry);
+    }
+    // Also attach to _currentIterableStream for backward compatibility
     this._currentIterableStream = stream;
 
     stream.on('delta', (data) => {
@@ -286,6 +298,11 @@ export class GatewayClient extends EventEmitter {
       if (!isAborted) pushEvent({ type: 'error', error: err.message || 'Stream error' });
     });
 
+    // Handle cancel acknowledgment from server - ensures iterator terminates and finally runs
+    stream.on('cancel', () => {
+      pushEvent({ type: 'aborted' });
+    });
+
     try {
       while (true) {
         if (eventQueue.length === 0) await nextPromise;
@@ -296,9 +313,33 @@ export class GatewayClient extends EventEmitter {
         }
       }
     } finally {
+      // Save the correct conversation (stored per-stream) before cleaning up
+      if (chatId) {
+        const entry = this._streamRegistry.get(chatId);
+        const convToSave = entry?.conv;
+        this._streamRegistry.delete(chatId);
+        if (convToSave?.save) {
+          convToSave.save();
+        }
+      }
       if (this._currentIterableStream === stream) {
         this._currentIterableStream = null;
       }
+    }
+  }
+
+  // Check if a specific chat has an active stream
+  hasActiveStream(chatId) {
+    return this._streamRegistry.has(chatId);
+  }
+
+  // Abort a specific chat's stream (used by multi-conversation)
+  abortStream(chatId) {
+    const entry = this._streamRegistry.get(chatId);
+    if (entry) {
+      entry.isAborted = true;
+      entry.stream.cancel();
+      this._streamRegistry.delete(chatId);
     }
   }
 

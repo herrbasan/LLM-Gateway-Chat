@@ -48,12 +48,13 @@ export class Conversation {
     // Exchange Management
     // ============================================
 
-    async addToolExchange(toolName, toolArgs) {
+    async addToolExchange(toolName, toolArgs, userId = null) {
         const timestamp = Date.now();
         const exchange = {
             id: this._generateId(),
             timestamp: timestamp,
             type: 'tool', // special flag for UI and shim
+            userId: userId, // original user exchange ID for chained tool calls
             tool: {
                 role: 'tool',
                 name: toolName,
