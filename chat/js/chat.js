@@ -378,6 +378,20 @@ async function init() {
     await mcpClient.ready();
     initMCP();
 
+    // Save all conversations before page unload to prevent data loss
+    window.addEventListener('beforeunload', () => {
+        for (const [chatId, conv] of activeConversations) {
+            conv.save();
+        }
+    });
+
+    // Periodic auto-save every 30 seconds as a safety net
+    setInterval(() => {
+        for (const [chatId, conv] of activeConversations) {
+            conv.save();
+        }
+    }, 30000);
+
     console.log('[Chat] Ready');
 }
 
@@ -1269,11 +1283,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     }
                     // Ensure final content is rendered
                     updateAssistantContent(assistantEl, finalContent);
-                    conversation.setAssistantComplete(exchangeId, event.usage, event.context);
+                    // Await save to ensure data is persisted before continuing
+                    await conversation.setAssistantComplete(exchangeId, event.usage, event.context);
                     finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context);
                     scrollToBottom();
-                    // Save immediately - the correct conversation is still in scope here
-                    conversation.save();
                     break;
                 case 'progress':
                     if (event.data?.phase === 'context_stats') {
@@ -2420,6 +2433,11 @@ function startNewChat() {
 }
 
 async function switchChat(targetChatId) {
+    // Save current conversation before switching to ensure no data loss
+    if (conversation) {
+        await conversation.save();
+    }
+    
     currentChatId = targetChatId;
     storage.setActiveChatId(currentChatId).catch(() => {});
 

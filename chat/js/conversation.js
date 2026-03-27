@@ -193,23 +193,23 @@ export class Conversation {
             exchange.assistant.currentVersion = exchange.assistant.versions.length - 1;
         }
 
-        this.save();
+        return this.save();
     }
 
     setSystemPrompt(exchangeId, systemPrompt) {
         const exchange = this.getExchange(exchangeId);
-        if (!exchange) return;
+        if (!exchange) return Promise.resolve();
         exchange.systemPrompt = systemPrompt;
-        this.save();
+        return this.save();
     }
 
     setAssistantError(exchangeId, error) {
         const exchange = this.getExchange(exchangeId);
-        if (!exchange) return;
+        if (!exchange) return Promise.resolve();
         
         exchange.assistant.isStreaming = false;
         exchange.assistant.error = error;
-        this.save(); // Persist error state
+        return this.save(); // Persist error state
     }
 
     // ============================================
@@ -418,7 +418,7 @@ export class Conversation {
     // Persistence
     // ============================================
 
-    save() {
+    async save() {
         // Strip dataUrl and systemPrompt before saving
         // (images are in IndexedDB via imageStore, systemPrompt is re-computed on load)
         const exchangesToSave = this.exchanges.map(ex => {
@@ -442,9 +442,11 @@ export class Conversation {
 
         // Extract conversation ID from storageKey (format: "chat-conversation-{id}")
         const conversationId = this.storageKey.replace('chat-conversation-', '');
-        storage.saveConversation(conversationId, exchangesToSave).catch(err => {
+        try {
+            await storage.saveConversation(conversationId, exchangesToSave);
+        } catch (err) {
             console.error('[Conversation] Failed to save:', err);
-        });
+        }
     }
 
     async load() {
