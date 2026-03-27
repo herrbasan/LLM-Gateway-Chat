@@ -354,7 +354,8 @@ async function init() {
     // Restore conversation
     renderHistoryList();
     // Create container for the initial chat (renderConversation uses getActiveContainer)
-    getOrCreateContainer(currentChatId);
+    const initContainer = getOrCreateContainer(currentChatId);
+    initContainer.style.display = 'flex'; // show the active chat
     renderConversation();
 
     // Check gateway status
