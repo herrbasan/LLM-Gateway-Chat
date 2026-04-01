@@ -386,13 +386,6 @@ async function init() {
         }
     });
 
-    // Periodic auto-save every 30 seconds as a safety net
-    setInterval(() => {
-        for (const [chatId, conv] of activeConversations) {
-            conv.save();
-        }
-    }, 30000);
-
     console.log('[Chat] Ready');
 }
 

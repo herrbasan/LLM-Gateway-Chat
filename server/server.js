@@ -47,6 +47,8 @@ app.get('/api/storage/:key', (req, res) => {
 
 app.put('/api/storage/:key', (req, res) => {
   const { value } = req.body;
+  const size = JSON.stringify(value).length;
+  console.log(`[Storage] PUT ${req.params.key} (${size} bytes) at ${new Date().toISOString()}`);
   storageDb.update({ key: req.params.key }, { key: req.params.key, value }, { upsert: true }, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json({ ok: true });
@@ -185,6 +187,12 @@ app.get('/api/files', (req, res) => {
 // ============================================
 // Start Server
 // ============================================
+
+// Periodic compaction every 5 minutes
+setInterval(() => {
+  storageDb.persistence.compactDatafile();
+  console.log('[Storage] Compacted');
+}, 5 * 60 * 1000);
 
 app.listen(PORT, () => {
   console.log(`ChatStandalone running at http://localhost:${PORT}`);
