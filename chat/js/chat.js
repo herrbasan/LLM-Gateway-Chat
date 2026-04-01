@@ -1334,16 +1334,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 function renderConversation() {
     const container = getActiveContainer();
 
-    // Multi-conversation: If container already has DOM (previously viewed), don't rebuild.
-    // Just append any new exchanges that might not be in the DOM yet.
-    // Rebuild only happens for: new empty container (startNewChat case).
-    if (container.children.length > 0) {
-        // Container already has DOM — skip full rebuild.
-        // New exchanges added by send/edit will call renderExchange directly.
-        updateOverallContext();
-        return;
-    }
-
     container.innerHTML = '';
 
     if (conversation.length === 0) {
@@ -2079,7 +2069,7 @@ function updateAssistantContent(el, content) {
             answerContainer = document.createElement('div');
             answerContainer.className = 'answer-container';
             contentDiv.appendChild(answerContainer);
-            
+
             const nuiMd = document.createElement('nui-markdown');
             answerContainer.appendChild(nuiMd);
             answerContainer.dataset.lastAnswerLen = 0;
@@ -2089,7 +2079,7 @@ function updateAssistantContent(el, content) {
         if (nuiMd) {
             const currentAnswerLen = parseInt(answerContainer.dataset.lastAnswerLen || '0', 10);
             const newAnswerLen = parsed.answer.length;
-            
+
             if (isNetworkStreaming) {
                 if (!nuiMd._isStreaming) nuiMd.beginStream();
                 if (newAnswerLen > currentAnswerLen) {
@@ -2111,7 +2101,7 @@ function updateAssistantContent(el, content) {
                     if (window.nui?.util?.markdownToHtml) {
                         nuiMd.innerHTML = window.nui.util.markdownToHtml(parsed.answer);
                         // Prevent automatic connectedCallback from double-parsing if appended to DOM later
-                        nuiMd._isStreaming = true; 
+                        nuiMd._isStreaming = true;
                     } else {
                         // Module not ready: rely on declarative markup that upgrades automatically later
                         const safeContent = parsed.answer.replace(/<\/script/gi, '<\\/script');
@@ -2400,25 +2390,16 @@ function commitEdit(exchangeId, role, newContent) {
         // 1. Update content with timestamp
         const timestamp = conversation._formatTimestamp(new Date(exchange.timestamp));
         exchange.user.content = `${timestamp} ${newContent}`;
-        
-        // 2. Truncate conversation
-        conversation.truncateAfter(exchangeId);
 
-        // 3. Clear assistant response for this exchange so it doesn't flash on screen
-        conversation.regenerateResponse(exchangeId);
-
-        // 4. Render wipes downstream
+        // 2. Save and render - keep existing assistant response intact
+        conversation.save();
         renderConversation();
-
-        // 5. Stream new response
-        currentExchangeId = exchangeId;
-        streamResponse(exchangeId);
     } else {
         // 1. Update content for assistant with timestamp
         const timestamp = conversation._formatTimestamp();
         const contentWithTimestamp = `${timestamp} ${newContent}`;
         exchange.assistant.content = contentWithTimestamp;
-        
+
         // Update the current version to match
         if (exchange.assistant.versions && exchange.assistant.versions.length > 0) {
             const currentVersionObj = exchange.assistant.versions[exchange.assistant.currentVersion] || exchange.assistant.versions[0];
@@ -2426,10 +2407,10 @@ function commitEdit(exchangeId, role, newContent) {
                 currentVersionObj.content = contentWithTimestamp;
             }
         }
-        
+
         // 2. Truncate conversation downstream
         conversation.truncateAfter(exchangeId);
-        
+
         // 3. Save manually since we aren't streaming
         conversation.save();
 
@@ -2575,6 +2556,9 @@ async function deleteChat(chatId, e) {
         chatContainers.delete(chatId);
     }
 
+    // Immediately re-render the history list to reflect deletion
+    renderHistoryList();
+
     if (currentChatId === chatId) {
         const allChats = chatHistory.getAll();
         if (allChats.length > 0) {
@@ -2582,8 +2566,6 @@ async function deleteChat(chatId, e) {
         } else {
             startNewChat();
         }
-    } else {
-        renderHistoryList();
     }
 }
 
