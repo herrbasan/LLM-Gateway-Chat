@@ -938,7 +938,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         let contentHtml = '<div class="message-content">';
 
         if (msg.role === 'system' && msg.speaker === 'moderator') {
-            contentHtml += `<p><em>${this._escapeHtml(msg.content)}</em></p>`;
+            contentHtml += renderMarkdown(msg.content);
         } else {
             const parsed = parseThinking(msg.content);
 

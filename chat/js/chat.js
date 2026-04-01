@@ -249,6 +249,7 @@ function buildExchangeElement(exchange) {
         const assistantParsed = parseTimestamp(cleanedContent);
         const assistantTimestamp = assistantParsed.timestamp || '';
         const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+        assistantEl.dataset.isStreaming = exchange.assistant.isStreaming ? 'true' : 'false';
 
         const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
         if (tsLen > 0) {
@@ -1116,6 +1117,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const tsLen = timestampWithSpace.length;
     assistantEl.dataset.timestampLen = tsLen.toString();
     assistantEl.dataset.timestampStripped = 'true';
+    assistantEl.dataset.isStreaming = 'true';
     // Update header with new timestamp
     const headerEl = assistantEl.querySelector('.message-header');
     if (headerEl) {
@@ -2014,6 +2016,8 @@ function updateAssistantContent(el, content) {
 
     // Parse thinking and answer
     const parsed = parseThinking(visibleContent);
+    // Use the element's actual streaming state, not just whether <think> is open
+    const isNetworkStreaming = el.dataset.isStreaming === 'true';
 
     // INCREMENTAL DOM UPDATE PATTERN:
     // Only create elements once, then update in place
@@ -2075,13 +2079,47 @@ function updateAssistantContent(el, content) {
             answerContainer = document.createElement('div');
             answerContainer.className = 'answer-container';
             contentDiv.appendChild(answerContainer);
+            
+            const nuiMd = document.createElement('nui-markdown');
+            answerContainer.appendChild(nuiMd);
+            answerContainer.dataset.lastAnswerLen = 0;
         }
 
-        // Only re-render markdown if answer content changed
-        const newHtml = renderMarkdown(parsed.answer);
-        if (answerContainer.dataset.lastHtml !== newHtml) {
-            answerContainer.innerHTML = newHtml;
-            answerContainer.dataset.lastHtml = newHtml;
+        const nuiMd = answerContainer.querySelector('nui-markdown');
+        if (nuiMd) {
+            const currentAnswerLen = parseInt(answerContainer.dataset.lastAnswerLen || '0', 10);
+            const newAnswerLen = parsed.answer.length;
+            
+            if (isNetworkStreaming) {
+                if (!nuiMd._isStreaming) nuiMd.beginStream();
+                if (newAnswerLen > currentAnswerLen) {
+                    const chunk = parsed.answer.substring(currentAnswerLen);
+                    nuiMd.appendChunk(chunk);
+                    answerContainer.dataset.lastAnswerLen = newAnswerLen;
+                }
+            } else {
+                if (nuiMd._isStreaming) {
+                    // End of an active stream
+                    if (newAnswerLen > currentAnswerLen) {
+                        const chunk = parsed.answer.substring(currentAnswerLen);
+                        nuiMd.appendChunk(chunk);
+                    }
+                    nuiMd.endStream();
+                    answerContainer.dataset.lastAnswerLen = newAnswerLen;
+                } else if (newAnswerLen > currentAnswerLen) {
+                    // Complete message (e.g. from history load)
+                    if (window.nui?.util?.markdownToHtml) {
+                        nuiMd.innerHTML = window.nui.util.markdownToHtml(parsed.answer);
+                        // Prevent automatic connectedCallback from double-parsing if appended to DOM later
+                        nuiMd._isStreaming = true; 
+                    } else {
+                        // Module not ready: rely on declarative markup that upgrades automatically later
+                        const safeContent = parsed.answer.replace(/<\/script/gi, '<\\/script');
+                        nuiMd.innerHTML = `<script type="text/markdown">\n${safeContent}\n</script>`;
+                    }
+                    answerContainer.dataset.lastAnswerLen = newAnswerLen;
+                }
+            }
         }
     }
 
@@ -2150,6 +2188,7 @@ function showError(el, message) {
 }
 
 function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null) {
+    el.dataset.isStreaming = 'false';
     // Hide streaming indicator
     const indicator = el.querySelector('.streaming-indicator');
     if (indicator) indicator.classList.remove('visible');
