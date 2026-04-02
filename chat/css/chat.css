@@ -30,6 +30,10 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
     position: relative !important;
 }
 
+nui-code pre {
+    background-color: light-dark(var(--color-shade1), var(--color-shade1)) !important;
+}
+
 .chat-layout {
     display: flex;
     height: 100vh;
@@ -745,14 +749,12 @@ nui-main, nui-app[data-layout="app"] nui-content>nui-main {
         max-width: 95%;
     }
     
-    .chat-messages,
-    .chat-input-area {
-        padding-left: 1rem;
-        padding-right: 1rem;
-    }
-    
     .mobile-only {
         display: inline-flex;
+    }
+    .conversation-container {
+        padding-left: 1rem;
+        padding-right: 1rem;
     }
 }
 

@@ -206,6 +206,9 @@ class Arena {
             participantA: { used_tokens: 0, window_size: null },
             participantB: { used_tokens: 0, window_size: null }
         };
+
+        // Summary metadata
+        this.summary = null;
     }
 
     _generateId() {
@@ -528,6 +531,7 @@ class Arena {
                 systemPromptB: this.participantB?.systemPrompt
             },
             contextUsage: this.contextUsage,
+            summary: this.summary || null,
             messages: this.messages.map(m => ({
                 role: m.role,
                 speaker: m.speaker,
@@ -602,6 +606,11 @@ class Arena {
             this.contextUsage = data.contextUsage;
         }
 
+        // Restore summary if available
+        if (data.summary) {
+            this.summary = data.summary;
+        }
+
         // Store imported settings for UI restoration
         this._importedSettings = data.settings || {};
 
@@ -660,7 +669,7 @@ ${conversationText}
 
 Please provide a structured summary with ALL of the following:
 
-1. COMPACTED CONVERSATION: Rewrite the entire conversation in compacted, natural language that retains the tone and flow. This should have all turns present but expressed more concisely and naturally.
+1. COMPACTED CONVERSATION: Rewrite the ENTIRE conversation preserving EVERY SINGLE TURN from both speakers. Each message should be compacted into more natural, concise language while retaining the speaker's tone, manner, and style. How something is said is just as important as what was said - preserve the personality and flow of the conversation. The result should read like a natural condensed transcript.
 
 2. LONG SUMMARY: A comprehensive summary capturing all major facts, realizations, and implications discussed in the conversation.
 
@@ -1700,106 +1709,146 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             contentScroll: true,
             buttons: [
                 { label: 'Close', type: 'outline', value: 'close' },
-                { label: 'Copy All', type: 'primary', value: 'copy' }
+                { label: 'Save', type: 'primary', value: 'save' }
             ]
         });
 
-        // Build dialog content
+        // Build dialog content with overlay for loading state
         main.innerHTML = `
-            <section style="margin-bottom: 1.5rem;">
-                <nui-input-group>
-                    <label>Summary Model</label>
-                    <nui-select id="summarize-model-select" searchable data-label="Select model...">
-                        <select>
-                            ${modelItems.map(m => `<option value="${m.value}"${m.disabled ? ' disabled' : ''}>${m.label}</option>`).join('')}
-                        </select>
-                    </nui-select>
-                </nui-input-group>
-            </section>
+            <div id="summarize-content" style="position: relative;">
+                <section style="margin-bottom: 1.5rem;">
+                    <nui-form-row>
+                        <nui-input-group>
+                            <label>Summary Model</label>
+                            <nui-select id="summarize-model-select" searchable data-label="Select model...">
+                                <select>
+                                    ${modelItems.map(m => `<option value="${m.value}"${m.disabled ? ' disabled' : ''}>${m.label}</option>`).join('')}
+                                </select>
+                            </nui-select>
+                        </nui-input-group>
+                        <nui-button variant="primary" id="summarize-generate-btn">
+                            <button type="button">Generate</button>
+                        </nui-button>
+                    </nui-form-row>
+                </section>
 
-            <section id="summarize-output-section" style="margin-bottom: 1rem;">
-                <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
-                    <span style="font-weight: 500;">Summary</span>
-                    <span id="summarize-status" style="color: var(--nui-color-text-dim); font-style: italic; font-size: 0.875rem;"></span>
+                <!-- Title field - outside tabs -->
+                <section style="margin-bottom: 1rem;">
+                    <nui-input-group>
+                        <label>Title</label>
+                        <nui-rich-text id="summarize-title-rt" no-toolbar style="margin-top: 0.5rem;">
+                            <textarea rows="2" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                        </nui-rich-text>
+                    </nui-input-group>
+                </section>
+
+                <section id="summarize-output-section" style="margin-bottom: 1rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
+                        <span style="font-weight: 500;">Summary</span>
+                        <span id="summarize-status" style="color: var(--nui-color-text-dim); font-style: italic; font-size: 0.875rem;"></span>
+                    </div>
+
+                    <nui-tabs>
+                        <nav>
+                            <button>Compacted</button>
+                            <button>Long</button>
+                            <button>Short</button>
+                        </nav>
+
+                        <div>
+                            <nui-rich-text id="summarize-compacted-rt" no-toolbar style="margin-top: 0.5rem;">
+                                <textarea rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                            </nui-rich-text>
+                        </div>
+
+                        <div>
+                            <nui-rich-text id="summarize-long-rt" no-toolbar style="margin-top: 0.5rem;">
+                                <textarea rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                            </nui-rich-text>
+                        </div>
+
+                        <div>
+                            <nui-rich-text id="summarize-short-rt" no-toolbar style="margin-top: 0.5rem;">
+                                <textarea rows="4" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                            </nui-rich-text>
+                        </div>
+                    </nui-tabs>
+                </section>
+
+                <!-- Loading overlay - shades entire content area during generation -->
+                <div id="summarize-overlay" style="display: none; position: absolute; inset: 0; background: var(--nui-color-surface, #1a1a1a); opacity: 0.9; z-index: 10; justify-content: center; align-items: center;">
+                    <div style="display: flex; flex-direction: column; align-items: center; gap: 1rem;">
+                        <nui-progress type="busy" size="48px"></nui-progress>
+                        <span style="color: var(--nui-color-text);">Generating summary...</span>
+                    </div>
                 </div>
-
-                <nui-tabs>
-                    <nav>
-                        <button>Compacted</button>
-                        <button>Long</button>
-                        <button>Short</button>
-                        <button>Title</button>
-                    </nav>
-
-                    <div>
-                        <nui-textarea style="margin-top: 0.5rem;">
-                            <textarea id="summarize-compacted" readonly rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                        </nui-textarea>
-                    </div>
-
-                    <div>
-                        <nui-textarea style="margin-top: 0.5rem;">
-                            <textarea id="summarize-long" readonly rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                        </nui-textarea>
-                    </div>
-
-                    <div>
-                        <nui-textarea style="margin-top: 0.5rem;">
-                            <textarea id="summarize-short" readonly rows="4" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                        </nui-textarea>
-                    </div>
-
-                    <div>
-                        <nui-textarea style="margin-top: 0.5rem;">
-                            <textarea id="summarize-title" readonly rows="2" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                        </nui-textarea>
-                    </div>
-                </nui-tabs>
-            </section>
+            </div>
         `;
 
         // Get references to elements
         const statusEl = main.querySelector('#summarize-status');
-        const compactedEl = main.querySelector('#summarize-compacted');
-        const longEl = main.querySelector('#summarize-long');
-        const shortEl = main.querySelector('#summarize-short');
-        const titleEl = main.querySelector('#summarize-title');
+        const overlayEl = main.querySelector('#summarize-overlay');
+        const compactedRt = main.querySelector('#summarize-compacted-rt');
+        const longRt = main.querySelector('#summarize-long-rt');
+        const shortRt = main.querySelector('#summarize-short-rt');
+        const titleRt = main.querySelector('#summarize-title-rt');
         const modelSelect = main.querySelector('#summarize-model-select');
+        const generateBtn = main.querySelector('#summarize-generate-btn');
+
+        // Load existing summary from arena if available
+        if (this.arena.summary) {
+            compactedRt.setMarkdown(this.arena.summary.compactedConversation || '');
+            longRt.setMarkdown(this.arena.summary.longSummary || '');
+            shortRt.setMarkdown(this.arena.summary.shortSummary || '');
+            titleRt.setMarkdown(this.arena.summary.title || '');
+        }
 
         // Auto-select participant A's model
         if (this.arena.participantA?.modelName && modelSelect?.setValue) {
             modelSelect.setValue(this.arena.participantA.modelName);
         }
 
-        // Handle dialog close
-        dialog.addEventListener('nui-dialog-close', (e) => {
-            if (e.detail.returnValue === 'copy') {
-                const allText = `TITLE: ${titleEl?.value || ''}\n\nSHORT: ${shortEl?.value || ''}\n\nLONG:\n${longEl?.value || ''}\n\nCOMPACTED:\n${compactedEl?.value || ''}`;
-                navigator.clipboard.writeText(allText).then(() => {
-                    this._showNotification('Summary copied to clipboard', 'success');
-                }).catch(() => {
-                    this._showError('Failed to copy summary');
-                });
+        // Handle generate button click
+        generateBtn?.addEventListener('click', async () => {
+            statusEl.textContent = 'Generating...';
+            overlayEl.style.display = 'flex';
+
+            try {
+                const model = modelSelect?.getValue?.() || this.arena.participantA?.modelName;
+                const result = await this.arena.summarize(model);
+
+                statusEl.textContent = 'Done';
+                compactedRt.setMarkdown(result.compactedConversation);
+                longRt.setMarkdown(result.longSummary);
+                shortRt.setMarkdown(result.shortSummary);
+                titleRt.setMarkdown(result.title);
+            } catch (err) {
+                console.error('[ArenaUI] Summarize failed:', err);
+                statusEl.textContent = 'Error generating summary';
+                compactedRt.setMarkdown(`Error: ${err.message}`);
+            } finally {
+                // Hide loading overlay
+                overlayEl.style.display = 'none';
             }
         });
 
-        // Generate summary
-        try {
-            const model = modelSelect?.getValue?.() || this.arena.participantA?.modelName;
-            statusEl.textContent = 'Generating summary...';
+        // Handle dialog close - button values: 'close', 'save'
+        dialog.addEventListener('nui-dialog-close', async (e) => {
+            const returnValue = e.detail?.returnValue;
 
-            const result = await this.arena.summarize(model);
-
-            statusEl.textContent = 'Done';
-            compactedEl.value = result.compactedConversation;
-            longEl.value = result.longSummary;
-            shortEl.value = result.shortSummary;
-            titleEl.value = result.title;
-        } catch (err) {
-            console.error('[ArenaUI] Summarize failed:', err);
-            statusEl.textContent = 'Error generating summary';
-            compactedEl.value = `Error: ${err.message}`;
-        }
+            if (returnValue === 'save') {
+                // Save summaries to arena metadata
+                this.arena.summary = {
+                    compactedConversation: compactedRt.markdown || '',
+                    longSummary: longRt.markdown || '',
+                    shortSummary: shortRt.markdown || '',
+                    title: titleRt.markdown || ''
+                };
+                this.arena._saveToStorage();
+                this._showNotification('Summary saved to arena', 'success');
+            }
+            // 'close' just closes the dialog normally
+        });
     }
 
     async _deleteArena(id, e) {
