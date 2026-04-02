@@ -44,7 +44,6 @@ nui-sidebar[position="right"] .sidebar-content {
     flex: 1;
     overflow-y: auto;
 }
-}
 
 .sidebar-action-area {
     display: flex;
