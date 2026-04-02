@@ -18,6 +18,34 @@ nui-app:not(.nui-ready) { display: none; }
     padding: 0.75rem;
 }
 
+/* Right sidebar - scrollable with fixed height */
+nui-sidebar[position="right"] {
+    height: 100%;
+    overflow: hidden;
+}
+
+nui-sidebar[position="right"] .sidebar-content {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow-y: auto;
+    box-sizing: border-box;
+}
+
+/* Config tabs styling - ensure fixed height */
+.sidebar-content nui-tabs {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.sidebar-content nui-tabs > div {
+    flex: 1;
+    overflow-y: auto;
+}
+}
+
 .sidebar-action-area {
     display: flex;
     gap: 0.5rem;
@@ -52,6 +80,7 @@ nui-app:not(.nui-ready) { display: none; }
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-shrink: 0;
     padding: 0.5rem 0.75rem;
     background: var(--nui-color-shade1, #1a1a1a);
     border: thin solid var(--nui-color-shade2, #333);

@@ -633,6 +633,118 @@ class Arena {
         if (this.participantA) this.participantA.close();
         if (this.participantB) this.participantB.close();
     }
+
+    async summarize(model = null) {
+        if (!this.messages || this.messages.length === 0) {
+            return {
+                compactedConversation: 'No messages to summarize.',
+                longSummary: '',
+                shortSummary: '',
+                title: 'Untitled Conversation'
+            };
+        }
+
+        const conversationText = this.messages
+            .filter(m => m.speaker !== 'moderator' && m.content)
+            .map(m => `${m.speaker}: ${m.content}`)
+            .join('\n\n');
+
+        const topic = this.messages.find(m => m.role === 'system' && m.speaker === 'moderator')?.content?.replace('Topic: ', '') || '';
+
+        const summaryPrompt = `You are providing 4 levels of summarization for a conversation between two AI models.
+
+TOPIC: ${topic}
+
+CONVERSATION:
+${conversationText}
+
+Please provide a structured summary with ALL of the following:
+
+1. COMPACTED CONVERSATION: Rewrite the entire conversation in compacted, natural language that retains the tone and flow. This should have all turns present but expressed more concisely and naturally.
+
+2. LONG SUMMARY: A comprehensive summary capturing all major facts, realizations, and implications discussed in the conversation.
+
+3. SHORT SUMMARY: A brief description (2-3 sentences) of the conversation in relation to the topic.
+
+4. TITLE: A short, descriptive title (5 words or less) for this conversation.
+
+Format your response exactly like this:
+===COMPACTED===
+[compacted conversation text]
+===LONG===
+[long summary text]
+===SHORT===
+[short summary text]
+===TITLE===
+[title text]`;
+
+        const client = new GatewayClient({ baseUrl: this.gatewayUrl });
+        const modelToUse = model || this.participantA?.modelName || 'claude-3-5-sonnet-20241022';
+
+        return new Promise((resolve, reject) => {
+            const stream = client.chatStream({
+                model: modelToUse,
+                messages: [{ role: 'user', content: summaryPrompt }],
+                stream: true,
+                maxTokens: 2000
+            });
+
+            let fullText = '';
+
+            stream.on('delta', (data) => {
+                if (data?.choices?.[0]?.delta?.content !== undefined) {
+                    fullText += data.choices[0].delta.content;
+                }
+            });
+
+            stream.on('done', () => {
+                resolve(this._parseStructuredSummary(fullText));
+            });
+
+            stream.on('error', (err) => {
+                reject(err);
+            });
+        });
+    }
+
+    _parseStructuredSummary(text) {
+        const result = {
+            compactedConversation: '',
+            longSummary: '',
+            shortSummary: '',
+            title: 'Untitled Conversation'
+        };
+
+        const sections = {
+            '===COMPACTED===': 'compactedConversation',
+            '===LONG===': 'longSummary',
+            '===SHORT===': 'shortSummary',
+            '===TITLE===': 'title'
+        };
+
+        let currentSection = null;
+        const lines = text.split('\n');
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (sections[trimmed]) {
+                currentSection = sections[trimmed];
+            } else if (currentSection) {
+                if (result[currentSection]) {
+                    result[currentSection] += '\n' + line;
+                } else {
+                    result[currentSection] = line;
+                }
+            }
+        }
+
+        result.compactedConversation = result.compactedConversation.trim();
+        result.longSummary = result.longSummary.trim();
+        result.shortSummary = result.shortSummary.trim();
+        result.title = result.title.trim();
+
+        return result;
+    }
 }
 
 // ============================================
@@ -667,7 +779,7 @@ class ArenaUI {
         this.autoAdvanceCheckbox = document.getElementById('auto-advance');
         this.startButton = document.getElementById('start-btn');
         this.stopButton = document.getElementById('stop-btn');
-        this.exportButton = document.getElementById('export-btn');
+        this.summarizeBtn = document.getElementById('summarize-btn');
         this.promptInput = document.getElementById('arena-prompt-input');
         this.sendPromptBtn = document.getElementById('arena-send-btn');
         this.nextTurnBtn = document.getElementById('next-turn-btn');
@@ -700,7 +812,7 @@ class ArenaUI {
             }
         });
 
-        this.exportButton?.addEventListener('click', (e) => this._toggleExportMenu(e));
+        this.summarizeBtn?.addEventListener('click', () => this._showSummarizeDialog());
 
         const autoAdvanceToggle = document.getElementById('auto-advance-toggle');
         autoAdvanceToggle?.addEventListener('click', () => {
@@ -708,12 +820,6 @@ class ArenaUI {
                 const newValue = this.arena.toggleAutoAdvance();
                 autoAdvanceToggle.classList.toggle('active', newValue);
                 this._updateNextButtonVisibility();
-            }
-        });
-
-        document.addEventListener('click', (e) => {
-            if (!e.target.closest('.export-dropdown')) {
-                document.querySelectorAll('.export-dropdown-menu').forEach(el => el.classList.remove('visible'));
             }
         });
 
@@ -1086,62 +1192,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             tooltip += '\n\n(Estimated based on character count)';
         }
         this.contextUsageEl.title = tooltip;
-    }
-
-    _toggleExportMenu(e) {
-        e.stopPropagation();
-        const menu = this.exportButton?.parentElement?.querySelector('.export-dropdown-menu');
-        menu?.classList.toggle('visible');
-
-        const jsonBtn = menu?.querySelector('[data-export="json"]');
-        const mdBtn = menu?.querySelector('[data-export="markdown"]');
-
-        jsonBtn?.addEventListener('click', () => this._exportJSON(), { once: true });
-        mdBtn?.addEventListener('click', () => this._exportMarkdown(), { once: true });
-    }
-
-    _generateDefaultFilename(extension) {
-        const modelA = this.arena?.participantA?.modelName?.split('/').pop() || 'modelA';
-        const modelB = this.arena?.participantB?.modelName?.split('/').pop() || 'modelB';
-        const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-        return `arena-${modelA}-vs-${modelB}-${date}.${extension}`;
-    }
-
-    _exportJSON() {
-        if (!this.arena) return;
-        const data = this.arena.exportJSON();
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const defaultName = this._generateDefaultFilename('json');
-        this._downloadWithPrompt(blob, defaultName, 'json');
-    }
-
-    _exportMarkdown() {
-        if (!this.arena) return;
-        const content = this.arena.exportMarkdown();
-        const blob = new Blob([content], { type: 'text/markdown' });
-        const defaultName = this._generateDefaultFilename('md');
-        this._downloadWithPrompt(blob, defaultName, 'md');
-    }
-
-    _downloadWithPrompt(blob, defaultFilename, extension) {
-        // Show prompt for filename
-        const userFilename = prompt('Save as:', defaultFilename);
-        if (!userFilename) return; // User cancelled
-
-        // Ensure correct extension
-        let filename = userFilename.trim();
-        if (!filename.endsWith(`.${extension}`)) {
-            filename += `.${extension}`;
-        }
-
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
     }
 
     _triggerImport() {
@@ -1627,6 +1677,128 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         } catch (err) {
             console.error('Failed to export markdown:', err);
             this._showError('Failed to export markdown');
+        }
+    }
+
+    async _showSummarizeDialog() {
+        if (!this.arena) {
+            this._showError('No active arena to summarize');
+            return;
+        }
+
+        // Build model options from loaded models
+        const modelItems = this.models
+            .filter(m => m.type === 'chat' || !m.type)
+            .map(m => ({ value: m.id || m.name, label: m.name || m.id }));
+
+        if (modelItems.length === 0) {
+            modelItems.push({ value: '', label: 'No models available', disabled: true });
+        }
+
+        // Use page mode dialog
+        const { dialog, main } = await nui.components.dialog.page('Summarize Conversation', '', {
+            contentScroll: true,
+            buttons: [
+                { label: 'Close', type: 'outline', value: 'close' },
+                { label: 'Copy All', type: 'primary', value: 'copy' }
+            ]
+        });
+
+        // Build dialog content
+        main.innerHTML = `
+            <section style="margin-bottom: 1.5rem;">
+                <nui-input-group>
+                    <label>Summary Model</label>
+                    <nui-select id="summarize-model-select" searchable data-label="Select model...">
+                        <select>
+                            ${modelItems.map(m => `<option value="${m.value}"${m.disabled ? ' disabled' : ''}>${m.label}</option>`).join('')}
+                        </select>
+                    </nui-select>
+                </nui-input-group>
+            </section>
+
+            <section id="summarize-output-section" style="margin-bottom: 1rem;">
+                <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
+                    <span style="font-weight: 500;">Summary</span>
+                    <span id="summarize-status" style="color: var(--nui-color-text-dim); font-style: italic; font-size: 0.875rem;"></span>
+                </div>
+
+                <nui-tabs>
+                    <nav>
+                        <button>Compacted</button>
+                        <button>Long</button>
+                        <button>Short</button>
+                        <button>Title</button>
+                    </nav>
+
+                    <div>
+                        <nui-textarea style="margin-top: 0.5rem;">
+                            <textarea id="summarize-compacted" readonly rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                        </nui-textarea>
+                    </div>
+
+                    <div>
+                        <nui-textarea style="margin-top: 0.5rem;">
+                            <textarea id="summarize-long" readonly rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                        </nui-textarea>
+                    </div>
+
+                    <div>
+                        <nui-textarea style="margin-top: 0.5rem;">
+                            <textarea id="summarize-short" readonly rows="4" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                        </nui-textarea>
+                    </div>
+
+                    <div>
+                        <nui-textarea style="margin-top: 0.5rem;">
+                            <textarea id="summarize-title" readonly rows="2" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
+                        </nui-textarea>
+                    </div>
+                </nui-tabs>
+            </section>
+        `;
+
+        // Get references to elements
+        const statusEl = main.querySelector('#summarize-status');
+        const compactedEl = main.querySelector('#summarize-compacted');
+        const longEl = main.querySelector('#summarize-long');
+        const shortEl = main.querySelector('#summarize-short');
+        const titleEl = main.querySelector('#summarize-title');
+        const modelSelect = main.querySelector('#summarize-model-select');
+
+        // Auto-select participant A's model
+        if (this.arena.participantA?.modelName && modelSelect?.setValue) {
+            modelSelect.setValue(this.arena.participantA.modelName);
+        }
+
+        // Handle dialog close
+        dialog.addEventListener('nui-dialog-close', (e) => {
+            if (e.detail.returnValue === 'copy') {
+                const allText = `TITLE: ${titleEl?.value || ''}\n\nSHORT: ${shortEl?.value || ''}\n\nLONG:\n${longEl?.value || ''}\n\nCOMPACTED:\n${compactedEl?.value || ''}`;
+                navigator.clipboard.writeText(allText).then(() => {
+                    this._showNotification('Summary copied to clipboard', 'success');
+                }).catch(() => {
+                    this._showError('Failed to copy summary');
+                });
+            }
+        });
+
+        // Generate summary
+        try {
+            const model = modelSelect?.getValue?.() || this.arena.participantA?.modelName;
+            statusEl.textContent = 'Generating summary...';
+
+            const result = await this.arena.summarize(model);
+
+            statusEl.textContent = 'Done';
+            compactedEl.value = result.compactedConversation;
+            longEl.value = result.longSummary;
+            shortEl.value = result.shortSummary;
+            titleEl.value = result.title;
+        } catch (err) {
+            console.error('[ArenaUI] Summarize failed:', err);
+            statusEl.textContent = 'Error generating summary';
+            compactedEl.value = `Error: ${err.message}`;
         }
     }
 

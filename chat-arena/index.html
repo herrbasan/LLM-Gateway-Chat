@@ -10,9 +10,6 @@
     <link rel="stylesheet" href="../nui_wc2/NUI/css/nui-theme.css">
     <link rel="stylesheet" href="../nui_wc2/NUI/css/modules/nui-syntax-highlight.css">
 
-    <!-- Vendor -->
-    <link rel="stylesheet" href="../chat/vendor/prism.css">
-
     <!-- Chat Styles -->
     <link rel="stylesheet" href="../chat/css/chat.css">
 
@@ -187,18 +184,11 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                                     Stop
                                 </button>
                             </nui-button>
-                            <div class="export-dropdown">
-                                <nui-button variant="outline" size="small" id="export-btn">
-                                    <button type="button">
-                                        <nui-icon name="download"></nui-icon>
-                                        Export
-                                    </button>
-                                </nui-button>
-                                <div class="export-dropdown-menu">
-                                    <button data-export="json">Export as JSON</button>
-                                    <button data-export="markdown">Export as Markdown</button>
-                                </div>
-                            </div>
+                            <nui-button variant="outline" size="small" id="summarize-btn" title="Summarize conversation">
+                                <button type="button">
+                                    <nui-icon name="compress"></nui-icon>
+                                </button>
+                            </nui-button>
                         </div>
                     </div>
                     <div class="arena-prompt-area">
@@ -214,17 +204,12 @@ Speak naturally as if in a thoughtful conversation.</textarea>
         </nui-content>
     </nui-app>
 
-    <!-- Vendor Scripts -->
-    <script src="../chat/vendor/prism.js"></script>
-    <script src="../chat/vendor/markdown-it.js"></script>
-    <script src="../chat/vendor/purify.js"></script>
-    <script src="../chat/vendor/markdown-it-prism.js"></script>
-
     <!-- Arena Config -->
     <script src="js/config.js"></script>
 
     <!-- NUI Library -->
     <script src="../nui_wc2/NUI/nui.js" type="module"></script>
+    <script src="../nui_wc2/NUI/lib/modules/nui-markdown.js" type="module"></script>
 
     <!-- Arena App -->
     <script type="module" src="js/arena.js"></script>
