@@ -149,6 +149,18 @@ class Participant {
             }
         }
 
+        // CRITICAL: Ensure at least one 'user' role message exists
+        // Some LLM APIs require at least one user message in the conversation
+        // If no messages from other participant, use topic as initial user message
+        const hasUserMessage = messages.some(m => m.role === 'user');
+        if (!hasUserMessage && topicMsg) {
+            // Extract topic text and use as opening user message
+            const topicText = topicMsg.content.replace(/^Topic:\s*/i, '').trim();
+            if (topicText) {
+                messages.unshift({ role: 'user', content: topicText });
+            }
+        }
+
         // Debug: console.log(`[Participant ${this.name}] _buildMessages: ${messages.length} msgs (${otherMsgCount} from other)`);
         return messages;
     }
