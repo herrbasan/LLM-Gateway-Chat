@@ -629,6 +629,11 @@ class Arena {
         };
     }
 
+    importJSON(data) {
+        if (!data || data.version !== 1) {
+            throw new Error('Invalid arena export format');
+        }
+
         if (data.id) {
             this.id = data.id;
         }
