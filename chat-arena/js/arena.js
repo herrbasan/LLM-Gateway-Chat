@@ -320,6 +320,7 @@ class Arena {
             modelName: participantAConfig.modelName,
             gatewayUrl: this.gatewayUrl,
             systemPrompt: participantAConfig.systemPrompt,
+            maxTokens: participantAConfig.maxTokens,
             sessionId: sessionIdA,
         });
 
@@ -328,6 +329,7 @@ class Arena {
             modelName: participantBConfig.modelName,
             gatewayUrl: this.gatewayUrl,
             systemPrompt: participantBConfig.systemPrompt,
+            maxTokens: participantBConfig.maxTokens,
             sessionId: sessionIdB,
         });
     }
