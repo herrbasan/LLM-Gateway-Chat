@@ -196,6 +196,7 @@ export class GatewayClient extends EventEmitter {
         stream.emit('done', message.params);
         this.streams.delete(requestId);
       } else if (message.method === 'chat.error') {
+        console.log('[GatewayClient] Received chat.error:', message.params.error);
         stream.emit('error', message.params.error);
         this.streams.delete(requestId);
       }
@@ -295,7 +296,11 @@ export class GatewayClient extends EventEmitter {
     }));
     
     stream.on('error', (err) => {
-      if (!isAborted) pushEvent({ type: 'error', error: err.message || 'Stream error' });
+      if (!isAborted) {
+        const errorMessage = typeof err === 'string' ? err : (err.message || 'Stream error');
+        console.log('[GatewayClient] Stream error event:', errorMessage);
+        pushEvent({ type: 'error', error: errorMessage });
+      }
     });
 
     // Handle cancel acknowledgment from server - ensures iterator terminates and finally runs

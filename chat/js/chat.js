@@ -283,10 +283,11 @@ function ensureVisionToggleUI() {
         visionToggle.className = 'vision-toggle-container';
         visionToggle.style.display = 'none';
         visionToggle.innerHTML = `
-            <nui-checkbox variant="switch" title="Automatically create vision sessions for images, allowing the AI to analyze them using vision_analyze tool">
+            <nui-checkbox variant="switch" title="Use MCP vision tools to analyze images. When disabled, images are sent directly to vision-capable models.">
                 <input type="checkbox" id="vision-toggle-input">
             </nui-checkbox>
-            <label for="vision-toggle-input">Auto Vision</label>
+            <label for="vision-toggle-input">MCP Vision</label>
+            <span id="vision-mode-indicator" class="vision-mode-indicator"></span>
         `;
         
         // Insert after attachment preview in the images row
@@ -297,11 +298,40 @@ function ensureVisionToggleUI() {
             elements.attachmentPreview.parentNode?.insertBefore(visionToggle, elements.attachmentPreview);
         }
         
-        // Add event listener
+        // Set initial state from saved preference
         const checkbox = visionToggle.querySelector('input');
+        if (checkbox) {
+            checkbox.checked = useVisionAnalysis;
+        }
+        
+        // Add event listener
         checkbox?.addEventListener('change', (e) => {
             useVisionAnalysis = e.target.checked;
+            storage.setPref('mcp-vision-enabled', useVisionAnalysis).catch(() => {});
+            updateVisionModeIndicator();
+            console.log('[Vision] MCP Vision toggle:', useVisionAnalysis ? 'ON (using MCP tools)' : 'OFF (direct to model)');
         });
+    }
+}
+
+// Update the vision mode indicator badge
+function updateVisionModeIndicator() {
+    const indicator = document.getElementById('vision-mode-indicator');
+    if (!indicator) return;
+    
+    const modelSupportsVision = currentModelSupportsVision();
+    
+    if (useVisionAnalysis) {
+        indicator.textContent = 'MCP';
+        indicator.className = 'vision-mode-indicator mcp-mode';
+        indicator.title = 'Using MCP vision tools to analyze images';
+    } else if (modelSupportsVision) {
+        indicator.textContent = 'Direct';
+        indicator.className = 'vision-mode-indicator direct-mode';
+        indicator.title = 'Sending images directly to model';
+    } else {
+        indicator.textContent = '';
+        indicator.className = 'vision-mode-indicator';
     }
 }
 
@@ -410,11 +440,15 @@ async function applyDefaultConfig() {
     const savedName = await storage.getPref('user-name');
     const savedLocation = await storage.getPref('user-location');
     const savedLanguage = await storage.getPref('user-language');
+    const savedMcpVision = await storage.getPref('mcp-vision-enabled');
 
     // Defaults: Herrbasan, Germany, English
     const name = savedName !== null ? savedName : 'Herrbasan';
     const location = savedLocation !== null ? savedLocation : 'Germany';
     const language = savedLanguage !== null ? savedLanguage : 'English';
+    
+    // Restore MCP vision toggle preference (default: OFF)
+    useVisionAnalysis = savedMcpVision !== null ? savedMcpVision : false;
     
     if (elements.userName) {
         const input = elements.userName.querySelector('input');
@@ -449,6 +483,10 @@ async function loadModels() {
     try {
         const data = await client.getModels();
         models = data.data || [];
+        console.log('[Chat] Models loaded from gateway:', models.length, 'models');
+        if (models.length > 0) {
+            console.log('[Chat] First model example:', JSON.stringify(models[0], null, 2));
+        }
         populateModelSelect();
 
         console.log('[Chat] Loaded models:', models.length);
@@ -757,7 +795,7 @@ function buildMetadataPrefix() {
     return `${header}\n${instruction}`;
 }
 
-function getSystemPromptWithMetadata() {
+function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
     const userPrompt = elements.systemPrompt?.querySelector('textarea')?.value?.trim() || '';
     const metadata = buildMetadataPrefix();
     
@@ -768,7 +806,7 @@ function getSystemPromptWithMetadata() {
     }
 
     // PHASE-3: MCP System Prompt Injection
-    const mcpPrompt = mcpClient.generateToolPrompt();
+    const mcpPrompt = mcpClient.generateToolPrompt(excludedToolPrefixes);
     if (mcpPrompt) {
         prompt += `\n\n${mcpPrompt}`;
     }
@@ -805,28 +843,46 @@ async function sendMessage() {
         updateChatTitle(currentChatId, content);
     }
 
-    // Store images for potential auto-vision before clearing
-    const imagesForAutoVision = [...attachedImages];
-    const shouldAutoCreateVisionSessions = imagesForAutoVision.length > 0 && areVisionToolsAvailable() && useVisionAnalysis;
+    // Check vision capabilities before sending
+    const hasImages = attachedImages.length > 0;
+    const modelSupportsVision = currentModelSupportsVision();
+    const visionToolsAvailable = areVisionToolsAvailable();
+    
+    // Validate: if images attached but no vision support
+    if (hasImages && !modelSupportsVision && !visionToolsAvailable) {
+        nui.components.dialog.alert(
+            'No Vision Support',
+            'The selected model does not support vision, and no MCP vision tools are available. Please remove images or select a vision-capable model.'
+        );
+        return;
+    }
+    
+    // Determine if we should use MCP vision (only when toggle is ON and tools available)
+    const shouldUseMcpVision = hasImages && visionToolsAvailable && useVisionAnalysis;
+    
+    // Store images for MCP vision processing before clearing
+    const imagesForMcpVision = shouldUseMcpVision ? [...attachedImages] : [];
     
     // Clear input and attachments
     editor.setMarkdown('');
     clearAttachments();
-    useVisionAnalysis = false; // Reset for next message
     updateVisionToggleVisibility();
     
     // Render user message
     renderExchange(conversation.getExchange(currentExchangeId));
     
-    // AUTO-VISION: If images attached and vision tools available, create sessions automatically
+    // MCP VISION: If toggle is ON and tools available, create vision sessions BEFORE sending to model
     // This happens AFTER user message is rendered, BEFORE LLM responds
-    
-    if (shouldAutoCreateVisionSessions) {
+    if (shouldUseMcpVision) {
         try {
-            await autoCreateVisionSessions(currentExchangeId, imagesForAutoVision, currentChatId);
+            await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, currentChatId);
         } catch (err) {
-            console.error('[Vision] Auto session creation failed:', err);
-            // Continue with normal flow - LLM might still handle it
+            console.error('[Vision] MCP vision session creation failed:', err);
+            nui.components.dialog.alert(
+                'MCP Vision Error',
+                `Failed to analyze images: ${err.message}. The model may not be able to process them.`
+            );
+            // Continue anyway - model might still handle it if it supports vision
         }
     }
     
@@ -1091,8 +1147,17 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 
     const assistantTimestamp = conversation._formatTimestamp();
     const timestampWithSpace = assistantTimestamp + ' ';
-    conversation.updateAssistantResponse(exchangeId, timestampWithSpace);
-    const systemPrompt = getSystemPromptWithMetadata();
+    
+    // Determine if we should exclude vision tools from system prompt
+    const modelSupportsVision = currentModelSupportsVision();
+    const shouldExcludeVisionTools = modelSupportsVision && !useVisionAnalysis;
+    const excludedToolPrefixes = shouldExcludeVisionTools ? ['vision_'] : [];
+    
+    console.log('[Vision] Model supports vision:', modelSupportsVision, '| MCP Vision toggle:', useVisionAnalysis, '| Excluding vision tools:', shouldExcludeVisionTools);
+    
+    const systemPrompt = getSystemPromptWithMetadata(excludedToolPrefixes);
+    console.log('[Vision] System prompt generated with excluded prefixes:', excludedToolPrefixes);
+    console.log('[Vision] System prompt preview (first 500 chars):', systemPrompt.substring(0, 500));
     // Store system prompt for debugging (included in JSON export)
     conversation.setSystemPrompt(exchangeId, systemPrompt);
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
@@ -1138,9 +1203,34 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         }
 
         // PHASE-3: Pass tools array so LLM knows what it can request
-        const mcpTools = mcpClient.getFormattedToolsForLLM();
-        if (mcpTools.length > 0) {
-            requestBody.tools = mcpTools;
+        // Filter: if MCP Vision is OFF, exclude vision tools from the list
+        const allMcpTools = mcpClient.getFormattedToolsForLLM();
+        console.log('[Vision] All MCP tools count:', allMcpTools.length);
+        if (allMcpTools.length > 0) {
+            // Check if we should filter out vision tools
+            const modelSupportsVision = currentModelSupportsVision();
+            const shouldFilterVisionTools = modelSupportsVision && !useVisionAnalysis;
+            
+            console.log('[Vision] Filtering decision: modelSupportsVision=', modelSupportsVision, '| useVisionAnalysis=', useVisionAnalysis, '| shouldFilter=', shouldFilterVisionTools);
+            
+            if (shouldFilterVisionTools) {
+                // Filter out vision-related tools when model has native vision and MCP Vision is OFF
+                const filteredTools = allMcpTools.filter(tool => {
+                    const toolName = tool.function?.name?.toLowerCase() || '';
+                    const isVision = toolName.includes('vision_');
+                    if (isVision) console.log('[Vision] Filtering OUT tool:', tool.function?.name);
+                    return !isVision;
+                });
+                
+                console.log('[Vision] Filtered tools count:', filteredTools.length);
+                if (filteredTools.length > 0) {
+                    requestBody.tools = filteredTools;
+                }
+            } else {
+                // Include all tools (either MCP Vision is ON, or model doesn't support vision)
+                console.log('[Vision] Including ALL tools');
+                requestBody.tools = allMcpTools;
+            }
         }
 
         // Add image processing if images attached (skip for tool exchanges - they have no user message)
@@ -1232,13 +1322,13 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     break;
                     
                 case 'error':
+                    console.error('[Chat] Received error event:', event.error);
                     // Reconstruct full content with timestamp for proper stripping
                     const errorTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
                     const errorFullContent = errorTsMatch ? errorTsMatch[0] + contentBuffer : contentBuffer;
                     updateAssistantContent(assistantEl, errorFullContent);
                     showError(assistantEl, event.error);
                     conversation.setAssistantError(exchangeId, event.error);
-                    conversation.save();
                     break;
                     
                 case 'aborted':
@@ -1248,7 +1338,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     updateAssistantContent(assistantEl, stripExtraTimestamps(abortFullContent));
                     showError(assistantEl, 'Stopped');
                     conversation.setAssistantError(exchangeId, 'Stopped');
-                    conversation.save();
                     break;
                     
                 case 'done':
@@ -1309,9 +1398,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         }
         
     } catch (error) {
-        console.error('[Chat] Stream error:', error);
-        showError(assistantEl, error.message);
-        conversation.setAssistantError(exchangeId, error.message);
+        console.error('[Chat] Stream error caught in try/catch:', error);
+        const errorMessage = typeof error === 'string' ? error : (error.message || 'Unknown error');
+        showError(assistantEl, errorMessage);
+        conversation.setAssistantError(exchangeId, errorMessage);
     } finally {
         isStreaming = false;
         markChatAsStreaming(chatId, false);
@@ -1745,6 +1835,45 @@ function showPendingToolUI(exchangeId, chatId) {
 
 async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, origUserExchangeId = null) {
     console.log('[Tool Call Intercepted]', parsedObj);
+
+    // Guard: Reject vision tool calls if MCP Vision is disabled
+    const isVisionTool = parsedObj.name.toLowerCase().includes('vision_');
+    const modelSupportsVision = currentModelSupportsVision();
+    if (isVisionTool && modelSupportsVision && !useVisionAnalysis) {
+        console.warn('[Tool Call Blocked] Vision tool called but MCP Vision is disabled:', parsedObj.name);
+        // Treat as error - add error exchange and continue
+        const toolChatId = forcedChatId || currentChatId;
+        const toolConversation = activeConversations.get(toolChatId);
+        const toolExchangeId = await toolConversation.addToolExchange(parsedObj.name, parsedObj.args, origUserExchangeId || originalExchangeId);
+        const exchange = toolConversation.getExchange(toolExchangeId);
+        exchange.tool.status = 'error';
+        exchange.tool.content = 'Vision tools are disabled. The selected model supports native vision - images were sent directly to the model.';
+        toolConversation.save();
+        
+        // Render error UI
+        const toolContainer = getOrCreateContainer(toolChatId);
+        const toolEl = document.createElement('div');
+        toolEl.className = 'chat-message tool';
+        toolEl.dataset.exchangeId = toolExchangeId;
+        toolEl.dataset.mcpToolName = parsedObj.name;
+        toolEl.innerHTML = `
+            <div class="tool-bubble">
+                <div class="message-header tool-header">
+                    <nui-icon name="extension"></nui-icon>
+                    <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
+                    <nui-badge variant="danger" class="tool-status">Blocked</nui-badge>
+                </div>
+                <div class="message-content tool-payload" style="display: block;">
+                    <div class="tool-section-title">Error</div>
+                    <div class="tool-result"><span class="tool-error">Vision tools are disabled. Images were sent directly to the model.</span></div>
+                </div>
+            </div>
+        `;
+        toolContainer?.appendChild(toolEl);
+        
+        // Continue with normal response (don't stream again, just finalize)
+        return;
+    }
 
     // Use forcedChatId if provided (passed from streamResponse which knows the correct chat),
     // otherwise fall back to currentChatId for backward compatibility
@@ -2965,7 +3094,12 @@ function handleFileSelect(e) {
 function currentModelSupportsVision() {
     if (!currentModel) return false;
     const modelConfig = models.find(m => m.id === currentModel);
-    return modelConfig?.capabilities?.vision === true;
+    console.log('[Vision] Model config:', currentModel, '| full config:', modelConfig);
+    console.log('[Vision] capabilities object:', modelConfig?.capabilities);
+    console.log('[Vision] capabilities.vision:', modelConfig?.capabilities?.vision, '| type:', typeof modelConfig?.capabilities?.vision);
+    const supportsVision = modelConfig?.capabilities?.vision === true;
+    console.log('[Vision] supportsVision:', supportsVision);
+    return supportsVision;
 }
 
 function updateVisionToggleVisibility() {
@@ -2974,13 +3108,42 @@ function updateVisionToggleVisibility() {
     
     const hasImages = attachedImages.length > 0;
     const visionToolsAvailable = areVisionToolsAvailable();
+    const modelSupportsVision = currentModelSupportsVision();
     
     // Show toggle when:
-    // - Images are attached
-    // - Vision tools are available from MCP
-    if (hasImages && visionToolsAvailable) {
-        visionToggle.style.display = 'flex';
-        visionToggle.querySelector('input').disabled = false;
+    // - Images are attached AND
+    // - Either vision tools are available OR model supports vision
+    if (hasImages) {
+        if (visionToolsAvailable || modelSupportsVision) {
+            visionToggle.style.display = 'flex';
+            
+            const checkbox = visionToggle.querySelector('nui-checkbox');
+            const input = visionToggle.querySelector('input');
+            
+            if (visionToolsAvailable && modelSupportsVision) {
+                // Both available - user can choose
+                input.disabled = false;
+                checkbox.title = 'OFF: Send images directly to model | ON: Use MCP vision tools to pre-analyze images';
+            } else if (modelSupportsVision) {
+                // Only model supports vision - disable MCP vision (force OFF)
+                input.disabled = true;
+                input.checked = false;
+                useVisionAnalysis = false;
+                checkbox.title = 'Model supports vision - images will be sent directly';
+            } else if (visionToolsAvailable) {
+                // Only MCP vision available - force ON (model can't process images directly)
+                input.disabled = true;
+                input.checked = true;
+                useVisionAnalysis = true;
+                checkbox.title = 'Model does not support vision - MCP vision tools will analyze images';
+            }
+            
+            // Update mode indicator
+            updateVisionModeIndicator();
+        } else {
+            // No vision support at all
+            visionToggle.style.display = 'none';
+        }
     } else {
         visionToggle.style.display = 'none';
     }

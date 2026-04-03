@@ -556,11 +556,27 @@ class MCPClient {
     /**
      * PHASE-1: Tool Invocation Syntax Injection
      * Generates a strict system prompt instructing the LLM how to invoke tools via SSE chunking.
+     * @param {string[]} excludedToolPrefixes - Array of tool name prefixes to exclude (e.g., ['vision_'])
      */
-    generateToolPrompt() {
+    generateToolPrompt(excludedToolPrefixes = []) {
         if (this.availableTools.length === 0) return "";
 
-        const toolDescriptions = this.getFormattedToolsForLLM().map(t => JSON.stringify(t.function)).join('\n');
+        const allTools = this.getFormattedToolsForLLM();
+        
+        // Filter out excluded tools
+        const filteredTools = excludedToolPrefixes.length > 0
+            ? allTools.filter(tool => {
+                const toolName = tool.function?.name?.toLowerCase() || '';
+                return !excludedToolPrefixes.some(prefix => toolName.startsWith(prefix.toLowerCase()));
+            })
+            : allTools;
+
+        if (filteredTools.length === 0) return "";
+
+        const toolNames = filteredTools.map(t => t.function?.name).join(', ');
+        console.log('[MCP] generateToolPrompt: excluded=', excludedToolPrefixes, '| included tools:', toolNames);
+
+        const toolDescriptions = filteredTools.map(t => JSON.stringify(t.function)).join('\n');
         
         return `
 You have access to the following tools:
