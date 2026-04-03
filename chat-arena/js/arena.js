@@ -209,6 +209,7 @@ class Arena {
         this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
         this.maxTurns = options.maxTurns || window.ARENA_CONFIG?.defaultMaxTurns || 10;
         this.autoAdvance = options.autoAdvance !== undefined ? options.autoAdvance : true;
+        this.maxTokens = options.maxTokens || null; // Store maxTokens at arena level for topic hint
 
         this.participantA = null;
         this.participantB = null;
@@ -322,11 +323,20 @@ class Arena {
         });
     }
 
-    setTopic(topic) {
+    setTopic(topic, maxTokens = null) {
+        // Use arena-level maxTokens if not provided
+        const tokensToUse = maxTokens !== null ? maxTokens : this.maxTokens;
+        
+        // Add token budget hint if maxTokens is set
+        let topicContent = `Topic: ${topic}`;
+        if (tokensToUse && tokensToUse >= 1) {
+            topicContent += `\n\n[Response length: Keep your response within approximately ${tokensToUse} tokens. Be concise but complete.]`;
+        }
+        
         this.messages = [{
             role: 'system',
             speaker: 'moderator',
-            content: `Topic: ${topic}`
+            content: topicContent
         }];
         // Auto-save initial topic
         this._saveToStorage();
@@ -557,7 +567,7 @@ class Arena {
             id: this.id,
             sessionId: this.sessionId,
             exportedAt: new Date().toISOString(),
-            topic: this.messages[0]?.content.replace('Topic: ', '') || '',
+            topic: this.messages[0]?.content.replace('Topic: ', '').split('\n\n[')[0] || '', // Extract just the topic text
             participants: [this.participantA?.modelName, this.participantB?.modelName],
             participantNames: [this.participantA?.name, this.participantB?.name],
             settings: {
@@ -565,7 +575,7 @@ class Arena {
                 autoAdvance: this.autoAdvance,
                 systemPromptA: this.participantA?.systemPrompt,
                 systemPromptB: this.participantB?.systemPrompt,
-                maxTokens: this.participantA?.maxTokens // Same for both participants
+                maxTokens: this.maxTokens // Arena-level maxTokens
             },
             contextUsage: this.contextUsage,
             summary: this.summary || null,
@@ -585,7 +595,8 @@ class Arena {
             id: data.id,
             sessionId: data.sessionId,
             maxTurns: data.settings?.maxTurns || data.messages.filter(m => m.speaker !== 'moderator').length,
-            autoAdvance: data.settings?.autoAdvance ?? true
+            autoAdvance: data.settings?.autoAdvance ?? true,
+            maxTokens: data.settings?.maxTokens || null
         });
 
         arena.importJSON(data);
@@ -613,6 +624,32 @@ class Arena {
         if (!data || data.version !== 1) {
             throw new Error('Invalid arena export format');
         }
+
+        if (data.id) {
+            this.id = data.id;
+        }
+        if (data.sessionId) {
+            this.sessionId = data.sessionId;
+        }
+
+        this.messages = data.messages.map(m => ({
+            role: m.role,
+            speaker: m.speaker,
+            content: m.content,
+            isStreaming: false
+        }));
+
+        this.currentTurn = data.messages.filter(m => m.speaker !== 'moderator').length;
+        this.maxTurns = data.settings?.maxTurns || this.currentTurn;
+        this.autoAdvance = data.settings?.autoAdvance ?? true;
+        this.maxTokens = data.settings?.maxTokens || null;
+
+        this.summary = data.summary || null;
+        this.contextUsage = data.contextUsage || {
+            participantA: { used_tokens: 0, window_size: null },
+            participantB: { used_tokens: 0, window_size: null }
+        };
+    }
 
         if (data.id) {
             this.id = data.id;
@@ -1014,6 +1051,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptBInput?.value || systemPromptTemplate) : null,
             maxTokens: parsedMaxTokens
         });
+
+        // Set topic with token budget hint
+        this.arena.setTopic(topic, parsedMaxTokens);
 
         this.arena.setTopic(topic);
 
