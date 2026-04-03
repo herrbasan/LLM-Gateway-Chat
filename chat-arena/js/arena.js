@@ -17,7 +17,8 @@ class Participant {
         this.modelName = options.modelName || '';
         this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
         this.systemPrompt = options.systemPrompt || null;
-        this.maxTokens = options.maxTokens || null; // null = use gateway default
+        // Convert empty/null/undefined to null (gateway default), otherwise parse as integer
+        this.maxTokens = (!options.maxTokens || options.maxTokens === '' || isNaN(parseInt(options.maxTokens))) ? null : parseInt(options.maxTokens);
 
         this.client = new GatewayClient({ 
             baseUrl: this.gatewayUrl,
@@ -34,7 +35,8 @@ class Participant {
     }
 
     setMaxTokens(maxTokens) {
-        this.maxTokens = maxTokens || null;
+        // Convert empty/null/undefined to null (gateway default), otherwise parse as integer
+        this.maxTokens = (!maxTokens || maxTokens === '' || isNaN(parseInt(maxTokens))) ? null : parseInt(maxTokens);
     }
 
     async connect() {
@@ -66,9 +68,12 @@ class Participant {
                 temperature: 0.7
             };
             
-            // Only include maxTokens if explicitly set (null = gateway default)
-            if (this.maxTokens !== null && this.maxTokens !== undefined) {
-                streamParams.maxTokens = parseInt(this.maxTokens);
+            // Only include maxTokens if explicitly set to a valid number (null/undefined/empty = gateway default)
+            if (this.maxTokens !== null && this.maxTokens !== undefined && this.maxTokens !== '') {
+                const parsedMaxTokens = parseInt(this.maxTokens);
+                if (!isNaN(parsedMaxTokens) && parsedMaxTokens >= 1) {
+                    streamParams.maxTokens = parsedMaxTokens;
+                }
             }
             
             const stream = this.client.chatStream(streamParams);
