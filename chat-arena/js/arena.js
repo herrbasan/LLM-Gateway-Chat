@@ -60,7 +60,13 @@ class Participant {
 
     async _startStreaming(messages) {
         try {
-            // Debug: console.log('[Arena] Sending request:', { model: this.modelName, messageCount: messages.length, maxTokens: this.maxTokens });
+            console.log('[Participant] _startStreaming:', {
+                model: this.modelName,
+                messageCount: messages.length,
+                maxTokens: this.maxTokens,
+                maxTokensType: typeof this.maxTokens
+            });
+            
             const streamParams = {
                 model: this.modelName,
                 messages: messages,
@@ -71,10 +77,15 @@ class Participant {
             // Only include maxTokens if explicitly set to a valid number (null/undefined/empty = gateway default)
             if (this.maxTokens !== null && this.maxTokens !== undefined && this.maxTokens !== '') {
                 const parsedMaxTokens = parseInt(this.maxTokens);
+                console.log('[Participant] Adding maxTokens to request:', parsedMaxTokens);
                 if (!isNaN(parsedMaxTokens) && parsedMaxTokens >= 1) {
                     streamParams.maxTokens = parsedMaxTokens;
                 }
+            } else {
+                console.log('[Participant] maxTokens not set, using gateway default');
             }
+            
+            console.log('[Participant] Final streamParams:', JSON.stringify(streamParams, null, 2));
             
             const stream = this.client.chatStream(streamParams);
 
@@ -964,6 +975,15 @@ class ArenaUI {
         const autoAdvance = this.autoAdvanceCheckbox?.checked ?? true;
         const maxTokens = this.maxTokensInput?.value?.trim() || '';
 
+        console.log('[ArenaUI] Starting conversation:', {
+            topic: topic ? 'yes' : 'no',
+            modelA,
+            modelB,
+            maxTurns,
+            maxTokens: maxTokens || '(empty)',
+            autoAdvance
+        });
+
         if (!topic) {
             this._showError('Please enter a topic');
             return;
@@ -1001,6 +1021,8 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
         // Parse maxTokens once - apply to both participants
         const parsedMaxTokens = (maxTokens && !isNaN(parseInt(maxTokens))) ? parseInt(maxTokens) : null;
+        
+        console.log('[ArenaUI] Setting participants with maxTokens:', parsedMaxTokens);
 
         this.arena.setParticipants({
             name: modelAName,
