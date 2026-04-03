@@ -79,18 +79,17 @@ class Participant {
             const stream = this.client.chatStream(streamParams);
 
             stream.on('delta', (data) => {
-                if (data?.choices?.[0]?.delta?.content !== undefined) {
-                    this.responseAccumulator += data.choices[0].delta.content;
+                const content = data?.choices?.[0]?.delta?.content;
+                if (content != null && typeof content === 'string') {
+                    this.responseAccumulator += content;
                 }
             });
 
             stream.on('progress', (data) => {
                 // Some models send content via progress event
-                if (data?.choices?.[0]?.delta?.content) {
-                    this.responseAccumulator += data.choices[0].delta.content;
-                } else if (data?.content) {
-                    // Alternative format
-                    this.responseAccumulator += data.content;
+                const content = data?.choices?.[0]?.delta?.content || data?.content;
+                if (content != null && typeof content === 'string') {
+                    this.responseAccumulator += content;
                 }
             });
 
