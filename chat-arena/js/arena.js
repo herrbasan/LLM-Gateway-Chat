@@ -17,8 +17,6 @@ class Participant {
         this.modelName = options.modelName || '';
         this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
         this.systemPrompt = options.systemPrompt || null;
-        // Convert empty/null/undefined to null (gateway default), otherwise parse as integer
-        this.maxTokens = (!options.maxTokens || options.maxTokens === '' || isNaN(parseInt(options.maxTokens))) ? null : parseInt(options.maxTokens);
 
         this.client = new GatewayClient({ 
             baseUrl: this.gatewayUrl,
@@ -32,11 +30,6 @@ class Participant {
 
     setSystemPrompt(prompt) {
         this.systemPrompt = prompt;
-    }
-
-    setMaxTokens(maxTokens) {
-        // Convert empty/null/undefined to null (gateway default), otherwise parse as integer
-        this.maxTokens = (!maxTokens || maxTokens === '' || isNaN(parseInt(maxTokens))) ? null : parseInt(maxTokens);
     }
 
     async connect() {
@@ -60,22 +53,12 @@ class Participant {
 
     async _startStreaming(messages) {
         try {
-            const streamParams = {
+            const stream = this.client.chatStream({
                 model: this.modelName,
                 messages: messages,
                 stream: true,
                 temperature: 0.7
-            };
-            
-            // Only include maxTokens if explicitly set to a valid number (null/undefined/empty = gateway default)
-            if (this.maxTokens !== null && this.maxTokens !== undefined && this.maxTokens !== '') {
-                const parsedMaxTokens = parseInt(this.maxTokens);
-                if (!isNaN(parsedMaxTokens) && parsedMaxTokens >= 1) {
-                    streamParams.maxTokens = parsedMaxTokens;
-                }
-            }
-            
-            const stream = this.client.chatStream(streamParams);
+            });
 
             stream.on('delta', (data) => {
                 const content = data?.choices?.[0]?.delta?.content;
@@ -209,7 +192,7 @@ class Arena {
         this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
         this.maxTurns = options.maxTurns || window.ARENA_CONFIG?.defaultMaxTurns || 10;
         this.autoAdvance = options.autoAdvance !== undefined ? options.autoAdvance : true;
-        this.maxTokens = options.maxTokens || null; // Store maxTokens at arena level for topic hint
+        this.targetTokens = options.targetTokens || null; // Token target for hint (not enforced as hard limit)
 
         this.participantA = null;
         this.participantB = null;
@@ -239,11 +222,8 @@ class Arena {
     }
 
     setMaxTokens(participant, maxTokens) {
-        if (participant === 'A' && this.participantA) {
-            this.participantA.maxTokens = maxTokens || null;
-        } else if (participant === 'B' && this.participantB) {
-            this.participantB.maxTokens = maxTokens || null;
-        }
+        // Deprecated: maxTokens is now targetTokens (hint only, not enforced)
+        // This method kept for backwards compatibility but does nothing
     }
 
     _generateId() {
@@ -323,14 +303,14 @@ class Arena {
         });
     }
 
-    setTopic(topic, maxTokens = null) {
-        // Use arena-level maxTokens if not provided
-        const tokensToUse = maxTokens !== null ? maxTokens : this.maxTokens;
+    setTopic(topic, targetTokens = null) {
+        // Use arena-level targetTokens if not provided
+        const tokensToUse = targetTokens !== null ? targetTokens : this.targetTokens;
         
-        // Add token budget hint if maxTokens is set
+        // Add token budget hint if targetTokens is set
         let topicContent = `Topic: ${topic}`;
         if (tokensToUse && tokensToUse >= 1) {
-            topicContent += `\n\n[Response length: Keep your response within approximately ${tokensToUse} tokens. Be concise but complete.]`;
+            topicContent += `\n\n[Response length: Aim for approximately ${tokensToUse} tokens. Be concise but complete.]`;
         }
         
         this.messages = [{
@@ -575,7 +555,7 @@ class Arena {
                 autoAdvance: this.autoAdvance,
                 systemPromptA: this.participantA?.systemPrompt,
                 systemPromptB: this.participantB?.systemPrompt,
-                maxTokens: this.maxTokens // Arena-level maxTokens
+                targetTokens: this.targetTokens // Token target hint (not enforced)
             },
             contextUsage: this.contextUsage,
             summary: this.summary || null,
@@ -596,7 +576,7 @@ class Arena {
             sessionId: data.sessionId,
             maxTurns: data.settings?.maxTurns || data.messages.filter(m => m.speaker !== 'moderator').length,
             autoAdvance: data.settings?.autoAdvance ?? true,
-            maxTokens: data.settings?.maxTokens || null
+            targetTokens: data.settings?.targetTokens || null
         });
 
         arena.importJSON(data);
@@ -607,13 +587,11 @@ class Arena {
             arena.setParticipants({
                 name: data.participantNames?.[0] || data.participants[0].split('/').pop(),
                 modelName: data.participants[0],
-                systemPrompt: settings.systemPromptA,
-                maxTokens: settings.maxTokens || null
+                systemPrompt: settings.systemPromptA
             }, {
                 name: data.participantNames?.[1] || data.participants[1].split('/').pop(),
                 modelName: data.participants[1],
-                systemPrompt: settings.systemPromptB,
-                maxTokens: settings.maxTokens || null
+                systemPrompt: settings.systemPromptB
             });
         }
 
@@ -642,7 +620,7 @@ class Arena {
         this.currentTurn = data.messages.filter(m => m.speaker !== 'moderator').length;
         this.maxTurns = data.settings?.maxTurns || this.currentTurn;
         this.autoAdvance = data.settings?.autoAdvance ?? true;
-        this.maxTokens = data.settings?.maxTokens || null;
+        this.targetTokens = data.settings?.targetTokens || null;
 
         this.summary = data.summary || null;
         this.contextUsage = data.contextUsage || {
@@ -1037,23 +1015,23 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         const modelAName = modelA.split('/').pop();
         const modelBName = modelB.split('/').pop();
 
-        // Parse maxTokens once - apply to both participants
-        const parsedMaxTokens = (maxTokens && !isNaN(parseInt(maxTokens))) ? parseInt(maxTokens) : null;
+        // Parse targetTokens - use as hint only, not sent as hard limit
+        const parsedTargetTokens = (maxTokens && !isNaN(parseInt(maxTokens))) ? parseInt(maxTokens) : null;
 
         this.arena.setParticipants({
             name: modelAName,
             modelName: modelA,
-            systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptAInput?.value || systemPromptTemplate) : null,
-            maxTokens: parsedMaxTokens
+            systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptAInput?.value || systemPromptTemplate) : null
+            // Note: maxTokens intentionally NOT passed - we use target hint instead of hard limit
         }, {
             name: modelBName,
             modelName: modelB,
-            systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptBInput?.value || systemPromptTemplate) : null,
-            maxTokens: parsedMaxTokens
+            systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptBInput?.value || systemPromptTemplate) : null
+            // Note: maxTokens intentionally NOT passed - we use target hint instead of hard limit
         });
 
-        // Set topic with token budget hint
-        this.arena.setTopic(topic, parsedMaxTokens);
+        // Set topic with token budget hint (models self-regulate, no hard cutoff)
+        this.arena.setTopic(topic, parsedTargetTokens);
 
         this.arena.setTopic(topic);
 
@@ -1647,9 +1625,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.maxTurnsInput.value = settings.maxTurns;
         }
 
-        // Restore max tokens (same for both participants)
-        if (this.maxTokensInput && settings?.maxTokens) {
-            this.maxTokensInput.value = settings.maxTokens;
+        // Restore target tokens (token hint, not hard limit)
+        if (this.maxTokensInput && settings?.targetTokens) {
+            this.maxTokensInput.value = settings.targetTokens;
         }
 
         // Restore auto-advance
