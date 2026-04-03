@@ -79,9 +79,6 @@
                             <option value="">Loading models...</option>
                         </select>
                     </nui-select>
-                    <nui-input style="margin-top: 0.5rem;">
-                        <input type="number" id="max-tokens-a" min="1" placeholder="Max tokens (empty = gateway default)">
-                    </nui-input>
                 </div>
 
                 <div class="sidebar-section">
@@ -91,8 +88,12 @@
                             <option value="">Loading models...</option>
                         </select>
                     </nui-select>
-                    <nui-input style="margin-top: 0.5rem;">
-                        <input type="number" id="max-tokens-b" min="1" placeholder="Max tokens (empty = gateway default)">
+                </div>
+
+                <div class="sidebar-section">
+                    <label>Max Tokens per Response</label>
+                    <nui-input>
+                        <input type="number" id="max-tokens" min="1" placeholder="Empty = gateway default">
                     </nui-input>
                 </div>
 

@@ -565,8 +565,7 @@ class Arena {
                 autoAdvance: this.autoAdvance,
                 systemPromptA: this.participantA?.systemPrompt,
                 systemPromptB: this.participantB?.systemPrompt,
-                maxTokensA: this.participantA?.maxTokens,
-                maxTokensB: this.participantB?.maxTokens
+                maxTokens: this.participantA?.maxTokens // Same for both participants
             },
             contextUsage: this.contextUsage,
             summary: this.summary || null,
@@ -598,12 +597,12 @@ class Arena {
                 name: data.participantNames?.[0] || data.participants[0].split('/').pop(),
                 modelName: data.participants[0],
                 systemPrompt: settings.systemPromptA,
-                maxTokens: settings.maxTokensA || null
+                maxTokens: settings.maxTokens || null
             }, {
                 name: data.participantNames?.[1] || data.participants[1].split('/').pop(),
                 modelName: data.participants[1],
                 systemPrompt: settings.systemPromptB,
-                maxTokens: settings.maxTokensB || null
+                maxTokens: settings.maxTokens || null
             });
         }
 
@@ -820,8 +819,7 @@ class ArenaUI {
         this.topicInput = document.getElementById('topic-input');
         this.modelASelect = document.getElementById('model-a-select');
         this.modelBSelect = document.getElementById('model-b-select');
-        this.maxTokensAInput = document.getElementById('max-tokens-a');
-        this.maxTokensBInput = document.getElementById('max-tokens-b');
+        this.maxTokensInput = document.getElementById('max-tokens');
         this.roleplayCheckbox = document.getElementById('roleplay-checkbox');
         this.roleplaySection = document.getElementById('roleplay-section');
         this.systemPromptAInput = document.getElementById('system-prompt-a');
@@ -965,8 +963,7 @@ class ArenaUI {
         const modelB = this._getSelectValue(this.modelBSelect);
         const maxTurns = parseInt(this.maxTurnsInput?.value) || 10;
         const autoAdvance = this.autoAdvanceCheckbox?.checked ?? true;
-        const maxTokensA = this.maxTokensAInput?.value?.trim() || '';
-        const maxTokensB = this.maxTokensBInput?.value?.trim() || '';
+        const maxTokens = this.maxTokensInput?.value?.trim() || '';
 
         if (!topic) {
             this._showError('Please enter a topic');
@@ -1003,16 +1000,19 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         const modelAName = modelA.split('/').pop();
         const modelBName = modelB.split('/').pop();
 
+        // Parse maxTokens once - apply to both participants
+        const parsedMaxTokens = (maxTokens && !isNaN(parseInt(maxTokens))) ? parseInt(maxTokens) : null;
+
         this.arena.setParticipants({
             name: modelAName,
             modelName: modelA,
             systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptAInput?.value || systemPromptTemplate) : null,
-            maxTokens: maxTokensA ? parseInt(maxTokensA) : null
+            maxTokens: parsedMaxTokens
         }, {
             name: modelBName,
             modelName: modelB,
             systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptBInput?.value || systemPromptTemplate) : null,
-            maxTokens: maxTokensB ? parseInt(maxTokensB) : null
+            maxTokens: parsedMaxTokens
         });
 
         this.arena.setTopic(topic);
@@ -1507,8 +1507,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         if (this.topicInput) this.topicInput.value = config.defaultTopic || '';
         if (this.maxTurnsInput) this.maxTurnsInput.value = config.defaultMaxTurns || '10';
         if (this.autoAdvanceCheckbox) this.autoAdvanceCheckbox.checked = config.defaultAutoAdvance !== false;
-        if (this.maxTokensAInput) this.maxTokensAInput.value = '';
-        if (this.maxTokensBInput) this.maxTokensBInput.value = '';
+        if (this.maxTokensInput) this.maxTokensInput.value = '';
         
         // Reset roleplay
         if (this.roleplayCheckbox) this.roleplayCheckbox.checked = false;
@@ -1608,12 +1607,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.maxTurnsInput.value = settings.maxTurns;
         }
 
-        // Restore max tokens
-        if (this.maxTokensAInput && settings?.maxTokensA) {
-            this.maxTokensAInput.value = settings.maxTokensA;
-        }
-        if (this.maxTokensBInput && settings?.maxTokensB) {
-            this.maxTokensBInput.value = settings.maxTokensB;
+        // Restore max tokens (same for both participants)
+        if (this.maxTokensInput && settings?.maxTokens) {
+            this.maxTokensInput.value = settings.maxTokens;
         }
 
         // Restore auto-advance
