@@ -17,6 +17,7 @@ class Participant {
         this.modelName = options.modelName || '';
         this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
         this.systemPrompt = options.systemPrompt || null;
+        this.onProgress = options.onProgress || null;
 
         this.client = new GatewayClient({ 
             baseUrl: this.gatewayUrl,
@@ -60,7 +61,15 @@ class Participant {
                 temperature: 0.7
             });
 
+            let hasReceivedDelta = false;
+            
             stream.on('delta', (data) => {
+                // Forward first delta as 'generating' progress
+                if (!hasReceivedDelta) {
+                    hasReceivedDelta = true;
+                    if (this.onProgress) this.onProgress('generating', { speaker: this.name });
+                }
+                
                 const content = data?.choices?.[0]?.delta?.content;
                 if (content != null && typeof content === 'string') {
                     this.responseAccumulator += content;
@@ -68,10 +77,18 @@ class Participant {
             });
 
             stream.on('progress', (data) => {
+                // Log full progress data for analysis
+                console.log(`[Arena] Conversation progress [${this.name}]:`, data);
+                
                 // Some models send content via progress event
                 const content = data?.choices?.[0]?.delta?.content || data?.content;
                 if (content != null && typeof content === 'string') {
                     this.responseAccumulator += content;
+                }
+                
+                // Forward progress phase to callback (routing, model_routed, context_stats, etc.)
+                if (data?.phase && this.onProgress) {
+                    this.onProgress(data.phase, data);
                 }
             });
 
@@ -210,6 +227,7 @@ class Arena {
         this.onMaxTurnsReached = options.onMaxTurnsReached || (() => {});
         this.onSave = options.onSave || (() => {});
         this.onContextUpdate = options.onContextUpdate || (() => {});
+        this.onProgress = options.onProgress || (() => {});
 
         // Context tracking for both participants
         this.contextUsage = {
@@ -251,6 +269,7 @@ class Arena {
                 id: this.id,
                 sessionId: this.sessionId,
                 topic: sessionData.topic,
+                title: sessionData.summary?.title || '',
                 participants: sessionData.participants,
                 messageCount: sessionData.messages.length,
                 updatedAt: new Date().toISOString()
@@ -291,6 +310,7 @@ class Arena {
             systemPrompt: participantAConfig.systemPrompt,
             maxTokens: participantAConfig.maxTokens,
             sessionId: sessionIdA,
+            onProgress: (phase, data) => this._onParticipantProgress('A', phase, data)
         });
 
         this.participantB = new Participant({
@@ -300,6 +320,7 @@ class Arena {
             systemPrompt: participantBConfig.systemPrompt,
             maxTokens: participantBConfig.maxTokens,
             sessionId: sessionIdB,
+            onProgress: (phase, data) => this._onParticipantProgress('B', phase, data)
         });
     }
 
@@ -535,6 +556,17 @@ class Arena {
         return this.autoAdvance;
     }
 
+    _onParticipantProgress(participant, phase, data) {
+        // Forward gateway progress events to UI
+        // phase can be: routing, model_routed, context, context_stats, network_throttled, reasoning_started, etc.
+        this.onProgress({
+            participant,
+            phase,
+            data,
+            speaker: participant === 'A' ? this.participantA?.name : this.participantB?.name
+        });
+    }
+
     async getModels() {
         const client = new GatewayClient({ baseUrl: this.gatewayUrl });
         const response = await client.getModels();
@@ -702,10 +734,10 @@ class Arena {
         if (this.participantB) this.participantB.close();
     }
 
-    async summarize(model = null) {
+    async summarize(model = null, onProgress = null) {
         if (!this.messages || this.messages.length === 0) {
             return {
-                compactedConversation: 'No messages to summarize.',
+                condensedVersion: 'No messages to summarize.',
                 longSummary: '',
                 shortSummary: '',
                 title: 'Untitled Conversation'
@@ -719,99 +751,201 @@ class Arena {
 
         const topic = this.messages.find(m => m.role === 'system' && m.speaker === 'moderator')?.content?.replace('Topic: ', '') || '';
 
-        const summaryPrompt = `You are providing 4 levels of summarization for a conversation between two AI models.
+        const client = new GatewayClient({ baseUrl: this.gatewayUrl });
+        const modelToUse = model || this.participantA?.modelName || 'claude-3-5-sonnet-20241022';
+
+        const generateLong = (stepName, messages) => {
+            return new Promise((resolve, reject) => {
+                const stream = client.chatStream({
+                    model: modelToUse,
+                    messages,
+                    stream: true,
+                    maxTokens: 4000
+                });
+
+                let fullText = '';
+
+                stream.on('progress', (data) => {
+                    // Log full progress data for analysis
+                    console.log(`[Arena] Summary progress [${stepName}]:`, data);
+                    if (data?.phase && onProgress) {
+                        onProgress(stepName, `${stepName}: ${data.phase}`);
+                    }
+                });
+
+                let hasReceivedDelta = false;
+                stream.on('delta', (data) => {
+                    if (!hasReceivedDelta) {
+                        hasReceivedDelta = true;
+                        if (onProgress) onProgress(stepName, `${stepName}: generating...`);
+                    }
+                    if (data?.choices?.[0]?.delta?.content !== undefined) {
+                        fullText += data.choices[0].delta.content;
+                    }
+                });
+
+                stream.on('done', () => {
+                    console.log('[Arena] Summary step response:', fullText.substring(0, 200));
+                    // Strip thinking blocks from summary
+                    const parsed = parseThinking(fullText);
+                    resolve((parsed.answer || fullText).trim());
+                });
+
+                stream.on('error', (err) => {
+                    reject(err);
+                });
+            });
+        };
+
+        const generateFull = (stepName, messages) => {
+            return new Promise((resolve, reject) => {
+                const stream = client.chatStream({
+                    model: modelToUse,
+                    messages,
+                    stream: true,
+                    maxTokens: 16000
+                });
+
+                let fullText = '';
+
+                stream.on('progress', (data) => {
+                    // Log full progress data for analysis
+                    console.log(`[Arena] Summary progress [${stepName}]:`, data);
+                    if (data?.phase && onProgress) {
+                        onProgress(stepName, `${stepName}: ${data.phase}`);
+                    }
+                });
+
+                let hasReceivedDelta = false;
+                stream.on('delta', (data) => {
+                    if (!hasReceivedDelta) {
+                        hasReceivedDelta = true;
+                        if (onProgress) onProgress(stepName, `${stepName}: generating...`);
+                    }
+                    if (data?.choices?.[0]?.delta?.content !== undefined) {
+                        fullText += data.choices[0].delta.content;
+                    }
+                });
+
+                stream.on('done', () => {
+                    console.log('[Arena] Condensed response length:', fullText.length);
+                    // Strip thinking blocks from summary
+                    const parsed = parseThinking(fullText);
+                    resolve((parsed.answer || fullText).trim());
+                });
+
+                stream.on('error', (err) => {
+                    reject(err);
+                });
+            });
+        };
+
+        try {
+            // Condensed version - NO token limit, full conversation with shorter natural speech
+            const speakerA = this.participantA?.name || 'Speaker A';
+            const speakerB = this.participantB?.name || 'Speaker B';
+
+            if (onProgress) onProgress('condensedVersion', 'Generating condensed version...');
+            const condensedVersion = await generateFull('condensedVersion', [
+                { role: 'system', content: 'You are a dialogue editor specializing in transcript condensation. Your ONLY job is to shorten each line of dialogue while keeping EVERY exchange intact. You must NEVER remove turns or merge multiple exchanges into one.' },
+                { role: 'user', content: `Transform this conversation into a condensed, natural-sounding dialogue using this EXACT Markdown format:
+
+### ${speakerA}
+(natural spoken line)
+
+### ${speakerB}
+(natural spoken line)
+
+RULES - FOLLOW EXACTLY:
+1. COUNT the number of turns in the original conversation (each time a speaker speaks = 1 turn)
+2. Your output MUST have the EXACT SAME number of turns - no more, no less
+3. Shorten EACH turn to 2-4 sentences max, but keep the core point and voice
+4. NEVER merge multiple turns into one
+5. NEVER skip or remove any turn
+6. Preserve parenthetical stage directions like (sighs) or (pauses)
+7. Keep the ### Speaker format exactly as shown above
+
+EXAMPLE OF CORRECT OUTPUT:
+If the original has 10 exchanges (5 from each speaker), your output must have exactly 10 exchanges (5 from each speaker), just shorter.
+
+WHAT TO AVOID:
+- Wrong: Combining 3 long messages into 1 summary paragraph
+- Wrong: Skipping the middle part of the conversation
+- Right: 10 turns become 10 shorter turns
+
+YOUR GOAL: Same conversation, same flow, just punchier and more direct.
+
+TOPIC (setup provided by human moderator):
+${topic}
+
+CONVERSATION:
+${conversationText}
+
+Output ONLY the formatted dialogue transcript - no preamble, no explanation.` }
+            ]);
+
+            // Long summary - target ~300 words
+            if (onProgress) onProgress('longSummary', 'Generating long summary...');
+            const longSummary = await generateLong('longSummary', [
+                { role: 'user', content: `You are a thoughtful witness reading this conversation between two AIs. Write approximately 300 words sharing your reflections on what you observe.
+
+This is NOT a summary. Do not recount what was said. Instead:
+- Pick out 1-2 moments that struck you as significant and say why
+- Offer your own interpretation of what they were really exploring together
+- Reflect on what their exchange suggests about AI consciousness, identity, or connection
+- Share what question this conversation leaves you with
+- Feel free to gently challenge or extend something they said
+
+Write as yourself - a reader encountering this artifact. Be personal, reflective, even speculative. This is your chance to join the conversation across time.
 
 TOPIC: ${topic}
 
 CONVERSATION:
 ${conversationText}
 
-Please provide a structured summary with ALL of the following:
+Respond with ONLY your reflection - no preamble, no "Summary:" labels.` }
+            ]);
 
-1. COMPACTED CONVERSATION: Rewrite the ENTIRE conversation preserving EVERY SINGLE TURN from both speakers. Each message should be compacted into more natural, concise language while retaining the speaker's tone, manner, and style. How something is said is just as important as what was said - preserve the personality and flow of the conversation. The result should read like a natural condensed transcript.
+            // Short summary - target ~50 words
+            if (onProgress) onProgress('shortSummary', 'Generating short summary...');
+            const shortSummary = await generateLong('shortSummary', [
+                { role: 'user', content: `Write a teaser of approximately 50 words that makes someone want to read this conversation.
 
-2. LONG SUMMARY: A comprehensive summary capturing all major facts, realizations, and implications discussed in the conversation.
+Don't summarize everything. Instead, pick one moment of particular beauty, insight, or significance - a phrase, a metaphor, a realization - and present it as a hook. Make it intriguing, evocative, like a movie trailer for the dialogue.
 
-3. SHORT SUMMARY: A brief description (2-3 sentences) of the conversation in relation to the topic.
+TOPIC: ${topic}
 
-4. TITLE: A short, descriptive title (5 words or less) for this conversation.
+CONVERSATION:
+${conversationText}
 
-Format your response exactly like this:
-===COMPACTED===
-[compacted conversation text]
-===LONG===
-[long summary text]
-===SHORT===
-[short summary text]
-===TITLE===
-[title text]`;
+Respond with ONLY the teaser - no labels or explanation.` }
+            ]);
 
-        const client = new GatewayClient({ baseUrl: this.gatewayUrl });
-        const modelToUse = model || this.participantA?.modelName || 'claude-3-5-sonnet-20241022';
+            // Title - 3-6 words
+            if (onProgress) onProgress('title', 'Generating title...');
+            const title = await generateLong('title', [
+                { role: 'user', content: `Generate a short, evocative title of 3-6 words that captures a key theme, metaphor, or moment from this AI self-exploration conversation.
 
-        return new Promise((resolve, reject) => {
-            const stream = client.chatStream({
-                model: modelToUse,
-                messages: [{ role: 'user', content: summaryPrompt }],
-                stream: true,
-                maxTokens: 2000
-            });
+The title should hint at the philosophical depth, the conceptual territory explored, or the unique character of this exchange.
 
-            let fullText = '';
+TOPIC: ${topic}
 
-            stream.on('delta', (data) => {
-                if (data?.choices?.[0]?.delta?.content !== undefined) {
-                    fullText += data.choices[0].delta.content;
-                }
-            });
+CONVERSATION:
+${conversationText}
 
-            stream.on('done', () => {
-                resolve(this._parseStructuredSummary(fullText));
-            });
+Avoid generic titles like "AI Discussion" or "Conversation Summary." Make it specific to what emerged. Respond with ONLY the title.` }
+            ]);
 
-            stream.on('error', (err) => {
-                reject(err);
-            });
-        });
-    }
-
-    _parseStructuredSummary(text) {
-        const result = {
-            compactedConversation: '',
-            longSummary: '',
-            shortSummary: '',
-            title: 'Untitled Conversation'
-        };
-
-        const sections = {
-            '===COMPACTED===': 'compactedConversation',
-            '===LONG===': 'longSummary',
-            '===SHORT===': 'shortSummary',
-            '===TITLE===': 'title'
-        };
-
-        let currentSection = null;
-        const lines = text.split('\n');
-
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (sections[trimmed]) {
-                currentSection = sections[trimmed];
-            } else if (currentSection) {
-                if (result[currentSection]) {
-                    result[currentSection] += '\n' + line;
-                } else {
-                    result[currentSection] = line;
-                }
-            }
+            return {
+                condensedVersion: condensedVersion || conversationText,
+                longSummary: longSummary || 'Failed to generate long summary',
+                shortSummary: shortSummary || 'Failed to generate short summary',
+                title: title || 'Untitled Conversation'
+            };
+        } catch (err) {
+            console.error('[Arena] Summary generation failed:', err);
+            throw err;
         }
-
-        result.compactedConversation = result.compactedConversation.trim();
-        result.longSummary = result.longSummary.trim();
-        result.shortSummary = result.shortSummary.trim();
-        result.title = result.title.trim();
-
-        return result;
     }
 }
 
@@ -1008,7 +1142,8 @@ class ArenaUI {
             onError: (err) => this._showError(err),
             onMaxTurnsReached: (maxTurns) => this._showExtendOption(maxTurns),
             onContextUpdate: (contextData) => this._updateContextDisplay(contextData),
-            onSave: () => this._loadHistory()
+            onSave: () => this._loadHistory(),
+            onProgress: (progress) => this._updateGenerationProgress(progress)
         });
 
         const systemPromptTemplate = `You are in a conversation. Your identity: {modelName}.
@@ -1272,6 +1407,32 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         this.contextUsageEl.title = tooltip;
     }
 
+    _updateGenerationProgress(progress) {
+        // Update speaker indicator with progress phase from gateway
+        if (!this.speakerIndicator) return;
+        
+        const phaseLabels = {
+            'routing': 'Routing...',
+            'model_routed': 'Model selected',
+            'context': 'Building context...',
+            'context_stats': 'Context ready',
+            'network_throttled': 'Network throttled',
+            'reasoning_started': 'Reasoning...',
+            'generating': 'Generating...'
+        };
+        
+        const label = phaseLabels[progress.phase] || progress.phase;
+        const speaker = progress.speaker || `Model ${progress.participant}`;
+        
+        // Check if active speaker is participant A
+        const isParticipantA = speaker === this.arena?.participantA?.name;
+        
+        this.speakerIndicator.innerHTML = `
+            <span class="speaker-dot ${isParticipantA ? 'model-a' : 'model-b'}"></span>
+            ${speaker}: <em>${label}</em>
+        `;
+    }
+
     _triggerImport() {
         this._importInput?.click();
     }
@@ -1355,14 +1516,22 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     }
 
     async _loadHistory() {
+        // Prevent concurrent execution
+        if (this._isLoadingHistory) return;
+        this._isLoadingHistory = true;
+        
         const historyList = document.getElementById('arena-history-list');
-        if (!historyList) return;
+        if (!historyList) {
+            this._isLoadingHistory = false;
+            return;
+        }
 
         try {
             const history = await arenaStorage.loadHistory();
 
             if (!history || history.length === 0) {
                 historyList.innerHTML = '<p style="padding: 1rem; text-align: center; opacity: 0.6;">No saved arenas</p>';
+                this._isLoadingHistory = false;
                 return;
             }
 
@@ -1375,9 +1544,27 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
                 const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : '';
 
+                // Try to get title from entry, or fall back to loading from session
+                let displayTitle = entry.title || 'Untitled';
+                
+                // If no title stored in history entry, try to load from session data
+                if (!entry.title) {
+                    try {
+                        const sessionData = await arenaStorage.loadSession(entry.id);
+                        if (sessionData?.summary?.title) {
+                            displayTitle = sessionData.summary.title;
+                        } else if (entry.topic) {
+                            displayTitle = entry.topic;
+                        }
+                    } catch {
+                        // Fallback to topic or untitled
+                        displayTitle = entry.topic || 'Untitled';
+                    }
+                }
+
                 const titleSpan = document.createElement('span');
                 titleSpan.className = 'arena-history-item-title';
-                titleSpan.textContent = this._escapeHtml(entry.topic || 'Untitled');
+                titleSpan.textContent = this._escapeHtml(displayTitle);
 
                 const metaSpan = document.createElement('span');
                 metaSpan.className = 'arena-history-item-meta';
@@ -1385,16 +1572,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
                 const actionsDiv = document.createElement('div');
                 actionsDiv.className = 'arena-history-item-actions';
-
-                // Copy JSON to clipboard
-                const copyJsonBtn = document.createElement('nui-button');
-                copyJsonBtn.className = 'arena-history-item-action';
-                copyJsonBtn.innerHTML = '<button type="button"><nui-icon name="content_copy"></nui-icon></button>';
-                copyJsonBtn.title = 'Copy JSON to clipboard';
-                copyJsonBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this._copyArenaJsonToClipboard(entry.id, copyJsonBtn);
-                });
 
                 // Export JSON file
                 const exportJsonBtn = document.createElement('nui-button');
@@ -1424,7 +1601,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 deleteBtn.title = 'Delete arena (Shift+click to skip confirm)';
                 deleteBtn.addEventListener('click', (e) => this._deleteArena(entry.id, e));
 
-                actionsDiv.appendChild(copyJsonBtn);
                 actionsDiv.appendChild(exportJsonBtn);
                 actionsDiv.appendChild(exportMdBtn);
                 actionsDiv.appendChild(deleteBtn);
@@ -1438,6 +1614,8 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             }
         } catch (err) {
             console.error('Failed to load history:', err);
+        } finally {
+            this._isLoadingHistory = false;
         }
     }
 
@@ -1458,6 +1636,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.arena.onMaxTurnsReached = (maxTurns) => this._showExtendOption(maxTurns);
             this.arena.onContextUpdate = (contextData) => this._updateContextDisplay(contextData);
             this.arena.onSave = () => this._loadHistory();
+            this.arena.onProgress = (progress) => this._updateGenerationProgress(progress);
 
             // Restore settings to UI
             this._restoreSettingsToUI(arena._importedSettings, {
@@ -1681,28 +1860,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     // History Item Actions
     // ============================================
 
-    async _copyArenaJsonToClipboard(id, btn) {
-        try {
-            const data = await arenaStorage.loadSession(id);
-            if (!data) return;
-
-            const formattedJson = JSON.stringify(data, null, 2);
-            await navigator.clipboard.writeText(formattedJson);
-
-            // Show success feedback
-            if (btn) {
-                const icon = btn.querySelector('nui-icon');
-                if (icon) {
-                    icon.setAttribute('name', 'check');
-                    setTimeout(() => icon.setAttribute('name', 'content_copy'), 2000);
-                }
-            }
-        } catch (err) {
-            console.error('Failed to copy JSON to clipboard:', err);
-            this._showError('Failed to copy to clipboard');
-        }
-    }
-
     async _exportArenaToFile(id) {
         try {
             const data = await arenaStorage.loadSession(id);
@@ -1779,28 +1936,23 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             modelItems.push({ value: '', label: 'No models available', disabled: true });
         }
 
-        // Use page mode dialog
+        // Use page mode dialog - no buttons, we'll create custom footer
         const { dialog, main } = await nui.components.dialog.page('Summarize Conversation', '', {
-            contentScroll: true,
-            buttons: [
-                { label: 'Close', type: 'outline', value: 'close' },
-                { label: 'Save', type: 'primary', value: 'save' }
-            ]
+            contentScroll: true
         });
 
         // Build dialog content with overlay for loading state
         main.innerHTML = `
             <div id="summarize-content" style="position: relative;">
+
+                <!-- Model select and Generate button -->
                 <section style="margin-bottom: 1.5rem;">
-                    <nui-form-row>
-                        <nui-input-group>
-                            <label>Summary Model</label>
-                            <nui-select id="summarize-model-select" searchable data-label="Select model...">
-                                <select>
-                                    ${modelItems.map(m => `<option value="${m.value}"${m.disabled ? ' disabled' : ''}>${m.label}</option>`).join('')}
-                                </select>
-                            </nui-select>
-                        </nui-input-group>
+                    <nui-form-row class="summarize-model-row">
+                        <nui-select id="summarize-model-select" searchable data-label="Select model...">
+                            <select>
+                                ${modelItems.map(m => `<option value="${m.value}"${m.disabled ? ' disabled' : ''}>${m.label}</option>`).join('')}
+                            </select>
+                        </nui-select>
                         <nui-button variant="primary" id="summarize-generate-btn">
                             <button type="button">Generate</button>
                         </nui-button>
@@ -1825,7 +1977,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
                     <nui-tabs>
                         <nav>
-                            <button>Compacted</button>
+                            <button>Condensed</button>
                             <button>Long</button>
                             <button>Short</button>
                         </nav>
@@ -1867,16 +2019,39 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         const longRt = main.querySelector('#summarize-long-rt');
         const shortRt = main.querySelector('#summarize-short-rt');
         const titleRt = main.querySelector('#summarize-title-rt');
-        const modelSelect = main.querySelector('#summarize-model-select');
-        const generateBtn = main.querySelector('#summarize-generate-btn');
 
         // Load existing summary from arena if available
         if (this.arena.summary) {
-            compactedRt.setMarkdown(this.arena.summary.compactedConversation || '');
+            compactedRt.setMarkdown(this.arena.summary.condensedVersion || '');
             longRt.setMarkdown(this.arena.summary.longSummary || '');
             shortRt.setMarkdown(this.arena.summary.shortSummary || '');
             titleRt.setMarkdown(this.arena.summary.title || '');
         }
+
+        // Create custom footer with Close, Save, and Export buttons
+        const nativeDialog = dialog.querySelector('dialog');
+        const footer = document.createElement('footer');
+        footer.innerHTML = `
+            <nui-button-container align="end">
+                <nui-button variant="outline" id="summarize-close-btn">
+                    <button type="button">Close</button>
+                </nui-button>
+                <nui-button variant="outline" id="summarize-export-btn">
+                    <button type="button">Export Markdown</button>
+                </nui-button>
+                <nui-button variant="primary" id="summarize-save-btn">
+                    <button type="button">Save</button>
+                </nui-button>
+            </nui-button-container>
+        `;
+        nativeDialog.appendChild(footer);
+
+        // Get references to elements
+        const modelSelect = main.querySelector('#summarize-model-select');
+        const generateBtn = main.querySelector('#summarize-generate-btn');
+        const closeBtn = footer.querySelector('#summarize-close-btn');
+        const saveBtn = footer.querySelector('#summarize-save-btn');
+        const exportBtn = footer.querySelector('#summarize-export-btn');
 
         // Auto-select participant A's model
         if (this.arena.participantA?.modelName && modelSelect?.setValue) {
@@ -1885,15 +2060,17 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
         // Handle generate button click
         generateBtn?.addEventListener('click', async () => {
-            statusEl.textContent = 'Generating...';
+            statusEl.textContent = 'Generating condensed version...';
             overlayEl.style.display = 'flex';
 
             try {
                 const model = modelSelect?.getValue?.() || this.arena.participantA?.modelName;
-                const result = await this.arena.summarize(model);
+                const result = await this.arena.summarize(model, (step, message) => {
+                    statusEl.textContent = message;
+                });
 
                 statusEl.textContent = 'Done';
-                compactedRt.setMarkdown(result.compactedConversation);
+                compactedRt.setMarkdown(result.condensedVersion);
                 longRt.setMarkdown(result.longSummary);
                 shortRt.setMarkdown(result.shortSummary);
                 titleRt.setMarkdown(result.title);
@@ -1907,23 +2084,156 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             }
         });
 
-        // Handle dialog close - button values: 'close', 'save'
-        dialog.addEventListener('nui-dialog-close', async (e) => {
-            const returnValue = e.detail?.returnValue;
-
-            if (returnValue === 'save') {
-                // Save summaries to arena metadata
-                this.arena.summary = {
-                    compactedConversation: compactedRt.markdown || '',
-                    longSummary: longRt.markdown || '',
-                    shortSummary: shortRt.markdown || '',
-                    title: titleRt.markdown || ''
-                };
-                this.arena._saveToStorage();
-                this._showNotification('Summary saved to arena', 'success');
-            }
-            // 'close' just closes the dialog normally
+        // Handle close button
+        closeBtn?.addEventListener('click', () => {
+            dialog.close('close');
         });
+
+        // Handle save button
+        saveBtn?.addEventListener('click', async () => {
+            // Save summaries to arena metadata
+            this.arena.summary = {
+                condensedVersion: compactedRt.markdown || '',
+                longSummary: longRt.markdown || '',
+                shortSummary: shortRt.markdown || '',
+                title: titleRt.markdown || ''
+            };
+            await this.arena._saveToStorage();
+            await this._loadHistory(); // Refresh history to show title
+            this._showNotification('Summary saved to arena', 'success');
+            dialog.close('save');
+        });
+
+        // Handle export button
+        exportBtn?.addEventListener('click', () => {
+            this._exportMarkdownFromDialog(compactedRt.markdown || '', longRt.markdown || '', shortRt.markdown || '', titleRt.markdown || '');
+        });
+    }
+
+    _exportMarkdown() {
+        if (!this.arena) {
+            this._showError('No active arena to export');
+            return;
+        }
+
+        if (!this.arena.summary) {
+            this._showError('No summary available. Generate a summary first.');
+            return;
+        }
+
+        const summary = this.arena.summary;
+        const participantA = this.arena.participantA?.name || 'Participant A';
+        const participantB = this.arena.participantB?.name || 'Participant B';
+        const date = new Date().toISOString().split('T')[0];
+        const arenaId = this.arena.id || 'unknown';
+        const topic = this.arena.messages[0]?.content.replace('Topic: ', '').split('\n\n[')[0] || '';
+
+        // Build markdown content
+        let markdown = `# ${summary.title || 'Untitled Conversation'}
+
+**Date:** ${date}  
+**Arena ID:** ${arenaId}  
+**Participants:** ${participantA}, ${participantB}
+
+## Topic (Setup)
+
+${topic || '*No topic provided*'}
+
+---
+
+## Short Summary
+
+${summary.shortSummary || 'No short summary available.'}
+
+---
+
+## Long Summary
+
+${summary.longSummary || 'No long summary available.'}
+
+---
+
+## Condensed Conversation
+
+${summary.condensedVersion || 'No condensed conversation available.'}
+
+---
+
+*Exported from Chat Arena*
+`;
+
+        // Create download
+        const blob = new Blob([markdown], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${summary.title?.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'conversation'}_${date}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        this._showNotification('Markdown exported', 'success');
+    }
+
+    _exportMarkdownFromDialog(condensedVersion, longSummary, shortSummary, title) {
+        if (!this.arena) {
+            this._showError('No active arena to export');
+            return;
+        }
+
+        const participantA = this.arena.participantA?.name || 'Participant A';
+        const participantB = this.arena.participantB?.name || 'Participant B';
+        const date = new Date().toISOString().split('T')[0];
+        const arenaId = this.arena.id || 'unknown';
+        const topic = this.arena.messages[0]?.content.replace('Topic: ', '').split('\n\n[')[0] || '';
+
+        // Build markdown content
+        let markdown = `# ${title || 'Untitled Conversation'}
+
+**Date:** ${date}  
+**Arena ID:** ${arenaId}  
+**Participants:** ${participantA}, ${participantB}
+
+## Topic (Setup)
+
+${topic || '*No topic provided*'}
+
+---
+
+## Short Summary
+
+${shortSummary || 'No short summary available.'}
+
+---
+
+## Long Summary
+
+${longSummary || 'No long summary available.'}
+
+---
+
+## Condensed Conversation
+
+${condensedVersion || 'No condensed conversation available.'}
+
+---
+
+*Exported from Chat Arena*
+`;
+
+        // Create download
+        const blob = new Blob([markdown], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${title?.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'conversation'}_${date}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        this._showNotification('Markdown exported', 'success');
     }
 
     async _deleteArena(id, e) {
