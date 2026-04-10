@@ -214,7 +214,6 @@ Speak naturally as if in a thoughtful conversation.</textarea>
 
     <!-- NUI Library -->
     <script src="../nui_wc2/NUI/nui.js" type="module"></script>
-    <script src="../nui_wc2/NUI/lib/modules/nui-markdown.js" type="module"></script>
     <script src="../nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
 
     <!-- Arena App -->
@@ -232,11 +231,11 @@ Speak naturally as if in a thoughtful conversation.</textarea>
             switch (action) {
                 case 'toggle-sidebar':
                     e.preventDefault();
-                    if (app) app.toggleSideNav();
+                    if (app) app.toggleSidebar();
                     break;
                 case 'toggle-sidebar:right':
                     e.preventDefault();
-                    if (app) app.toggleSideNav('right');
+                    if (app) app.toggleSidebar('right');
                     break;
                 case 'toggle-theme':
                     e.preventDefault();

@@ -1197,7 +1197,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
         // Hide sidebar on mobile
         const app = document.querySelector('nui-app');
-        if (app) app.toggleSideNav('right', false);
+        if (app) app.toggleSidebar('right', false);
 
         // Add topic message
         this._renderMessage({

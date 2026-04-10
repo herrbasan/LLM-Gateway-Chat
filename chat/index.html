@@ -270,7 +270,6 @@
     <script src="../nui_wc2/NUI/nui.js" type="module"></script>
     <script src="../nui_wc2/NUI/lib/modules/nui-lightbox.js" type="module"></script>
     <script src="../nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
-    <script src="../nui_wc2/NUI/lib/modules/nui-markdown.js" type="module"></script>
     <script src="js/chat.js" type="module"></script>
     <script>
         // NUI specific interactions for app shell
@@ -284,11 +283,11 @@
             switch (action) {
                 case 'toggle-sidebar':
                     e.preventDefault();
-                    if(app) app.toggleSideNav();
+                    if(app) app.toggleSidebar();
                     break;
                 case 'toggle-sidebar:right':
                     e.preventDefault();
-                    if(app) app.toggleSideNav('right');
+                    if(app) app.toggleSidebar('right');
                     break;
             }
         });

@@ -1079,7 +1079,7 @@ async function autoCreateVisionSessions(userExchangeId, images) {
             toolEl.querySelector('.tool-status').setAttribute('variant', 'success');
             toolEl.querySelector('.tool-status').innerHTML = 'Success';
             toolEl.querySelector('.tool-notifications').style.display = 'none';
-            toolEl.querySelector('.tool-result').innerHTML = resultText;
+            toolEl.querySelector('.tool-result').textContent = resultText;
             
             console.log(`[AutoVision] Created session for image ${i + 1}:`, resultText);
             
@@ -1463,8 +1463,8 @@ function renderExchange(exchange) {
         }
 
         let resultHtml = '';
-        if (isSuccess) resultHtml = `<strong>Result:</strong><br>${exchange.tool.content}`;
-        else if (isError) resultHtml = `<strong>Error:</strong> ${exchange.tool.content}`;
+        if (isSuccess) resultHtml = exchange.tool.content;
+        else if (isError) resultHtml = exchange.tool.content;
 
         toolEl.innerHTML = `
             <div class="tool-bubble">
@@ -1480,11 +1480,17 @@ function renderExchange(exchange) {
                     <div class="tool-section-title">Arguments</div>
                     <div class="tool-args">${JSON.stringify(parsedObj.args, null, 2)}</div>
                     <div class="tool-section-title">Execution Result</div>
-                    <div class="tool-result">${resultHtml}</div>
+                    <div class="tool-result"></div>
                 </div>
             </div>
         `;
         getActiveContainer()?.appendChild(toolEl);
+
+        // Use textContent to prevent SVG/code examples from being parsed as HTML
+        const resultEl = toolEl.querySelector('.tool-result');
+        if (isSuccess) resultEl.innerHTML = `<strong>Result:</strong><br>`;
+        else if (isError) resultEl.innerHTML = `<strong>Error:</strong> `;
+        resultEl.appendChild(document.createTextNode(exchange.tool.content));
 
         toolEl.querySelector('.message-header').addEventListener('click', () => {
             const payloadBox = toolEl.querySelector('.tool-payload');
@@ -2008,7 +2014,9 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
           toolEl.querySelector('.tool-status').innerHTML = 'Success';
           toolEl.querySelector('.tool-notifications').style.display = 'none';
         
-        let toolResultHtml = exchange.tool.content;
+        // Use textContent to prevent SVG/code examples from being parsed as HTML
+        toolEl.querySelector('.tool-result').textContent = exchange.tool.content;
+        
         if (exchange.tool.images && exchange.tool.images.length > 0) {
             const imagesDiv = toolEl.querySelector('.tool-images');
             imagesDiv.style.display = 'block';
@@ -2019,7 +2027,6 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             imagesHtml += `</div>`;
             imagesDiv.innerHTML = imagesHtml;
         }
-        toolEl.querySelector('.tool-result').innerHTML = toolResultHtml;
 
         // 5. Automatically resume stream!
         // We will start a new pseudo-assistant stream using the toolExchangeId
@@ -2043,12 +2050,13 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         toolEl.querySelector('.tool-status').setAttribute('variant', 'danger');
           toolEl.querySelector('.tool-status').innerHTML = 'Failed';
           toolEl.querySelector('.tool-notifications').style.display = 'none';
-        toolEl.querySelector('.tool-result').innerHTML = `<span class="tool-error">${exchange.tool.content}</span>
+        toolEl.querySelector('.tool-result').innerHTML = `<span class="tool-error"></span>
             <div class="tool-error-actions">
                 <nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>
                 <nui-button size="small" class="dismiss-tool"><button>Dismiss & Continue</button></nui-button>
             </div>
         `;
+        toolEl.querySelector('.tool-result .tool-error').textContent = exchange.tool.content;
         toolEl.querySelector('.tool-payload').style.display = 'block'; // force open
         
         // Wire up retry/dismiss
