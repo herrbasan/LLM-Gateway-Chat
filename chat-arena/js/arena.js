@@ -152,9 +152,18 @@ class Participant {
         
         let otherMsgCount = 0;
         for (const msg of conversationHistory) {
-            if (msg.speaker === 'moderator') continue;
+            // Skip the topic message — already added as system above
+            if (msg === topicMsg) continue;
+
+            // Moderator messages (user prompts) become user messages
+            if (msg.speaker === 'moderator' && msg.content?.trim()) {
+                messages.push({ role: 'user', content: msg.content.trim() });
+                continue;
+            }
+
+            // Skip non-assistant messages from participants (e.g. streaming placeholders)
             if (msg.role !== 'assistant') continue;
-            if (!msg.content || !msg.content.trim()) continue; // Skip empty
+            if (!msg.content || !msg.content.trim()) continue;
 
             // The OTHER participant's message becomes 'user' role
             if (msg.speaker !== this.name) {
@@ -390,7 +399,7 @@ class Arena {
         let effectivePrompt = speaker.systemPrompt;
         const topic = this.messages[0]?.content.replace('Topic: ', '') || '';
 
-        // Default prompt when roleplay is off
+        // Build default prompt when no custom system prompt is set
         if (!effectivePrompt) {
             effectivePrompt = `You are ${speaker.modelName}. Engage in a thoughtful conversation about the following topic: ${topic}`;
         }
@@ -401,7 +410,10 @@ class Arena {
                 .replace('{otherParticipantName}', otherParticipant.name)
                 .replace('{otherModelName}', otherParticipant.modelName)
                 .replace('{topic}', topic);
-            speaker.setSystemPrompt(effectivePrompt);
+            // Only persist the system prompt if roleplay mode was active (custom prompt was set)
+            if (speaker.systemPrompt) {
+                speaker.setSystemPrompt(effectivePrompt);
+            }
         }
 
         try {
@@ -979,13 +991,12 @@ class ArenaUI {
         this.systemPromptAInput = document.getElementById('system-prompt-a');
         this.systemPromptBInput = document.getElementById('system-prompt-b');
         this.maxTurnsInput = document.getElementById('max-turns');
-        this.autoAdvanceCheckbox = document.getElementById('auto-advance');
         this.startButton = document.getElementById('start-btn');
         this.stopButton = document.getElementById('stop-btn');
         this.summarizeBtn = document.getElementById('summarize-btn');
         this.promptInput = document.getElementById('arena-prompt-input');
         this.sendPromptBtn = document.getElementById('arena-send-btn');
-        this.nextTurnBtn = document.getElementById('next-turn-btn');
+        this.continueBtn = document.getElementById('continue-btn');
         this.scrollToBottomBtn = document.getElementById('scroll-to-bottom');
     }
 
@@ -993,8 +1004,7 @@ class ArenaUI {
         this.startButton?.addEventListener('click', () => this._startConversation());
         this.stopButton?.addEventListener('click', () => this._stopConversation());
         this.sendPromptBtn?.addEventListener('click', () => this._sendPromptMessage());
-        this.nextTurnBtn?.addEventListener('click', () => this._nextTurn());
-        document.getElementById('extend-turns-btn')?.addEventListener('click', () => this._extendConversation());
+        this.continueBtn?.addEventListener('click', () => this._continueConversation());
 
         // Scroll to bottom button
         this.scrollToBottomBtn?.addEventListener('click', () => {
@@ -1017,14 +1027,9 @@ class ArenaUI {
 
         this.summarizeBtn?.addEventListener('click', () => this._showSummarizeDialog());
 
-        const autoAdvanceToggle = document.getElementById('auto-advance-toggle');
-        autoAdvanceToggle?.addEventListener('click', () => {
-            if (this.arena) {
-                const newValue = this.arena.toggleAutoAdvance();
-                autoAdvanceToggle.classList.toggle('active', newValue);
-                this._updateNextButtonVisibility();
-            }
-        });
+        // Update arena participants when model selects change (for loaded conversations)
+        this.modelASelect?.addEventListener('nui-change', (e) => this._updateParticipantModel('A', e.detail?.values?.[0]));
+        this.modelBSelect?.addEventListener('nui-change', (e) => this._updateParticipantModel('B', e.detail?.values?.[0]));
 
         document.getElementById('new-arena-btn')?.addEventListener('click', () => this._showSetupView());
         document.getElementById('import-arena-btn')?.addEventListener('click', () => this._triggerImport());
@@ -1116,7 +1121,6 @@ class ArenaUI {
         const modelA = this._getSelectValue(this.modelASelect);
         const modelB = this._getSelectValue(this.modelBSelect);
         const maxTurns = parseInt(this.maxTurnsInput?.value) || 10;
-        const autoAdvance = this.autoAdvanceCheckbox?.checked ?? true;
         const maxTokens = this.maxTokensInput?.value?.trim() || '';
 
         if (!topic) {
@@ -1136,7 +1140,7 @@ class ArenaUI {
         this.arena = new Arena({
             gatewayUrl: config.gatewayUrl || 'http://localhost:3400',
             maxTurns,
-            autoAdvance,
+            autoAdvance: true,
             onMessage: (msg) => this._renderMessage(msg),
             onStatusChange: (status) => this._updateStatus(status),
             onError: (err) => this._showError(err),
@@ -1187,12 +1191,14 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         if (this.footerEl) {
             this.footerEl.style.display = 'block';
         }
-        this._updateNextButtonVisibility();
 
-        // Hide extend button for new conversations (will show when max turns reached)
-        const extendBtn = document.getElementById('extend-turns-btn');
-        if (extendBtn) {
-            extendBtn.style.display = 'none';
+        // Show continue button
+        if (this.continueBtn) {
+            const btn = this.continueBtn.querySelector('button');
+            if (btn) {
+                btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
+            }
+            this.continueBtn.style.display = 'inline-flex';
         }
 
         // Hide sidebar on mobile
@@ -1230,16 +1236,8 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         this._renderMessage(messageEntry);
         this.promptInput.value = '';
 
-        // Trigger next response if auto-advance is on
-        if (this.arena.autoAdvance) {
-            this.arena.advanceAndRespond();
-        }
-    }
-
-    _nextTurn() {
-        if (this.arena && this.arena.isRunning) {
-            this.arena.advanceAndRespond();
-        }
+        // Always advance after sending a prompt
+        this.arena.advanceAndRespond();
     }
 
     _renderMessage(msg) {
@@ -1335,18 +1333,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             } else {
                 this.speakerIndicator.innerHTML = '';
             }
-        }
-
-        const autoAdvanceToggle = document.getElementById('auto-advance-toggle');
-        if (autoAdvanceToggle) {
-            autoAdvanceToggle.classList.toggle('active', this.arena?.autoAdvance ?? true);
-        }
-        this._updateNextButtonVisibility();
-    }
-
-    _updateNextButtonVisibility() {
-        if (this.nextTurnBtn) {
-            this.nextTurnBtn.style.display = this.arena?.autoAdvance ? 'none' : 'inline-flex';
         }
     }
 
@@ -1475,8 +1461,14 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             // Update context display
             this._updateContextDisplay(this.arena.getContextDisplayData());
 
-            // Show extend button so user can continue the conversation
-            this._showExtendButton();
+            // Show continue button so user can resume the conversation
+            if (this.continueBtn) {
+                const btn = this.continueBtn.querySelector('button');
+                if (btn) {
+                    btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
+                }
+                this.continueBtn.style.display = 'inline-flex';
+            }
 
             if (this.messagesContainer) {
                 this.messagesContainer.innerHTML = '';
@@ -1648,8 +1640,14 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             // Update context display
             this._updateContextDisplay(this.arena.getContextDisplayData());
 
-            // Show extend button so user can continue the conversation
-            this._showExtendButton();
+            // Show continue button so user can resume the conversation
+            if (this.continueBtn) {
+                const btn = this.continueBtn.querySelector('button');
+                if (btn) {
+                    btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
+                }
+                this.continueBtn.style.display = 'inline-flex';
+            }
 
             if (this.messagesContainer) {
                 this.messagesContainer.innerHTML = '';
@@ -1663,6 +1661,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 this.footerEl.style.display = 'block';
             }
 
+            // Render existing messages
             for (const msg of this.arena.messages) {
                 this._renderMessage(msg);
             }
@@ -1708,7 +1707,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         // Populate form with defaults
         if (this.topicInput) this.topicInput.value = config.defaultTopic || '';
         if (this.maxTurnsInput) this.maxTurnsInput.value = config.defaultMaxTurns || '10';
-        if (this.autoAdvanceCheckbox) this.autoAdvanceCheckbox.checked = config.defaultAutoAdvance !== false;
         if (this.maxTokensInput) this.maxTokensInput.value = '';
         
         // Reset roleplay
@@ -1731,10 +1729,13 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             }
         }
 
-        // Hide extend button for new conversations
-        const extendBtn = document.getElementById('extend-turns-btn');
-        if (extendBtn) {
-            extendBtn.style.display = 'none';
+        // Reset continue button for new conversations
+        if (this.continueBtn) {
+            const btn = this.continueBtn.querySelector('button');
+            if (btn) {
+                btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
+            }
+            this.continueBtn.style.display = 'none';
         }
 
         // Refresh history list
@@ -1742,50 +1743,67 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     }
 
     _showExtendOption(maxTurns) {
-        // Show the extend button
-        this._showExtendButton();
-        // Show notification
+        // Update continue button to show extend mode
+        if (this.continueBtn) {
+            const btn = this.continueBtn.querySelector('button');
+            if (btn) {
+                btn.innerHTML = '<nui-icon name="add"></nui-icon> Extend';
+            }
+            this.continueBtn.style.display = 'inline-flex';
+        }
         this._showNotification(`Conversation reached ${maxTurns} turns. Click Extend to continue.`, 'success');
     }
 
-    _showExtendButton() {
-        // Show the extend button element
-        const extendBtn = document.getElementById('extend-turns-btn');
-        if (extendBtn) {
-            extendBtn.style.display = 'inline-flex';
-        }
-    }
-
-    _extendConversation() {
+    async _continueConversation() {
         if (!this.arena) return;
 
-        // Add 5 more turns
-        this.arena.maxTurns += 5;
+        // If at max turns, open extend dialog
+        if (this.arena.currentTurn >= this.arena.maxTurns) {
+            const result = await nui.components.dialog.prompt('Extend Conversation', '', {
+                fields: [
+                    {
+                        id: 'turns',
+                        label: 'Number of turns to add',
+                        type: 'number',
+                        value: '5'
+                    }
+                ]
+            });
 
-        // Hide extend button
-        const extendBtn = document.getElementById('extend-turns-btn');
-        if (extendBtn) {
-            extendBtn.style.display = 'none';
+            if (!result || !result.turns) return;
+
+            const additionalTurns = parseInt(result.turns, 10);
+            if (isNaN(additionalTurns) || additionalTurns < 1) {
+                nui.components.dialog.alert('Invalid Input', 'Please enter a number greater than 0.');
+                return;
+            }
+
+            this.arena.maxTurns += additionalTurns;
+            this._showNotification(`Extended by ${additionalTurns} turns (max: ${this.arena.maxTurns})`, 'success');
+
+            // Restore continue button text
+            if (this.continueBtn) {
+                const btn = this.continueBtn.querySelector('button');
+                if (btn) {
+                    btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
+                }
+            }
         }
 
-        // Update status display
-        this._updateStatus({
-            isRunning: this.arena.isRunning,
-            activeSpeaker: null,
-            turn: this.arena.currentTurn
-        });
-
-        // Resume if auto-advance is on
-        if (this.arena.autoAdvance) {
-            // Determine who should speak next based on turn count
-            // Even turns (0, 2, 4...) = participantA, Odd turns (1, 3, 5...) = participantB
-            const isParticipantATurn = this.arena.currentTurn % 2 === 0;
-            this.arena.activeSpeaker = isParticipantATurn ? this.arena.participantA : this.arena.participantB;
-            
+        // Resume if stopped — turn was already advanced when last message completed,
+        // so just trigger the current activeSpeaker without advancing again
+        if (!this.arena.isRunning) {
             this.arena.isRunning = true;
             this.arena.isPaused = false;
-            this.arena._triggerResponse();
+            
+            // Ensure activeSpeaker is set correctly
+            if (!this.arena.activeSpeaker) {
+                const isParticipantATurn = this.arena.currentTurn % 2 === 0;
+                this.arena.activeSpeaker = isParticipantATurn ? this.arena.participantA : this.arena.participantB;
+            }
         }
+        
+        this.arena._triggerResponse();
     }
 
     _restoreSettingsToUI(settings, data) {
@@ -1814,14 +1832,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.maxTokensInput.value = settings.targetTokens;
         }
 
-        // Restore auto-advance
-        if (this.autoAdvanceCheckbox && settings?.autoAdvance !== undefined) {
-            this.autoAdvanceCheckbox.checked = settings.autoAdvance;
-            if (this.arena) {
-                this.arena.autoAdvance = settings.autoAdvance;
-            }
-        }
-
         // Restore system prompts if they exist
         if (settings?.systemPromptA && this.systemPromptAInput) {
             this.systemPromptAInput.value = settings.systemPromptA;
@@ -1830,10 +1840,20 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.systemPromptBInput.value = settings.systemPromptB;
         }
 
-        // Show roleplay section if custom system prompts exist
-        if ((settings?.systemPromptA || settings?.systemPromptB) && this.roleplayCheckbox && this.roleplaySection) {
-            this.roleplayCheckbox.checked = true;
-            this.roleplaySection.style.display = 'block';
+        // Detect roleplay mode: only enabled if at least one prompt is a custom (non-default) value.
+        // The auto-generated default always contains "Engage in a thoughtful conversation about the following topic".
+        // The roleplay template starts with "You are in a conversation. Your identity:".
+        // Custom prompts are anything else.
+        const isAutoDefault = (prompt) =>
+            prompt && typeof prompt === 'string' &&
+            prompt.includes('Engage in a thoughtful conversation about the following topic');
+        const hasCustomPromptA = settings?.systemPromptA && !isAutoDefault(settings.systemPromptA);
+        const hasCustomPromptB = settings?.systemPromptB && !isAutoDefault(settings.systemPromptB);
+        const hasRoleplay = !!(hasCustomPromptA || hasCustomPromptB);
+
+        if (this.roleplayCheckbox && this.roleplaySection) {
+            this.roleplayCheckbox.checked = hasRoleplay;
+            this.roleplaySection.style.display = hasRoleplay ? 'block' : 'none';
         }
     }
 
@@ -1848,6 +1868,20 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     _showError(message) {
         console.error('Arena error:', message);
         this._showNotification(message, 'error');
+    }
+
+    _updateParticipantModel(participant, newModelId) {
+        if (!this.arena || !newModelId) return;
+
+        if (participant === 'A' && this.arena.participantA) {
+            this.arena.participantA.modelName = newModelId;
+            this.arena.participantAConfig.modelName = newModelId;
+            this.arena.participantA.name = newModelId.split('/').pop();
+        } else if (participant === 'B' && this.arena.participantB) {
+            this.arena.participantB.modelName = newModelId;
+            this.arena.participantBConfig.modelName = newModelId;
+            this.arena.participantB.name = newModelId.split('/').pop();
+        }
     }
 
     _escapeHtml(text) {

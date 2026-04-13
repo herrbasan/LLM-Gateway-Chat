@@ -105,15 +105,6 @@
                 <div class="sidebar-section">
                     <div class="checkbox-group">
                         <nui-checkbox>
-                            <input type="checkbox" id="auto-advance" checked>
-                        </nui-checkbox>
-                        <label for="auto-advance">Auto-advance</label>
-                    </div>
-                </div>
-
-                <div class="sidebar-section">
-                    <div class="checkbox-group">
-                        <nui-checkbox>
                             <input type="checkbox" id="roleplay-checkbox">
                         </nui-checkbox>
                         <label for="roleplay-checkbox">Roleplay Mode</label>
@@ -165,22 +156,10 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                         <span class="context-usage" id="context-usage" title="Context window usage (limiting factor)">-- / --</span>
                         <span class="speaker-indicator" id="speaker-indicator"></span>
                         <div class="arena-flow-actions">
-                            <nui-button variant="outline" size="small" id="auto-advance-toggle" class="active">
+                            <nui-button variant="outline" size="small" id="continue-btn">
                                 <button type="button">
                                     <nui-icon name="play"></nui-icon>
-                                    Auto
-                                </button>
-                            </nui-button>
-                            <nui-button variant="outline" size="small" id="next-turn-btn" style="display: none;">
-                                <button type="button">
-                                    <nui-icon name="redo"></nui-icon>
-                                    Next
-                                </button>
-                            </nui-button>
-                            <nui-button variant="primary" size="small" id="extend-turns-btn" style="display: none;">
-                                <button type="button">
-                                    <nui-icon name="add"></nui-icon>
-                                    Extend
+                                    Continue
                                 </button>
                             </nui-button>
                             <nui-button variant="primary" size="small" id="stop-btn">
