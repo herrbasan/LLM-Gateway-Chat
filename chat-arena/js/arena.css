@@ -257,6 +257,32 @@ nui-app[nui-vars-sidebar_width] nui-content>nui-main {
     line-height: 1.6;
 }
 
+.arena-messages .chat-message .message-actions {
+    display: flex;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-shade1);
+}
+
+.arena-messages .chat-message .message-actions .action-btn button {
+    padding: 0.25rem;
+    min-width: auto;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.arena-messages .chat-message .message-actions .action-btn button:hover {
+    opacity: 1;
+}
+
+.arena-messages .chat-message .message-actions .action-btn nui-icon {
+    font-size: 1rem;
+}
+
 /* Thinking block styles */
 .arena-messages .thinking-block {
     margin-bottom: 0.75rem;

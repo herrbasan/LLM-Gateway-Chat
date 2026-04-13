@@ -180,7 +180,9 @@ class Participant {
             // Extract topic text and use as opening user message
             const topicText = topicMsg.content.replace(/^Topic:\s*/i, '').trim();
             if (topicText) {
-                messages.unshift({ role: 'user', content: topicText });
+                // Insert after system messages (not at index 0 which would push system messages down)
+                const systemMsgCount = messages.filter(m => m.role === 'system').length;
+                messages.splice(systemMsgCount, 0, { role: 'user', content: topicText });
             }
         }
 
@@ -1294,13 +1296,37 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 <span class="message-timestamp">${timestamp}${msg.isStreaming ? '<span class="streaming-indicator"></span>' : ''}</span>
             </div>
             ${contentHtml}
+            ${!msg.isStreaming ? `
+            <div class="message-actions">
+                <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
+            </div>
+            ` : ''}
         `;
+
+        if (!msg.isStreaming) {
+            messageEl.querySelector('.copy-message')?.addEventListener('click', (e) => this._copyMessageToClipboard(msg, e.currentTarget));
+        }
 
         this.messagesContainer.appendChild(messageEl);
         
         // Only auto-scroll if user is near bottom (same logic as chat app)
         if (this._isNearBottom()) {
             this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+        }
+    }
+
+    async _copyMessageToClipboard(msg, btn) {
+        const parsed = parseThinking(msg.content);
+        const contentToCopy = parsed.answer || msg.content || '';
+        
+        try {
+            await navigator.clipboard.writeText(contentToCopy.trim());
+            const icon = btn.querySelector('nui-icon');
+            const oldIconName = icon.getAttribute('name');
+            icon.setAttribute('name', 'check');
+            setTimeout(() => icon.setAttribute('name', oldIconName), 2000);
+        } catch (err) {
+            console.error('Failed to copy text: ', err);
         }
     }
 
