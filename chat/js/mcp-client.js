@@ -552,48 +552,6 @@ class MCPClient {
             }
         }));
     }
-
-    /**
-     * PHASE-1: Tool Invocation Syntax Injection
-     * Generates a strict system prompt instructing the LLM how to invoke tools via SSE chunking.
-     * @param {string[]} excludedToolPrefixes - Array of tool name prefixes to exclude (e.g., ['vision_'])
-     */
-    generateToolPrompt(excludedToolPrefixes = []) {
-        if (this.availableTools.length === 0) return "";
-
-        const allTools = this.getFormattedToolsForLLM();
-        
-        // Filter out excluded tools
-        const filteredTools = excludedToolPrefixes.length > 0
-            ? allTools.filter(tool => {
-                const toolName = tool.function?.name?.toLowerCase() || '';
-                return !excludedToolPrefixes.some(prefix => toolName.startsWith(prefix.toLowerCase()));
-            })
-            : allTools;
-
-        if (filteredTools.length === 0) return "";
-
-        const toolNames = filteredTools.map(t => t.function?.name).join(', ');
-        console.log('[MCP] generateToolPrompt: excluded=', excludedToolPrefixes, '| included tools:', toolNames);
-
-        const toolDescriptions = filteredTools.map(t => JSON.stringify(t.function)).join('\n');
-        
-        return `
-You have access to the following tools:
-${toolDescriptions}
-
-To invoke a tool, you MUST output a single line with the exact following syntax, self-delimited, without any surrounding markdown formatting or text on that line:
-__TOOL_CALL__({"name": "tool_name", "args": {"param1": "value"}})
-
-After you output a tool call, the system will execute it and provide you with a new message containing the result formatted like this:
-<tool_result>
-  <tool_name>...</tool_name>
-  <status>success|error</status>
-  <output>...</output>
-</tool_result>
-Do not attempt to guess or hallucinate the tool's result.
-`;
-    }
 }
 
 export const mcpClient = new MCPClient();

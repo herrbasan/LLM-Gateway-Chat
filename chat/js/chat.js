@@ -805,12 +805,6 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
         prompt = metadata;
     }
 
-    // PHASE-3: MCP System Prompt Injection
-    const mcpPrompt = mcpClient.generateToolPrompt(excludedToolPrefixes);
-    if (mcpPrompt) {
-        prompt += `\n\n${mcpPrompt}`;
-    }
-
     return prompt;
 }
 
@@ -1247,16 +1241,9 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         let lastRender = 0;
         const RENDER_INTERVAL = 50; // Render at most every 50ms
 
-        // PHASE-3: __TOOL_CALL__ text detection
-        // Matches: __TOOL_CALL__({"name": "tool", "args": {...}})
-        // The JSON args may span multiple lines with nested objects
-        const TOOL_CALL_REGEX = /__TOOL_CALL__\(([\s\S]*?)\)\s*$/;
-        let toolCallIntercepted = false;
         let isReceivingTool = false;
 
         for await (const event of client.streamChatIterable(requestBody, chatId, false, conversation)) {
-            if (toolCallIntercepted) break; // Halts the iterable immediately
-
             switch (event.type) {
                 case 'delta':
                     // Hide progress status once text generation begins
@@ -1267,29 +1254,14 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     const userPendingEl = targetContainer?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
                     if (userPendingEl) userPendingEl.classList.remove('visible');
 
-                    contentBuffer += event.content;
-                    conversation.updateAssistantResponse(exchangeId, event.content);
-
-                    const toolCallIndex = contentBuffer.indexOf('__TOOL_CALL__');
-                    if (toolCallIndex !== -1 && !isReceivingTool) {
-                        isReceivingTool = true;
-                        showPendingToolUI(exchangeId, chatId);
+                    if (event.content !== undefined) {
+                        contentBuffer += event.content;
+                        conversation.updateAssistantResponse(exchangeId, event.content);
                     }
 
-                    // Check for __TOOL_CALL__ pattern in accumulated content
-                    const toolMatch = contentBuffer.match(TOOL_CALL_REGEX);
-                    if (toolMatch) {
-                        const rawJson = toolMatch[1].trim();
-                        try {
-                            const parsedObj = JSON.parse(rawJson);
-                            if (parsedObj.name && parsedObj.args) {
-                                toolCallIntercepted = true;
-                                handleToolExecution(exchangeId, parsedObj, chatId, originalUserExchangeId);
-                                break;
-                            }
-                        } catch (e) {
-                            // JSON not complete yet, continue streaming
-                        }
+                    if (event.tool_calls && event.tool_calls.length > 0 && !isReceivingTool) {
+                        isReceivingTool = true;
+                        showPendingToolUI(exchangeId, chatId);
                     }
 
                     // Debounce DOM updates to prevent freezing
@@ -1300,7 +1272,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 
                         const wasNearBottom = isNearBottom();
                         setTimeout(() => {
-                            // Give the UI the content without the __TOOL_CALL__ part
                             updateAssistantContent(assistantEl, contentBuffer);
                             lastRender = performance.now();
                             pendingUpdate = false;
@@ -1341,23 +1312,31 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     break;
                     
                 case 'done':
-                    // Tool calls are handled via __TOOL_CALL__ text detection in delta events
-                    // handleToolExecution() already called streamResponse() to continue
-                    if (toolCallIntercepted) break;
+                    if (event.finish_reason === 'tool_calls' && event.tool_calls?.length > 0) {
+                        for (const tc of event.tool_calls) {
+                            try {
+                                const args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
+                                handleToolExecution(exchangeId, {
+                                    name: tc.function.name,
+                                    args: args,
+                                    id: tc.id
+                                }, chatId, originalUserExchangeId);
+                            } catch (err) {
+                                console.error('Failed to parse tool arguments', tc.function.arguments, err);
+                            }
+                        }
+                        return; // Handle tool execution will continue streamResponse
+                    }
 
                     // contentBuffer doesn't include our injected timestamp
                     // Get the exchange to find the original timestamp we injected
                     const ex = conversation.getExchange(exchangeId);
                     
                     let finalContent = contentBuffer;
-                    const toolIdxDone = finalContent.indexOf('__TOOL_CALL__');
-                    if (toolIdxDone !== -1) {
-                        finalContent = finalContent.substring(0, toolIdxDone).trim();
-                    }
                     const tsMatch = ex?.assistant?.content?.match(TIMESTAMP_REGEX);
                     if (tsMatch) {
                         // Reconstruct: original timestamp + content buffer (no LLM timestamp)
-                        finalContent = tsMatch[0] + finalContent; // use the stripped finalContent instead of raw contentBuffer
+                        finalContent = tsMatch[0] + finalContent;
                     }
                     // Strip any extra timestamps LLM may have generated
                     finalContent = stripExtraTimestamps(finalContent);
@@ -1901,8 +1880,8 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         console.warn('[handleToolExecution] Original exchange not found, likely from a different chat context');
         return;
     }
-    // Strip partial tool call fragments that may have leaked into the UI during streaming
-    oldEx.assistant.content = oldEx.assistant.content.replace(/__TOOL_CALL__\([\s\S]*$/, '').trim();
+    // Trim trailing whitespace
+    oldEx.assistant.content = oldEx.assistant.content.trim();
     toolConversation.setAssistantComplete(originalExchangeId);
 
     let originalEl = toolContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${originalExchangeId}"]`);
@@ -1916,7 +1895,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     }
 
     // 2. Create the tool exchange (pass userExchangeId so chained tools know the original)
-    const toolExchangeId = await toolConversation.addToolExchange(parsedObj.name, parsedObj.args, userExchangeId);
+    const toolExchangeId = await toolConversation.addToolExchange(parsedObj.name, parsedObj.args, parsedObj.id, userExchangeId);
     const exchange = toolConversation.getExchange(toolExchangeId);
 
     // 3. Render Tool UI
@@ -2002,8 +1981,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         } else {
             resultText = String(result);
         }
-        // Strip any __TOOL_CALL__ artifacts from the result
-        resultText = resultText.replace(/__TOOL_CALL__\([\s\S]*?\)/g, '').trim();
+        resultText = resultText.trim();
         exchange.tool.content = resultText;
         if (resultImages.length > 0) {
             exchange.tool.images = resultImages;
@@ -2090,12 +2068,6 @@ function updateAssistantContent(el, content) {
     if (!contentDiv) return;
 
     let visibleContent = content;
-
-    // First strip out the tool call exactly, so we don't accidentally leave floating whitespace or closing braces
-    const toolCallIndex = visibleContent.indexOf('__TOOL_CALL__');
-    if (toolCallIndex !== -1) {
-        visibleContent = visibleContent.substring(0, toolCallIndex).trim();
-    }
 
     // Strip the injected timestamp from visible content (shown in header)
     if (el.dataset.timestampLen && visibleContent.startsWith('[')) {

@@ -282,8 +282,12 @@ export class GatewayClient extends EventEmitter {
     this._currentIterableStream = stream;
 
     stream.on('delta', (data) => {
-      if (data?.choices?.[0]?.delta?.content !== undefined) {
-        pushEvent({ type: 'delta', content: data.choices[0].delta.content || '' });
+      const delta = data?.choices?.[0]?.delta;
+      if (delta?.content !== undefined) {
+        pushEvent({ type: 'delta', content: delta.content || '' });
+      }
+      if (delta?.tool_calls) {
+        pushEvent({ type: 'delta', tool_calls: delta.tool_calls });
       }
     });
 
@@ -292,7 +296,10 @@ export class GatewayClient extends EventEmitter {
     stream.on('done', (data) => pushEvent({ 
       type: 'done', 
       usage: data?.telemetry?.usage ?? data?.usage ?? null, 
-      context: data?.context ?? null 
+      context: data?.context ?? null,
+      finish_reason: data?.finish_reason ?? null,
+      tool_calls: data?.tool_calls ?? null,
+      content: data?.content ?? null
     }));
     
     stream.on('error', (err) => {

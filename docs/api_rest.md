@@ -1,6 +1,6 @@
-# LLM Gateway REST API Documentation v2.0
+# LLM Gateway API Documentation v2.0
 
-Complete REST/OpenAI-compatible API reference for the LLM Gateway v2.0 (model-centric, stateless architecture).
+Complete API reference for the LLM Gateway v2.0 (model-centric, stateless architecture).
 
 ---
 
@@ -9,11 +9,12 @@ Complete REST/OpenAI-compatible API reference for the LLM Gateway v2.0 (model-ce
 1. [API Design Philosophy](#api-design-philosophy)
 2. [Response Patterns](#response-patterns)
 3. [Endpoints Reference](#endpoints-reference)
-4. [Ticket-Based API](#ticket-based-api)
-5. [System Events](#system-events)
-6. [Usage Patterns](#usage-patterns)
-7. [Error Handling](#error-handling)
-8. [Client Library Design](#client-library-design)
+4. [Task-Based Query System](#task-based-query-system)
+5. [Ticket-Based API](#ticket-based-api)
+6. [System Events](#system-events)
+7. [Usage Patterns](#usage-patterns)
+8. [Error Handling](#error-handling)
+9. [Client Library Design](#client-library-design)
 
 ---
 
@@ -140,7 +141,7 @@ X-Async: true
 
 Main chat completion endpoint. Supports both streaming and non-streaming responses.
 
-If `max_tokens` is omitted, the gateway derives a safe output budget from the configured model context window, the estimated prompt size, and an internal safety margin. The resolved value is returned in `context.resolved_max_tokens`.
+If `max_tokens` is omitted, the gateway derives a safe output budget from the model's configured `capabilities.contextWindow`, the estimated prompt size, and an internal safety margin. The resolved value is reported back in the response `context` payload.
 
 **Headers:**
 
@@ -162,6 +163,7 @@ If `max_tokens` is omitted, the gateway derives a safe output budget from the co
   "max_tokens": 1000,
   "temperature": 0.7,
   "stream": false,
+  "strip_thinking": true,
   "response_format": {
     "type": "json_schema",
     "json_schema": { "name": "response", "strict": true, "schema": {...} }
@@ -173,6 +175,8 @@ If `max_tokens` is omitted, the gateway derives a safe output budget from the co
   }
 }
 ```
+
+> **Thinking Stripper:** When `strip_thinking: true` (or `no_thinking: true`) is provided, and the model outputs reasoning/thinking tokens (like DeepSeek `<think>` blocks or native `reasoning_content`), the gateway will automatically strip the reasoning portion. This works seamlessly for both standard and streaming requests, ensuring clean JSON/markdown outputs.
 
 > **Image Processing:** The `image_processing` field is optional. When provided, images in messages are fetched (remote URLs) and optionally resized/transcoded via MediaService. See [Vision (Image Input)](#vision-image-input) for complete examples.
 
@@ -199,7 +203,7 @@ If `max_tokens` is omitted, the gateway derives a safe output budget from the co
 }
 ```
 
-`max_tokens_source` is `explicit` when the caller supplied `max_tokens`, otherwise `implicit`.
+`context.max_tokens_source` is `explicit` when the request supplied `max_tokens`, otherwise `implicit`.
 
 **Response 202 (With `X-Async: true`):**
 
@@ -268,7 +272,7 @@ data: [DONE]
 
 > Compaction progress events are non-standard SSE events (prefixed with `compaction.`). Standard OpenAI SDKs will ignore them, receiving only the `data:` token chunks. Clients that understand compaction events get progress visibility for free.
 
-If the HTTP client disconnects while a chat request is still in flight, the gateway aborts the upstream provider request for supported fetch-based chat adapters.
+If the HTTP client disconnects during streaming or before a non-streaming response completes, the gateway aborts the upstream provider request for fetch-based chat adapters instead of continuing generation in the background.
 
 **Streaming Error Handling:**
 ```
@@ -501,6 +505,150 @@ GET /help
 
 ---
 
+## Task-Based Query System
+
+Tasks provide semantic routing with preset parameters. Instead of specifying a model and tuning parameters for every request, clients reference a named task that encapsulates the model choice, system prompt, temperature, max tokens, and other defaults.
+
+### How Tasks Work
+
+1. Client sends a request with `"task": "task-name"`
+2. Gateway looks up the task config and merges its defaults into the request
+3. Client-supplied parameters **always override** task defaults
+4. If the task defines a `systemPrompt`, it is prepended as the first system message
+
+### GET /v1/tasks
+
+List all available tasks.
+
+```bash
+GET /v1/tasks
+```
+
+**Response:**
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "query",
+      "object": "task",
+      "model": "minimax-chat",
+      "description": "General query and conversation"
+    },
+    {
+      "id": "inspect",
+      "object": "task",
+      "model": "minimax-chat",
+      "description": "Code inspection and analysis"
+    }
+  ]
+}
+```
+
+### Using Tasks in Chat Requests
+
+```json
+POST /v1/chat/completions
+{
+  "task": "synthesis",
+  "messages": [{"role": "user", "content": "Summarize this article..."}],
+  "temperature": 0.5
+}
+```
+
+The `synthesis` task might define `model: "glm5-turbo-chat"`, `temperature: 0.3`, `maxTokens: 2048`. The client's `temperature: 0.5` overrides the task default, while `model` and `maxTokens` come from the task.
+
+### Task Configuration
+
+Tasks are defined in `config.json`:
+
+```json
+{
+  "tasks": {
+    "synthesis": {
+      "model": "glm5-turbo-chat",
+      "description": "Content synthesis and summarization",
+      "systemPrompt": "Summarize the following content concisely.",
+      "maxTokens": 2048,
+      "temperature": 0.3
+    },
+    "inspect": {
+      "model": "minimax-chat",
+      "description": "Code inspection and analysis",
+      "maxTokens": 8192,
+      "temperature": 0.1,
+      "stripThinking": false,
+      "extraBody": {
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        }
+      }
+    }
+  }
+}
+```
+
+### Supported Task Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `model` | string | **Required.** Model ID to route to |
+| `description` | string | Human-readable description |
+| `systemPrompt` | string | Prepended as first system message |
+| `maxTokens` | number | Default output token limit |
+| `temperature` | number | Sampling temperature (0-2) |
+| `topP` | number | Nucleus sampling threshold (0-1) |
+| `topK` | number | Top-K sampling limit |
+| `stripThinking` | boolean | Override global thinking strip |
+| `noThinking` | boolean | Disable model reasoning/thinking |
+| `responseFormat` | object | Structured output configuration |
+| `extraBody` | object | Adapter-specific passthrough params |
+| `presencePenalty` | number | Presence penalty (-2.0 to 2.0) |
+| `frequencyPenalty` | number | Frequency penalty (-2.0 to 2.0) |
+| `seed` | number | Random seed for reproducibility |
+| `stop` | array | Stop sequences |
+| `extra_body` | object | Adapter-specific passthrough params (merged into upstream payload) |
+| `enable_thinking` | boolean | Enable/disable model reasoning/thinking per-request |
+| `chat_template_kwargs` | object | Direct passthrough to OpenAI-compatible endpoints (e.g., `{ enable_thinking: false }`) |
+
+### Override Priority
+
+```
+final request = { ...taskDefaults, ...clientRequestBody }
+```
+
+Client parameters always win. If neither task nor client specifies a value, the model config or adapter default applies.
+
+### Using Tasks with Other Endpoints
+
+Tasks work with embeddings, image generation, and audio endpoints too:
+
+```json
+POST /v1/embeddings
+{
+  "task": "embed",
+  "input": ["text to embed"]
+}
+```
+
+```json
+POST /v1/images/generations
+{
+  "task": "image",
+  "prompt": "A cyberpunk city at night"
+}
+```
+
+```json
+POST /v1/audio/speech
+{
+  "task": "tts",
+  "input": "Welcome to the gateway"
+}
+```
+
+---
+
 ## Ticket-Based API
 
 Used for:
@@ -622,7 +770,9 @@ data: {"ticket":"tkt_abc123","status":"complete"}
 |----------|---------|------------|
 | Default model | Omit `model` or use configured default | Uses `routing.defaultChatModel` from config |
 | Specific model | `"model": "gemini-flash"` | Looks up model by ID in config |
+| Task-based | `"task": "synthesis"` | Uses task's model + defaults, client overrides apply |
 | List models | `GET /v1/models` | Returns flat list from config |
+| List tasks | `GET /v1/tasks` | Returns list of configured tasks |
 
 ### Chat Completions
 
@@ -634,7 +784,71 @@ data: {"ticket":"tkt_abc123","status":"complete"}
 | Streaming | Unified SSE (small=tokens, large=progress+tokens) |
 | Structured output | `response_format: { type: "json_schema" }` — routed only to models with `structuredOutput` capability |
 | Token constraints | `max_tokens` respected by all adapters |
+| Thinking control | `enable_thinking` per-request or `extraBody` in config/task |
 | Image processing | `image_processing: { resize, transcode, quality }` for automatic optimization |
+
+### Thinking Control
+
+Control whether models produce verbose reasoning/thinking output. Works per-request from both REST and WebSocket endpoints. All sources resolve to a single normalized `enable_thinking` field before reaching adapters.
+
+**Resolution priority** (highest wins):
+1. Request-level `enable_thinking`
+2. Request-level `extra_body.chat_template_kwargs.enable_thinking`
+3. Request-level `chat_template_kwargs.enable_thinking`
+4. Config-level `extraBody.chat_template_kwargs.enable_thinking`
+5. Adapter default (model decides)
+
+**REST usage (OpenAI-compliant — via extra_body):**
+```json
+POST /v1/chat/completions
+{
+  "model": "my-llama-model",
+  "extra_body": { "chat_template_kwargs": { "enable_thinking": false } },
+  "messages": [{"role": "user", "content": "Hello"}]
+}
+```
+
+**REST usage (gateway convenience):**
+```json
+POST /v1/chat/completions
+{
+  "model": "my-llama-model",
+  "enable_thinking": false,
+  "messages": [{"role": "user", "content": "Hello"}]
+}
+```
+
+**WebSocket usage:**
+```json
+{ "method": "chat.create", "params": { "model": "my-llama-model", "enable_thinking": false, "messages": [...] } }
+```
+
+**Config default (applies when no request-level param is given):**
+```json
+"my-llama-model": {
+  "adapter": "llamacpp",
+  "extraBody": { "chat_template_kwargs": { "enable_thinking": false } }
+}
+```
+
+**Task default:**
+```json
+"tasks": {
+  "fast": { "model": "my-llama-model", "enable_thinking": false }
+}
+```
+
+**Adapter translation:**
+
+| Adapter | `enable_thinking` becomes |
+|---------|--------------------------|
+| `openai` | `chat_template_kwargs.enable_thinking` |
+| `llamacpp` | `chat_template_kwargs.enable_thinking` |
+| `lmstudio` | `chat_template_kwargs.enable_thinking` |
+| `alibaba` | `enable_thinking` (top-level) |
+| `ollama` | Not supported (native API) |
+| `anthropic` | Not supported (different mechanism) |
+| `gemini` | Not supported (different mechanism) |
 
 ### Vision (Image Input)
 
@@ -718,6 +932,113 @@ POST /v1/chat/completions
 | Text-to-video | `POST /v1/videos/generations` — currently sync (`200`) |
 | Async image/video | Planned — will use `202 + ticket` pattern |
 | Provider mismatch | Router enforces capability flags (type must match) |
+
+### Tool Use / Function Calling
+
+The gateway supports OpenAI-spec compliant tool use (function calling) across both REST and streaming endpoints. This enables coding assistants, agents, and other tool-calling clients to work through the gateway transparently.
+
+**Request with tools:**
+
+```json
+POST /v1/chat/completions
+{
+  "model": "gemini-flash",
+  "messages": [{"role": "user", "content": "List files in the project"}],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "bash",
+        "description": "Execute a bash command",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": { "type": "string", "description": "The command to run" }
+          },
+          "required": ["command"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true
+}
+```
+
+**Non-streaming response with tool calls:**
+
+```json
+{
+  "id": "chatcmpl-xxx",
+  "object": "chat.completion",
+  "model": "gemini-flash",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "refusal": null,
+      "tool_calls": [{
+        "id": "call_abc123",
+        "type": "function",
+        "function": {
+          "name": "bash",
+          "arguments": "{\"command\":\"ls -la\"}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }],
+  "system_fingerprint": null,
+  "usage": { "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120 }
+}
+```
+
+**Streaming tool calls** are emitted as incremental `delta.tool_calls` chunks following the OpenAI SSE format:
+
+```
+data: {"id":"...","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"bash","arguments":""}}]},"finish_reason":null}]}
+data: {"id":"...","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls -la\"}"}}]},"finish_reason":"tool_calls"}]}
+data: [DONE]
+```
+
+**Returning tool results** for the next turn:
+
+```json
+POST /v1/chat/completions
+{
+  "model": "gemini-flash",
+  "messages": [
+    {"role": "user", "content": "List files in the project"},
+    {"role": "assistant", "content": null, "tool_calls": [{"id": "call_abc123", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":\"ls -la\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_abc123", "content": "file1.txt\nfile2.txt\nREADME.md"}
+  ]
+}
+```
+
+**Supported parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tools` | array | Tool definitions (OpenAI format) |
+| `tool_choice` | string/object | `"auto"`, `"none"`, `"required"`, or `{ type: "function", function: { name: "..." } }` |
+| `parallel_tool_calls` | boolean | Allow multiple tool calls in one response |
+| `functions` | array | Legacy function calling (deprecated, forwarded as-is) |
+| `function_call` | string/object | Legacy function call control (deprecated, forwarded as-is) |
+
+**Adapter support:**
+
+| Adapter | Tool Support | Notes |
+|---------|-------------|-------|
+| `openai` | Direct passthrough | OpenAI, xAI, and compatible providers |
+| `anthropic` | Format conversion | OpenAI tools ↔ Claude tool_use |
+| `gemini` | Format conversion | OpenAI tools ↔ Gemini functionDeclarations |
+| `kimi` | Direct passthrough | OpenAI-compatible API |
+| `ollama` | Direct passthrough | Model-dependent |
+| `lmstudio` | Direct passthrough | OpenAI-compatible |
+| `llamacpp` | Variable | Model/build dependent |
+
+**Response normalization:** All non-streaming tool-call responses include `refusal: null`, `function_call: null`, `tool_calls: null` (when absent), `annotations: []`, and `system_fingerprint: null` for strict client compatibility (OpenAI SDK, VS Code extensions).
 
 ---
 

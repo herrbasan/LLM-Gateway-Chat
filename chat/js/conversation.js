@@ -48,7 +48,7 @@ export class Conversation {
     // Exchange Management
     // ============================================
 
-    async addToolExchange(toolName, toolArgs, userId = null) {
+    async addToolExchange(toolName, toolArgs, callId = null, userId = null) {
         const timestamp = Date.now();
         const exchange = {
             id: this._generateId(),
@@ -57,6 +57,7 @@ export class Conversation {
             userId: userId, // original user exchange ID for chained tool calls
             tool: {
                 role: 'tool',
+                callId: callId,
                 name: toolName,
                 args: toolArgs,
                 status: 'pending',
@@ -315,26 +316,38 @@ export class Conversation {
             const exchange = this.exchanges[i];
             const isLastExchange = i === lastExchangeIndex;
 
-            // PHASE-3: Tool exchanges - add tool result as user message, skip normal user/assistant
+            // PHASE-3: Tool exchanges - add tool result as tool message, skip normal user/assistant
             if (exchange.type === 'tool') {
                 if (exchange.tool.status === 'success' || exchange.tool.status === 'error') {
                     // 1) First, insert the assistant's tool call so the LLM remembers what it did
                     // Strip base64 data from tool args to prevent bloating context
                     const sanitizedArgs = this._sanitizeToolArgs(exchange.tool.args);
+                    const callId = exchange.tool.callId || `call_${exchange.id}`;
+                    
                     rawMessages.push({
                         role: 'assistant',
-                        content: `__TOOL_CALL__({"name": "${exchange.tool.name}", "args": ${JSON.stringify(sanitizedArgs)}})`
+                        content: null,
+                        tool_calls: [{
+                            id: callId,
+                            type: 'function',
+                            function: {
+                                name: exchange.tool.name,
+                                arguments: JSON.stringify(sanitizedArgs)
+                            }
+                        }]
                     });
 
-                    // 2) Then, provide the tool result back as the user
-                    const toolResultText = `<tool_result>\n  <tool_name>${exchange.tool.name}</tool_name>\n  <status>${exchange.tool.status}</status>\n  <output>\n${exchange.tool.content || ''}\n  </output>\n</tool_result>`;
-                    
-                    let toolResultOptions = { role: 'user', content: toolResultText };
+                    // 2) Then, provide the tool result back
+                    const toolResultObj = {
+                        role: 'tool',
+                        tool_call_id: callId,
+                        content: exchange.tool.content || ''
+                    };
                     
                     // Attach images for tool exchanges if present
                     if (exchange.tool.images && exchange.tool.images.length > 0) {
-                        toolResultOptions.content = [
-                            { type: 'text', text: toolResultText },
+                        toolResultObj.content = [
+                            { type: 'text', text: exchange.tool.content || '' },
                             ...exchange.tool.images.map(imgUrl => ({
                                 type: 'image_url',
                                 image_url: { url: imgUrl, detail: 'auto' }
@@ -342,7 +355,7 @@ export class Conversation {
                         ];
                     }
 
-                    rawMessages.push(toolResultOptions);
+                    rawMessages.push(toolResultObj);
                 }
                 
                 // Do not 'continue;' here! We must allow the assistant's response that generated AFTER the tool execution

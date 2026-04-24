@@ -51,18 +51,42 @@ Initiates a new chat completion stream.
   "method": "chat.create",
   "params": {
     "model": "gemini-flash",
-    "messages": [{"role": "user", "content": "Hello"}]
+    "messages": [{"role": "user", "content": "Hello"}],
+    "strip_thinking": true
   }
 }
 ```
+
+**With Task:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-1",
+  "method": "chat.create",
+  "params": {
+    "task": "query",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "temperature": 0.9
+  }
+}
+```
+
+When `task` is provided, the gateway resolves the task's default model and parameters. Client-supplied params (like `temperature`, `model`, `max_tokens`) override task defaults. If the task defines a `systemPrompt`, it is prepended as the first system message.
+
+> **Thinking Stripper:** When `strip_thinking: true` or `no_thinking: true` is included in the params, any output reasoning tokens (like DeepSeek `<think>` tags or native `reasoning_content`) are automatically stripped from the `chat.delta` stream, yielding only the final cleanly-formatted answer.
+
+> **Thinking Control:** Use `enable_thinking: false` in params to disable verbose model reasoning at the source. This prevents the model from producing thinking tokens entirely (more efficient than stripping after the fact). See the REST API docs for adapter support matrix.
 
 **Responses:** Server streams multiple `chat.delta` notifications, followed by `chat.done`.
 
 ```json
 // Server -> Client
-{"jsonrpc": "2.0", "method": "chat.progress", "params": {"request_id": "req-1", "phase": "routing"}}
+{"jsonrpc": "2.0", "method": "chat.progress", "params": {"request_id": "req-1", "phase": "routing", "task": "query"}}
+{"jsonrpc": "2.0", "method": "chat.progress", "params": {"request_id": "req-1", "phase": "model_routed", "model": "minimax-chat", "provider": "anthropic"}}
+{"jsonrpc": "2.0", "method": "chat.progress", "params": {"request_id": "req-1", "phase": "context"}}
+{"jsonrpc": "2.0", "method": "chat.progress", "params": {"request_id": "req-1", "phase": "context_stats", "context": {"window_size": 1048576, "used_tokens": 2800, "available_tokens": 1045776, "strategy_applied": false, "resolved_max_tokens": 835060, "max_tokens_source": "implicit"}}}
 {"jsonrpc": "2.0", "method": "chat.delta", "params": {"request_id": "req-1", "choices": [{"index": 0, "delta": {"content": "Hello! "}}]}}
-{"jsonrpc": "2.0", "method": "chat.done", "params": {"request_id": "req-1", "cancelled": false}}
+{"jsonrpc": "2.0", "method": "chat.done", "params": {"request_id": "req-1", "cancelled": false, "finish_reason": "stop", "model": "minimax-chat", "provider": "anthropic", "context": {...}, "telemetry": {"time_to_first_token_ms": 120, "total_duration_ms": 340, "chunks_sent": 5, "usage": {"prompt_tokens": 2800, "completion_tokens": 42, "total_tokens": 2842}, "reasoning_produced": false}}}
 ```
 
 If `max_tokens` is omitted from `params`, the gateway resolves a safe output budget automatically and reports it in the `chat.progress` `context_stats` payload.
@@ -77,6 +101,19 @@ Efficient incremental context update using a connection-scoped buffer. Appends o
   "method": "chat.append",
   "params": {
     "model": "gemini-flash",
+    "message": {"role": "user", "content": "What's next?"}
+  }
+}
+```
+
+**With Task:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-2",
+  "method": "chat.append",
+  "params": {
+    "task": "query",
     "message": {"role": "user", "content": "What's next?"}
   }
 }
@@ -97,7 +134,7 @@ Cancels an ongoing generation stream.
 The cancellation target is the original `chat.create` or `chat.append` request ID. On success, the server stops streaming, aborts the upstream provider request, and finishes with:
 
 ```json
-{"jsonrpc": "2.0", "method": "chat.done", "params": {"request_id": "req-1", "cancelled": true, "telemetry": {"total_duration_ms": 1234}}}
+{"jsonrpc": "2.0", "method": "chat.done", "params": {"request_id": "req-1", "cancelled": true, "finish_reason": "cancel", "telemetry": {"total_duration_ms": 1234, "chunks_sent": 3, "usage": null}}}
 ```
 
 There is no separate acknowledgement response for `chat.cancel`; `chat.done` with `cancelled: true` is the completion signal.
@@ -108,7 +145,7 @@ During an active request, the server can emit these JSON-RPC notifications:
 
 - `chat.progress`: lifecycle and context updates such as `routing`, `model_routed`, `context`, `context_stats`, `network_throttled`, and `reasoning_started`
 - `chat.delta`: streamed token chunks in OpenAI-compatible `choices[].delta` shape
-- `chat.done`: terminal event with `cancelled: false` or `cancelled: true`
+- `chat.done`: terminal event with `cancelled`, `finish_reason`, `model`, `provider`, `context`, and `telemetry` (including `usage`, `chunks_sent`, `reasoning_produced`, timing)
 - `chat.error`: terminal error event
 
 Example `context_stats` notification:
@@ -198,5 +235,101 @@ To send images or files via the WebSocket interface, you must include them as st
 }
 ```
 *Note: Due to JSON serialization overhead, very large base64 image strings may impact WebSocket responsiveness briefly compared to the dedicated HTTP REST API.*
+
+### Tool Use / Function Calling
+
+The WebSocket endpoint supports OpenAI-spec tool use (function calling). Tools are specified in `chat.create` or `chat.append` params, and tool call results are aggregated and returned in `chat.done`.
+
+**Request with tools:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "tool-req-1",
+  "method": "chat.create",
+  "params": {
+    "model": "gemini-flash",
+    "messages": [{"role": "user", "content": "Read the file config.json"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "description": "Read file contents",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "description": "File path to read" }
+            },
+            "required": ["path"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }
+}
+```
+
+**Streaming tool call deltas** arrive in `chat.delta` notifications following the OpenAI format:
+
+```json
+{"jsonrpc":"2.0","method":"chat.delta","params":{"request_id":"tool-req-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}}
+{"jsonrpc":"2.0","method":"chat.delta","params":{"request_id":"tool-req-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"config.json\"}"}}]},"finish_reason":"tool_calls"}]}}
+```
+
+**`chat.done` includes aggregated tool calls:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "chat.done",
+  "params": {
+    "request_id": "tool-req-1",
+    "cancelled": false,
+    "finish_reason": "tool_calls",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_abc",
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "arguments": "{\"path\":\"config.json\"}"
+        }
+      }
+    ],
+    "model": "gemini-flash",
+    "provider": "gemini",
+    "context": {...},
+    "telemetry": {...}
+  }
+}
+```
+
+**Returning tool results** via `chat.append`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "tool-result-1",
+  "method": "chat.append",
+  "params": {
+    "model": "gemini-flash",
+    "message": {"role": "tool", "tool_call_id": "call_abc", "content": "{\"apiKey\": \"...\", ...}"}
+  }
+}
+```
+
+The gateway automatically preserves the assistant's `tool_calls` in the internal conversation buffer, so subsequent `chat.append` turns send complete multi-turn history to the model.
+
+**Fields added to `chat.done`:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `content` | string/null | Aggregated text content from the response |
+| `tool_calls` | array/null | Aggregated tool calls (null when no tools called) |
+
+These fields are additive — existing `chat.done` fields (`request_id`, `cancelled`, `finish_reason`, `model`, `provider`, `context`, `telemetry`) remain unchanged.
 
 ---
