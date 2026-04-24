@@ -453,12 +453,14 @@ async function applyDefaultConfig() {
 
     // Operation mode preference
     const savedOperationMode = await storage.getPref('operation-mode');
-    const opMode = savedOperationMode !== null ? savedOperationMode : (CONFIG.operationMode || 'websocket');
+    const opMode = savedOperationMode !== null ? savedOperationMode : (CONFIG.operationMode || 'sse');
     client.operationMode = opMode;
     if (elements.operationMode) {
         const opModeSelect = elements.operationMode.querySelector('select');
         if (opModeSelect) {
             opModeSelect.value = opMode;
+            // Notify NUI component of the programmatic value change
+            opModeSelect.dispatchEvent(new Event('change', { bubbles: true }));
         }
     }
 
