@@ -40,6 +40,7 @@ const elements = {
     temperature: document.getElementById('temperature'),
     maxTokens: document.getElementById('max-tokens'),
     systemPrompt: document.getElementById('system-prompt'),
+    operationMode: document.getElementById('operation-mode'),
     userName: document.getElementById('user-name'),
     userLocation: document.getElementById('user-location'),
     userLanguage: document.getElementById('user-language'),
@@ -449,7 +450,18 @@ async function applyDefaultConfig() {
     
     // Restore MCP vision toggle preference (default: OFF)
     useVisionAnalysis = savedMcpVision !== null ? savedMcpVision : false;
-    
+
+    // Operation mode preference
+    const savedOperationMode = await storage.getPref('operation-mode');
+    const opMode = savedOperationMode !== null ? savedOperationMode : (CONFIG.operationMode || 'websocket');
+    client.operationMode = opMode;
+    if (elements.operationMode) {
+        const opModeSelect = elements.operationMode.querySelector('select');
+        if (opModeSelect) {
+            opModeSelect.value = opMode;
+        }
+    }
+
     if (elements.userName) {
         const input = elements.userName.querySelector('input');
         if (input) input.value = name;
@@ -638,6 +650,13 @@ function setupEventListeners() {
     });
     elements.userLanguage?.querySelector('input')?.addEventListener('change', (e) => {
         storage.setPref('user-language', e.target.value).catch(() => {});
+    });
+
+    elements.operationMode?.querySelector('select')?.addEventListener('change', (e) => {
+        const newMode = e.target.value;
+        client.operationMode = newMode;
+        storage.setPref('operation-mode', newMode).catch(() => {});
+        console.log(`[Chat] Operation mode changed to ${newMode}`);
     });
     
     // Send message / Toggle Stop

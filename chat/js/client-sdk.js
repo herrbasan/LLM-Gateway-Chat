@@ -68,6 +68,9 @@ export class GatewayClient extends EventEmitter {
     this.accessKey = options.accessKey || '';
     // Auto-generate session ID for tracking related requests (e.g., for Kimi CLI Adapter)
     this.sessionId = options.sessionId || `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    
+    // Operation mode: 'websocket' or 'sse'
+    this.operationMode = options.operationMode || 'websocket';
     this.socket = null;
     this.streams = new Map();
     this._streamRegistry = new Map(); // chatId -> { stream, isAborted }
@@ -259,6 +262,11 @@ export class GatewayClient extends EventEmitter {
   // chatId: optional - if provided, registers stream in _streamRegistry for per-chat abort
   // conv: optional - the conversation object to save when the stream finishes
   async *streamChatIterable(params, chatId, useAppend = false, conv = null) {
+    if (this.operationMode === 'sse') {
+      yield* this._streamChatIterableSSE(params, chatId, conv);
+      return;
+    }
+
     let resolveNext;
     let nextPromise = new Promise(r => resolveNext = r);
     const eventQueue = [];
@@ -335,6 +343,161 @@ export class GatewayClient extends EventEmitter {
         }
       }
       if (this._currentIterableStream === stream) {
+        this._currentIterableStream = null;
+      }
+    }
+  }
+
+  async *_streamChatIterableSSE(params, chatId, conv = null) {
+    const controller = new AbortController();
+    const artificialStream = {
+      cancel: () => {
+        controller.abort();
+      }
+    };
+    
+    // Register the SSE stream so it can be aborted via abortStream
+    const entry = { stream: artificialStream, isAborted: false, conv };
+    if (chatId) {
+      this._streamRegistry.set(chatId, entry);
+    }
+    this._currentIterableStream = artificialStream;
+
+    try {
+      const url = `${this.restUrl}/v1/chat/completions`;
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream'
+      };
+      if (this.accessKey) {
+        headers['Authorization'] = `Bearer ${this.accessKey}`;
+      }
+
+      const bodyParams = {
+        ...params,
+        stream: true
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(bodyParams),
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        let errStr = await response.text();
+        yield { type: 'error', error: `HTTP ${response.status}: ${errStr}` };
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      
+      const aggregatedToolCalls = {};
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep partial line in buffer
+
+        let currentEventName = '';
+        
+        for (const line of lines) {
+          const tLine = line.trim();
+          if (!tLine) {
+            currentEventName = '';
+            continue;
+          }
+          
+          if (tLine.startsWith(':')) continue; // heartbeat comment
+
+          if (tLine.startsWith('event:')) {
+            currentEventName = tLine.substring(6).trim();
+            continue;
+          }
+          
+          if (tLine.startsWith('data:')) {
+            const dataStr = tLine.substring(5).trim();
+            if (dataStr === '[DONE]') continue;
+            
+            let dataObj;
+            try {
+              dataObj = JSON.parse(dataStr);
+            } catch (e) { continue; }
+            
+            // Standard token/chunk event (starts without 'event:' or event: message)
+            if (!currentEventName || currentEventName === 'message') {
+              const delta = dataObj?.choices?.[0]?.delta;
+              if (delta?.content !== undefined) {
+                yield { type: 'delta', content: delta.content || '' };
+              }
+              if (delta?.tool_calls) {
+                delta.tool_calls.forEach(tc => {
+                  if (!aggregatedToolCalls[tc.index]) {
+                    aggregatedToolCalls[tc.index] = {
+                      index: tc.index,
+                      id: tc.id || `call_${tc.index}`,
+                      type: tc.type || 'function',
+                      function: {
+                        name: tc.function?.name || '',
+                        arguments: tc.function?.arguments || ''
+                      }
+                    };
+                  } else {
+                    if (tc.function?.name) aggregatedToolCalls[tc.index].function.name += tc.function.name;
+                    if (tc.function?.arguments) aggregatedToolCalls[tc.index].function.arguments += tc.function.arguments;
+                  }
+                });
+                yield { type: 'delta', tool_calls: delta.tool_calls };
+              }
+
+              // Since SSE normally doesn't have a distinct chat.done event for OpenAI completions unless stream_options are set,
+              // Check if finish_reason exists in the chunk.
+              if (dataObj?.choices?.[0]?.finish_reason) {
+                yield { 
+                  type: 'done', 
+                  finish_reason: dataObj.choices[0].finish_reason,
+                  usage: dataObj?.usage || null,
+                  context: dataObj?.context || null,
+                  tool_calls: Object.keys(aggregatedToolCalls).length > 0 ? Object.values(aggregatedToolCalls) : null,
+                  content: dataObj?.content || null
+                };
+              }
+            } 
+            // Gateway specific compaction/progress events
+            else if (currentEventName.startsWith('compaction.')) {
+               yield { type: currentEventName.replace('.', '-'), data: dataObj };
+            }
+            else if (currentEventName === 'context.status') {
+               yield { type: 'progress', data: { phase: 'context_stats', context: dataObj } };
+            }
+            else if (currentEventName === 'error') {
+               yield { type: 'error', error: dataObj?.error?.message || dataObj.error || 'SSE Error' };
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        yield { type: 'aborted' };
+      } else {
+        yield { type: 'error', error: err.message };
+      }
+    } finally {
+      if (chatId) {
+        const entry = this._streamRegistry.get(chatId);
+        const convToSave = entry?.conv;
+        this._streamRegistry.delete(chatId);
+        if (convToSave?.save) {
+          convToSave.save();
+        }
+      }
+      if (this._currentIterableStream === artificialStream) {
         this._currentIterableStream = null;
       }
     }

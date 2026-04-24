@@ -16,6 +16,9 @@ window.CHAT_CONFIG = {
     // Optional: Default max tokens
     defaultMaxTokens: null,
     
+    // Connection operation mode: 'websocket' (default, fast full-duplex) or 'sse' (better for aggressive mobile proxy/backgrounding)
+    operationMode: 'websocket',
+    
     // Optional: Add to system prompt to discourage LLM from generating timestamps
     // timestampInstruction: 'Do not include timestamps in your responses.',
 };
