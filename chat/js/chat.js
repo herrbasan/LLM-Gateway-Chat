@@ -1334,6 +1334,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     
                 case 'done':
                     if (event.finish_reason === 'tool_calls' && event.tool_calls?.length > 0) {
+                        const toolDoneEx = conversation.getExchange(exchangeId);
+                        if (toolDoneEx) {
+                            if (event.reasoning_content) toolDoneEx.assistant.reasoning_content = event.reasoning_content;
+                            if (event.thinking_signature) toolDoneEx.assistant.thinking_signature = event.thinking_signature;
+                        }
                         for (const tc of event.tool_calls) {
                             try {
                                 const args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
@@ -1368,7 +1373,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     // Ensure final content is rendered
                     updateAssistantContent(assistantEl, finalContent);
                     // Await save to ensure data is persisted before continuing
-                    await conversation.setAssistantComplete(exchangeId, event.usage, event.context);
+                    await conversation.setAssistantComplete(exchangeId, event.usage, event.context, {
+                        reasoning_content: event.reasoning_content || null,
+                        thinking_signature: event.thinking_signature || null
+                    });
                     finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context);
                     scrollToBottom();
                     break;

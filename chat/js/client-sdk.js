@@ -280,6 +280,7 @@ export class GatewayClient extends EventEmitter {
       ? this.chatAppendStream({...params, stream: true})
       : this.chatStream({...params, stream: true});
     let isAborted = false;
+    let wsReasoningContent = '';
 
     // Register stream for per-chat abort support
     const entry = { stream, isAborted: false, conv };
@@ -294,6 +295,9 @@ export class GatewayClient extends EventEmitter {
       if (delta?.content !== undefined) {
         pushEvent({ type: 'delta', content: delta.content || '' });
       }
+      if (delta?.reasoning_content !== undefined) {
+        wsReasoningContent += delta.reasoning_content;
+      }
       if (delta?.tool_calls) {
         pushEvent({ type: 'delta', tool_calls: delta.tool_calls });
       }
@@ -301,14 +305,20 @@ export class GatewayClient extends EventEmitter {
 
     stream.on('progress', (data) => pushEvent({ type: 'progress', data }));
 
-    stream.on('done', (data) => pushEvent({ 
-      type: 'done', 
-      usage: data?.telemetry?.usage ?? data?.usage ?? null, 
-      context: data?.context ?? null,
-      finish_reason: data?.finish_reason ?? null,
-      tool_calls: data?.tool_calls ?? null,
-      content: data?.content ?? null
-    }));
+    stream.on('done', (data) => {
+      const doneReasoning = data?.reasoning_content || wsReasoningContent || null;
+      const doneSignature = data?.thinking_signature ?? null;
+      pushEvent({ 
+        type: 'done', 
+        usage: data?.telemetry?.usage ?? data?.usage ?? null, 
+        context: data?.context ?? null,
+        finish_reason: data?.finish_reason ?? null,
+        tool_calls: data?.tool_calls ?? null,
+        content: data?.content ?? null,
+        reasoning_content: doneReasoning,
+        thinking_signature: doneSignature
+      });
+    });
     
     stream.on('error', (err) => {
       if (!isAborted) {
@@ -396,6 +406,8 @@ export class GatewayClient extends EventEmitter {
       let buffer = '';
       
       const aggregatedToolCalls = {};
+      let reasoningContent = '';
+      let thinkingSignature = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -436,6 +448,9 @@ export class GatewayClient extends EventEmitter {
               if (delta?.content !== undefined) {
                 yield { type: 'delta', content: delta.content || '' };
               }
+              if (delta?.reasoning_content !== undefined) {
+                reasoningContent += delta.reasoning_content;
+              }
               if (delta?.tool_calls) {
                 delta.tool_calls.forEach(tc => {
                   if (!aggregatedToolCalls[tc.index]) {
@@ -456,16 +471,19 @@ export class GatewayClient extends EventEmitter {
                 yield { type: 'delta', tool_calls: delta.tool_calls };
               }
 
-              // Since SSE normally doesn't have a distinct chat.done event for OpenAI completions unless stream_options are set,
-              // Check if finish_reason exists in the chunk.
               if (dataObj?.choices?.[0]?.finish_reason) {
+                if (dataObj._thinking_signature) {
+                  thinkingSignature = dataObj._thinking_signature;
+                }
                 yield { 
                   type: 'done', 
                   finish_reason: dataObj.choices[0].finish_reason,
                   usage: dataObj?.usage || null,
                   context: dataObj?.context || null,
                   tool_calls: Object.keys(aggregatedToolCalls).length > 0 ? Object.values(aggregatedToolCalls) : null,
-                  content: dataObj?.content || null
+                  content: dataObj?.content || null,
+                  reasoning_content: reasoningContent || null,
+                  thinking_signature: thinkingSignature
                 };
               }
             } 

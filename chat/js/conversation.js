@@ -165,7 +165,7 @@ export class Conversation {
         // Content accumulates in memory and is persisted when setAssistantComplete() is called.
     }
 
-    setAssistantComplete(exchangeId, usage = null, contextInfo = null) {
+    setAssistantComplete(exchangeId, usage = null, contextInfo = null, thinkingData = null) {
         const exchange = this.getExchange(exchangeId);
         if (!exchange) return;
 
@@ -177,6 +177,12 @@ export class Conversation {
 
         if (usage) exchange.assistant.usage = usage;
         if (contextInfo) exchange.assistant.context = contextInfo;
+        if (thinkingData?.reasoning_content) {
+            exchange.assistant.reasoning_content = thinkingData.reasoning_content;
+        }
+        if (thinkingData?.thinking_signature) {
+            exchange.assistant.thinking_signature = thinkingData.thinking_signature;
+        }
 
         // Clean content - remove any duplicate timestamps the LLM may have generated
         const cleanedContent = this._stripExtraTimestamps(exchange.assistant.content);
@@ -398,18 +404,31 @@ export class Conversation {
             }
 
             // Assistant message (only if complete)
-            if (exchange.assistant.isComplete && exchange.assistant.content) {
-                // Clean assistant content (remove duplicate timestamps and thinking portions)
-                const cleanAssistantContent = this._stripExtraTimestamps(exchange.assistant.content)
-                    .replace(/<think>[\s\S]*?<\/think>/g, '')
-                    .trim();
+            if (exchange.assistant.isComplete && (exchange.assistant.content || exchange.assistant.reasoning_content)) {
+                const cleanAssistantContent = exchange.assistant.content
+                    ? this._stripExtraTimestamps(exchange.assistant.content).trim()
+                    : '';
 
-                if (cleanAssistantContent) {
-                    rawMessages.push({
+                if (cleanAssistantContent || exchange.assistant.reasoning_content) {
+                    const msg = {
                         role: 'assistant',
-                        content: cleanAssistantContent
-                    });
+                        content: cleanAssistantContent || null
+                    };
+
+                    if (exchange.assistant.reasoning_content) {
+                        msg.reasoning_content = exchange.assistant.reasoning_content;
+                        if (exchange.assistant.thinking_signature) {
+                            msg.thinking_blocks = [{
+                                type: 'thinking',
+                                thinking: exchange.assistant.reasoning_content,
+                                signature: exchange.assistant.thinking_signature
+                            }];
+                        }
+                    }
+
+                    rawMessages.push(msg);
                 }
+            }
             }
         }
 
