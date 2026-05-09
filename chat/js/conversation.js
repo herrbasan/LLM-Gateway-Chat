@@ -338,6 +338,70 @@ export class Conversation {
                 if (exchange.tool.status === 'success' || exchange.tool.status === 'error') {
                     const callId = exchange.tool.callId || `call_${exchange.id}`;
                     
+                    // --- BACKWARD COMPATIBILITY FIX ---
+                    // Older chats (pre-migration) did not save `tool_calls` onto the preceding assistant exchange.
+                    // This causes native tool APIs to reject the request due to orphaned tool_result blocks.
+                    // We scan backwards to find the last assistant message and backfill the tool_call.
+                    
+                    let targetAssistant = null;
+                    // Scan backwards to find the assistant message, but STOP if we hit a user/system message.
+                    // The LLM provider structurally rejects if we skip over a user message to attach tool_calls to an older assistant.
+                    for (let j = rawMessages.length - 1; j >= 0; j--) {
+                        const lastMsg = rawMessages[j];
+                        if (lastMsg.role === 'assistant') {
+                            targetAssistant = lastMsg;
+                            break;
+                        } else if (lastMsg.role !== 'tool') {
+                            break; // Cannot bridge across user/system messages
+                        }
+                    }
+                    
+                    if (targetAssistant) {
+                        if (!targetAssistant.tool_calls) targetAssistant.tool_calls = [];
+                        const hasMatchingCall = targetAssistant.tool_calls.some(tc => tc.id === callId);
+                        if (!hasMatchingCall) {
+                            let sanitizedArgs = {};
+                            try {
+                                sanitizedArgs = typeof exchange.tool.args === 'string' ? JSON.parse(exchange.tool.args) : exchange.tool.args;
+                                sanitizedArgs = this._sanitizeToolArgs(sanitizedArgs);
+                            } catch (e) {
+                                sanitizedArgs = exchange.tool.args || {};
+                            }
+                            targetAssistant.tool_calls.push({
+                                id: callId,
+                                type: 'function',
+                                function: {
+                                    name: exchange.tool.name || 'unknown_tool',
+                                    arguments: typeof sanitizedArgs === 'string' ? sanitizedArgs : JSON.stringify(sanitizedArgs)
+                                }
+                            });
+                        }
+                    } else {
+                        // If no valid preceding assistant message is exposed, inject a dummy one
+                        let sanitizedArgs = {};
+                        try {
+                            sanitizedArgs = typeof exchange.tool.args === 'string' ? JSON.parse(exchange.tool.args) : exchange.tool.args;
+                            sanitizedArgs = this._sanitizeToolArgs(sanitizedArgs);
+                        } catch (e) {
+                            sanitizedArgs = exchange.tool.args || {};
+                        }
+                        
+                        // We push the dummy assistant message into rawMessages BEFORE the tool result
+                        rawMessages.push({
+                            role: 'assistant',
+                            content: null,
+                            tool_calls: [{
+                                id: callId,
+                                type: 'function',
+                                function: {
+                                    name: exchange.tool.name || 'unknown_tool',
+                                    arguments: typeof sanitizedArgs === 'string' ? sanitizedArgs : JSON.stringify(sanitizedArgs)
+                                }
+                            }]
+                        });
+                    }
+                    // ----------------------------------
+
                     const toolResultObj = {
                         role: 'tool',
                         tool_call_id: callId,
@@ -413,6 +477,13 @@ export class Conversation {
                                 type: 'thinking',
                                 thinking: exchange.assistant.reasoning_content,
                                 signature: exchange.assistant.thinking_signature
+                            }];
+                        } else {
+                            // Anthropic/Deepseek models via specific gateways might require thinking even without signature
+                            msg.thinking_blocks = [{
+                                type: 'thinking',
+                                thinking: exchange.assistant.reasoning_content,
+                                signature: ''
                             }];
                         }
                     }
