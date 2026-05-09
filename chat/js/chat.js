@@ -20,6 +20,7 @@ const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
 // State
 let currentChatId = null;
 let conversation = null;
+let currentOptionsChatId = null;
 
 // Multi-conversation: per-chat DOM containers (hidden containers for background chats)
 const chatContainers = new Map(); // chatId -> HTMLDivElement
@@ -388,6 +389,7 @@ async function init() {
 
     // Setup event listeners first
     setupEventListeners();
+    setupDialogEventListeners();
 
     // Create vision toggle UI
     ensureVisionToggleUI();
@@ -3042,44 +3044,16 @@ function renderHistoryList() {
         const actionsDiv = document.createElement('div');
         actionsDiv.className = 'chat-history-item-actions';
         
-        const exportJsonBtn = document.createElement('nui-button');
-        exportJsonBtn.className = 'chat-history-item-action';
-        exportJsonBtn.innerHTML = '<button type="button"><nui-icon name="content_copy"></nui-icon></button>';
-        exportJsonBtn.title = 'Copy conversation JSON to clipboard';
-        exportJsonBtn.addEventListener('click', (e) => {
+        const optionsBtn = document.createElement('nui-button');
+        optionsBtn.className = 'chat-history-item-action';
+        optionsBtn.innerHTML = '<button type="button"><nui-icon name="more_vert"></nui-icon></button>';
+        optionsBtn.title = 'Chat Options';
+        optionsBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            exportChatAsJson(chat.id, exportJsonBtn);
+            openChatOptions(chat.id);
         });
-
-        const exportFullBtn = document.createElement('nui-button');
-        exportFullBtn.className = 'chat-history-item-action';
-        exportFullBtn.innerHTML = '<button type="button"><nui-icon name="download"></nui-icon></button>';
-        exportFullBtn.title = 'Export to file (with images)';
-        exportFullBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            exportChatToFile(chat.id);
-        });
-
-        const exportMdBtn = document.createElement('nui-button');
-        exportMdBtn.className = 'chat-history-item-action';
-        exportMdBtn.innerHTML = '<button type="button"><nui-icon name="save"></nui-icon></button>';
-        exportMdBtn.title = 'Export Markdown';
-        exportMdBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            exportChatAsMarkdown(chat.id);
-        });
-
-        const delBtn = document.createElement('nui-button');
-        delBtn.setAttribute('variant', 'danger');
-        delBtn.className = 'chat-history-item-action chat-history-item-delete';
-        delBtn.innerHTML = '<button type="button"><nui-icon name="close"></nui-icon></button>';
-        delBtn.title = 'Delete chat (Shift+click to skip confirm)';
-        delBtn.addEventListener('click', (e) => deleteChat(chat.id, e));
         
-        actionsDiv.appendChild(exportJsonBtn);
-        actionsDiv.appendChild(exportFullBtn);
-        actionsDiv.appendChild(exportMdBtn);
-        actionsDiv.appendChild(delBtn);
+        actionsDiv.appendChild(optionsBtn);
 
         item.appendChild(titleSpan);
         item.appendChild(actionsDiv);
@@ -3087,6 +3061,18 @@ function renderHistoryList() {
         item.addEventListener('click', () => switchChat(chat.id));
         elements.chatHistoryList.appendChild(item);
     });
+}
+
+function openChatOptions(chatId) {
+    currentOptionsChatId = chatId;
+    const chatMeta = chatHistory.conversations.find(c => c.id === chatId);
+    if (!chatMeta) return;
+
+    const dialog = document.getElementById('chat-options-dialog');
+    const titleInput = document.getElementById('chat-options-title-input');
+    
+    titleInput.value = chatMeta.title || 'New Chat';
+    dialog.showModal();
 }
 
 // ============================================
@@ -3627,6 +3613,47 @@ function openMCPEditDialog(server) {
     }
 
     dialog.showModal();
+}
+
+function setupDialogEventListeners() {
+    document.getElementById('chat-options-rename-btn')?.addEventListener('click', () => {
+        if (!currentOptionsChatId) return;
+        const titleInput = document.getElementById('chat-options-title-input');
+        const newTitle = titleInput.value.trim();
+        if (newTitle) {
+            const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
+            if (chatMeta) {
+                chatMeta.title = newTitle;
+                chatHistory._saveList();
+                renderHistoryList();
+                document.getElementById('chat-options-rename-btn').innerHTML = '<button type="button"><nui-icon name="check"></nui-icon></button>';
+                setTimeout(() => {
+                    document.getElementById('chat-options-rename-btn').innerHTML = '<button type="button">Rename</button>';
+                }, 1500);
+            }
+        }
+    });
+
+    document.getElementById('chat-options-copy-json')?.addEventListener('click', (e) => {
+        if (!currentOptionsChatId) return;
+        exportChatAsJson(currentOptionsChatId, e.currentTarget);
+    });
+
+    document.getElementById('chat-options-save-json')?.addEventListener('click', () => {
+        if (!currentOptionsChatId) return;
+        exportChatToFile(currentOptionsChatId);
+    });
+
+    document.getElementById('chat-options-save-md')?.addEventListener('click', () => {
+        if (!currentOptionsChatId) return;
+        exportChatAsMarkdown(currentOptionsChatId);
+    });
+
+    document.getElementById('chat-options-delete')?.addEventListener('click', (e) => {
+        if (!currentOptionsChatId) return;
+        deleteChat(currentOptionsChatId, e);
+        document.getElementById('chat-options-dialog')?.close();
+    });
 }
 
 // ============================================

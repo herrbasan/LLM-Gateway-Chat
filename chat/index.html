@@ -215,6 +215,45 @@
         </nui-content>
     </nui-app>
 
+    <!-- Chat Options Dialog -->
+    <nui-dialog id="chat-options-dialog" mode="page" title="Chat Options">
+        <div style="padding: var(--nui-space); max-width: 500px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--nui-space);">
+            <div class="sidebar-section">
+                <label>Chat Title</label>
+                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                    <nui-input style="flex: 1;">
+                        <input type="text" id="chat-options-title-input">
+                    </nui-input>
+                    <nui-button id="chat-options-rename-btn" variant="primary">
+                        <button type="button">Rename</button>
+                    </nui-button>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <label>Export & Copy</label>
+                <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                    <nui-button id="chat-options-copy-json" title="Copy conversation JSON to clipboard">
+                        <button type="button"><nui-icon name="content_copy"></nui-icon> Copy JSON</button>
+                    </nui-button>
+                    <nui-button id="chat-options-save-json" title="Export to file (with images)">
+                        <button type="button"><nui-icon name="download"></nui-icon> Save JSON</button>
+                    </nui-button>
+                    <nui-button id="chat-options-save-md" title="Export Markdown">
+                        <button type="button"><nui-icon name="save"></nui-icon> Save Markdown</button>
+                    </nui-button>
+                </div>
+            </div>
+
+            <div class="sidebar-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+                <label style="color: var(--color-danger);">Danger Zone</label>
+                <nui-button id="chat-options-delete" variant="danger">
+                    <button type="button"><nui-icon name="delete"></nui-icon> Delete Conversation</button>
+                </nui-button>
+            </div>
+        </div>
+    </nui-dialog>
+
     <!-- Summarize Dialog -->
     <nui-dialog id="summarize-dialog" mode="page" title="Conversation Summary">
         <div style="padding: 1rem; max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem;">
