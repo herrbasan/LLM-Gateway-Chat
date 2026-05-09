@@ -3044,7 +3044,7 @@ function renderHistoryList() {
 
         if (chat.pinned) {
             const pinIcon = document.createElement('nui-icon');
-            pinIcon.setAttribute('name', 'push_pin');
+            pinIcon.setAttribute('name', 'star_rate');
             pinIcon.style.fontSize = '0.875rem';
             pinIcon.style.color = 'var(--text-color-dim)';
             titleDiv.appendChild(pinIcon);
@@ -3672,9 +3672,10 @@ function setupDialogEventListeners() {
                 chatMeta.title = newTitle;
                 chatHistory._saveList();
                 renderHistoryList();
-                document.getElementById('chat-options-rename-btn').innerHTML = '<button type="button"><nui-icon name="check"></nui-icon></button>';
+                const renameBtn = document.getElementById('chat-options-rename-btn');
+                renameBtn.setLoading(true);
                 setTimeout(() => {
-                    document.getElementById('chat-options-rename-btn').innerHTML = '<button type="button">Rename</button>';
+                    renameBtn.setLoading(false);
                 }, 1500);
             }
         }
