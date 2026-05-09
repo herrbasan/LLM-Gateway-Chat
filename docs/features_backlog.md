@@ -16,6 +16,10 @@
   - Debug export (clipboard): JSON without images for debugging
   - Full export (file): JSON with embedded images for backup/restore
   - Import (file): Restore from full export file
+- [x] **Chat Organization Utilities**: Ability to Pin conversations to the top of the history list and Clone/duplicate existing sessions.
+- [x] **Chat Statistics**: View creation times and message turn counts inside the Chat Options dialog.
+- [x] **Compact Sidebar**: Consolidate chat actions into a dialog to reduce UI clutter.
+- [ ] **Chat Summarization Generator**: Automatically or manually trigger an LLM to read the current chat and generate a non-destructive, highly condensed markdown summary to save space and context.
 - [ ] **System Prompt Presets**: Save, name, and quickly select frequently used system prompts directly from the sidebar.
 - [ ] **Real-time Input Token Estimator**: Show an estimated token count for the user's input draft before they hit send.
 
@@ -31,4 +35,5 @@
 - [ ] **Tool Execution Status**: Display realtime MCP tool executions and MediaService tasks similar to VS Code Copilot's tool-use UI.
 
 ## Network & Connection
+- [x] **Streaming Crash Self-Healing**: Properly intercept backend or API aborts (e.g., HTTP 400) mid-stream and auto-inject the raw system error into the completion array so the LLM is aware of the failure context.
 - [ ] **SSE Operation Mode**: Support Server-Sent Events (SSE) as an optional operation mode for chat messaging and streaming (pending backend support).
