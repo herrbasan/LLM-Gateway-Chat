@@ -126,10 +126,14 @@ export class ChatHistory {
     // ============================================
 
     /**
-     * Get all conversations sorted by most recent
+     * Get all conversations sorted by most recent (pinned items first)
      */
     getAll() {
-        return [...this.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+        return [...this.conversations].sort((a, b) => {
+            if (a.pinned && !b.pinned) return -1;
+            if (!a.pinned && b.pinned) return 1;
+            return b.updatedAt - a.updatedAt;
+        });
     }
 
     /**

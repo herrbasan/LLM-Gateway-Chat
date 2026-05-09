@@ -3036,10 +3036,29 @@ function renderHistoryList() {
         item.className = 'chat-history-item' + (chat.id === currentChatId ? ' active' : '');
         item.dataset.chatId = chat.id;
 
+        const titleDiv = document.createElement('div');
+        titleDiv.style.display = 'flex';
+        titleDiv.style.alignItems = 'center';
+        titleDiv.style.gap = '0.25rem';
+        titleDiv.style.pointerEvents = 'none';
+
+        if (chat.pinned) {
+            const pinIcon = document.createElement('nui-icon');
+            pinIcon.setAttribute('name', 'push_pin');
+            pinIcon.style.fontSize = '0.875rem';
+            pinIcon.style.color = 'var(--text-color-dim)';
+            titleDiv.appendChild(pinIcon);
+        }
+
         const titleSpan = document.createElement('span');
         titleSpan.className = 'chat-history-item-title';
         titleSpan.textContent = chat.title || 'New Chat';
         titleSpan.title = chat.title;
+        titleSpan.style.flex = '1';
+        titleSpan.style.overflow = 'hidden';
+        titleSpan.style.textOverflow = 'ellipsis';
+        
+        titleDiv.appendChild(titleSpan);
         
         const actionsDiv = document.createElement('div');
         actionsDiv.className = 'chat-history-item-actions';
@@ -3055,7 +3074,7 @@ function renderHistoryList() {
         
         actionsDiv.appendChild(optionsBtn);
 
-        item.appendChild(titleSpan);
+        item.appendChild(titleDiv);
         item.appendChild(actionsDiv);
         
         item.addEventListener('click', () => switchChat(chat.id));
@@ -3070,8 +3089,35 @@ function openChatOptions(chatId) {
 
     const dialog = document.getElementById('chat-options-dialog');
     const titleInput = document.getElementById('chat-options-title-input');
+    const pinToggle = document.getElementById('chat-options-pin-toggle');
+    const createdDateSpan = document.getElementById('chat-options-created-date');
+    const updatedDateSpan = document.getElementById('chat-options-updated-date');
+    const msgCountSpan = document.getElementById('chat-options-msg-count');
     
     titleInput.value = chatMeta.title || 'New Chat';
+    pinToggle.checked = !!chatMeta.pinned;
+    
+    createdDateSpan.textContent = new Date(chatMeta.timestamp).toLocaleString();
+    updatedDateSpan.textContent = new Date(chatMeta.updatedAt).toLocaleString();
+    
+    // Attempt async fetch of messages for length
+    msgCountSpan.textContent = 'Counting...';
+    storage.loadConversation(chatId).then(exchanges => {
+        if (!exchanges) {
+            msgCountSpan.textContent = '0';
+            return;
+        }
+        let total = 0;
+        exchanges.forEach(ex => {
+            if (ex.user) total++;
+            if (ex.assistant) total++;
+            if (ex.tool) total++;
+        });
+        msgCountSpan.textContent = total.toString();
+    }).catch(() => {
+        msgCountSpan.textContent = 'Error';
+    });
+    
     dialog.showModal();
 }
 
@@ -3632,6 +3678,43 @@ function setupDialogEventListeners() {
                 }, 1500);
             }
         }
+    });
+
+    document.getElementById('chat-options-pin-toggle')?.addEventListener('change', (e) => {
+        if (!currentOptionsChatId) return;
+        const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
+        if (chatMeta) {
+            chatMeta.pinned = e.target.checked;
+            chatHistory._saveList();
+            renderHistoryList();
+        }
+    });
+
+    document.getElementById('chat-options-clone-btn')?.addEventListener('click', async () => {
+        if (!currentOptionsChatId) return;
+        const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
+        const exchanges = await storage.loadConversation(currentOptionsChatId);
+        if (!chatMeta || !exchanges) return;
+
+        const newId = chatHistory._generateId();
+        const cloneMeta = {
+            ...chatMeta,
+            id: newId,
+            title: `Copy of ${chatMeta.title || 'Chat'}`,
+            timestamp: Date.now(),
+            updatedAt: Date.now()
+        };
+        
+        chatHistory.conversations.unshift(cloneMeta);
+        chatHistory._saveList();
+        
+        // Rewrite exchange IDs slightly or retain them (retaining is fine since they are scoped per chat ID)
+        await storage.saveConversation(newId, exchanges);
+        
+        renderHistoryList();
+        document.getElementById('chat-options-dialog')?.close();
+        await switchChat(newId);
+        nui.components.toast?.success?.('Chat cloned successfully');
     });
 
     document.getElementById('chat-options-copy-json')?.addEventListener('click', (e) => {

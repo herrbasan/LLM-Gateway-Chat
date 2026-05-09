@@ -218,9 +218,19 @@
     <!-- Chat Options Dialog -->
     <nui-dialog id="chat-options-dialog" mode="page" title="Chat Options">
         <div style="padding: var(--nui-space); max-width: 500px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--nui-space);">
+            
             <div class="sidebar-section">
-                <label>Chat Title</label>
-                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <label>Chat Info & Statistics</label>
+                <div style="background: var(--color-shade2); padding: 0.75rem; border-radius: var(--border-radius1); font-size: 0.875rem; color: var(--text-color-dim); display: flex; flex-direction: column; gap: 0.25rem;">
+                    <div><strong>Created:</strong> <span id="chat-options-created-date">-</span></div>
+                    <div><strong>Last Updated:</strong> <span id="chat-options-updated-date">-</span></div>
+                    <div><strong>Messages:</strong> <span id="chat-options-msg-count">-</span></div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <label>Chat Title & Status</label>
+                <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;">
                     <nui-input style="flex: 1;">
                         <input type="text" id="chat-options-title-input">
                     </nui-input>
@@ -228,13 +238,19 @@
                         <button type="button">Rename</button>
                     </nui-button>
                 </div>
+                <nui-checkbox title="Pin this chat to the top of the history list">
+                    <input type="checkbox" id="chat-options-pin-toggle"> Pin to Top
+                </nui-checkbox>
             </div>
 
             <div class="sidebar-section">
-                <label>Export & Copy</label>
+                <label>Actions & Export</label>
                 <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                    <nui-button id="chat-options-clone-btn" title="Create a copy of this conversation">
+                        <button type="button"><nui-icon name="file_copy"></nui-icon> Clone Chat</button>
+                    </nui-button>
                     <nui-button id="chat-options-copy-json" title="Copy conversation JSON to clipboard">
-                        <button type="button"><nui-icon name="content_copy"></nui-icon> Copy JSON</button>
+                        <button type="button"><nui-icon name="data_object"></nui-icon> Copy JSON</button>
                     </nui-button>
                     <nui-button id="chat-options-save-json" title="Export to file (with images)">
                         <button type="button"><nui-icon name="download"></nui-icon> Save JSON</button>
