@@ -191,7 +191,7 @@ function buildExchangeElement(exchange) {
                 assistantEl.dataset.timestampLen = tsLen.toString();
                 assistantEl.dataset.timestampStripped = 'true';
             }
-            updateAssistantContent(assistantEl, assistantParsed.cleanContent);
+            updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
 
             if (exchange.assistant.isComplete) {
                 finalizeAssistantElement(assistantEl, exchange.id);
@@ -257,7 +257,7 @@ function buildExchangeElement(exchange) {
             assistantEl.dataset.timestampLen = tsLen.toString();
             assistantEl.dataset.timestampStripped = 'true';
         }
-        updateAssistantContent(assistantEl, assistantParsed.cleanContent);
+        updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
 
         if (exchange.assistant.isComplete) {
             finalizeAssistantElement(assistantEl, exchange.id);
@@ -1258,6 +1258,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         }
         
         let contentBuffer = '';
+        let reasoningBuffer = '';
         let pendingUpdate = false;
         let lastRender = 0;
         const RENDER_INTERVAL = 50; // Render at most every 50ms
@@ -1280,6 +1281,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                         conversation.updateAssistantResponse(exchangeId, event.content);
                     }
 
+                    if (event.reasoning_content !== undefined) {
+                        reasoningBuffer += event.reasoning_content;
+                        conversation.updateAssistantReasoning(exchangeId, event.reasoning_content);
+                    }
+
                     if (event.tool_calls && event.tool_calls.length > 0 && !isReceivingTool) {
                         isReceivingTool = true;
                         showPendingToolUI(exchangeId, chatId);
@@ -1293,7 +1299,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 
                         const wasNearBottom = isNearBottom();
                         setTimeout(() => {
-                            updateAssistantContent(assistantEl, contentBuffer);
+                            updateAssistantContent(assistantEl, contentBuffer, reasoningBuffer);
                             lastRender = performance.now();
                             pendingUpdate = false;
                             if (wasNearBottom) scrollToBottom();
@@ -1338,6 +1344,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                         if (toolDoneEx) {
                             if (event.reasoning_content) toolDoneEx.assistant.reasoning_content = event.reasoning_content;
                             if (event.thinking_signature) toolDoneEx.assistant.thinking_signature = event.thinking_signature;
+                            toolDoneEx.assistant.tool_calls = event.tool_calls;
                         }
                         for (const tc of event.tool_calls) {
                             try {
@@ -1517,7 +1524,7 @@ function renderExchange(exchange) {
                 assistantEl.dataset.timestampLen = tsLen.toString();
                 assistantEl.dataset.timestampStripped = 'true';
             }
-            updateAssistantContent(assistantEl, assistantParsed.cleanContent);
+            updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
             // In renderExchange, toolEl is already in DOM, so we can insert assistant as sibling
             // This keeps tool and assistant as separate message bubbles
             toolEl.insertAdjacentElement('afterend', assistantEl);
@@ -1601,7 +1608,7 @@ function renderExchange(exchange) {
             assistantEl.dataset.timestampLen = tsLen.toString();
             assistantEl.dataset.timestampStripped = 'true';
         }
-        updateAssistantContent(assistantEl, assistantParsed.cleanContent);
+        updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
         getActiveContainer()?.appendChild(assistantEl);
 
         if (exchange.assistant.isComplete) {
@@ -1915,7 +1922,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
 
     let originalEl = toolContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${originalExchangeId}"]`);
     if (originalEl) {
-        updateAssistantContent(originalEl, oldEx.assistant.content);
+        updateAssistantContent(originalEl, oldEx.assistant.content, oldEx.assistant.reasoning_content);
     }
 
     const pendingEl = toolContainer?.querySelector(`.pending-tool-element[data-pending-exchange-id="${originalExchangeId}"]`);
@@ -2092,7 +2099,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     }
 }
 
-function updateAssistantContent(el, content) {
+function updateAssistantContent(el, content, reasoningContent = null) {
     const contentDiv = el.querySelector('.message-content');
     if (!contentDiv) return;
 
@@ -2114,7 +2121,7 @@ function updateAssistantContent(el, content) {
     }
 
     // Hide the entire assistant bubble if it's completely empty (or just contained the stripped TOOL_CALL)
-    if (!visibleContent.trim()) {
+    if (!visibleContent.trim() && (!reasoningContent || !reasoningContent.trim())) {
         el.style.display = 'none';
         // Note: we don't return here, so it updates the internal state in case it needs to re-appear later
     } else {
@@ -2122,8 +2129,10 @@ function updateAssistantContent(el, content) {
     }
 
     // Skip if content hasn't changed (prevents redundant renders during streaming)
-    if (contentDiv.dataset.lastContent === visibleContent) return;
+    const rKey = reasoningContent || '';
+    if (contentDiv.dataset.lastContent === visibleContent && contentDiv.dataset.lastReasoning === rKey) return;
     contentDiv.dataset.lastContent = visibleContent;
+    contentDiv.dataset.lastReasoning = rKey;
 
     // Check if thinking-content is currently scrolled to bottom to maintain it
     let thinkingScrollTop = 0;
@@ -2137,6 +2146,13 @@ function updateAssistantContent(el, content) {
 
     // Parse thinking and answer
     const parsed = parseThinking(visibleContent);
+    
+    // Explicit API reasoning_content overrides inline <think> tags
+    if (reasoningContent) {
+        parsed.thinking = reasoningContent;
+        // if explicitly passed via API, the content doesn't have <think> tags so answer is just the content.
+    }
+
     // Use the element's actual streaming state, not just whether <think> is open
     const isNetworkStreaming = el.dataset.isStreaming === 'true';
 
@@ -2148,6 +2164,7 @@ function updateAssistantContent(el, content) {
     let thinkingBlock = contentDiv.querySelector('.thinking-block');
 
     if (parsed.thinking !== null) {
+
         if (!thinkingBlock) {
             // Create thinking block once - it doesn't exist yet
             thinkingBlock = document.createElement('div');
@@ -2420,7 +2437,7 @@ function switchVersion(exchangeId, direction) {
         const exchange = conversation.getExchange(exchangeId);
         const el = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
         if (el) {
-            updateAssistantContent(el, exchange.assistant.content);
+            updateAssistantContent(el, exchange.assistant.content, exchange.assistant.reasoning_content);
             updateVersionControls(el, exchangeId);
             finalizeAssistantElement(el, exchangeId);
         }

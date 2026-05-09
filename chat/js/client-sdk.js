@@ -297,6 +297,7 @@ export class GatewayClient extends EventEmitter {
       }
       if (delta?.reasoning_content !== undefined) {
         wsReasoningContent += delta.reasoning_content;
+        pushEvent({ type: 'delta', reasoning_content: delta.reasoning_content || '' });
       }
       if (delta?.tool_calls) {
         pushEvent({ type: 'delta', tool_calls: delta.tool_calls });

@@ -165,6 +165,16 @@ export class Conversation {
         // Content accumulates in memory and is persisted when setAssistantComplete() is called.
     }
 
+    updateAssistantReasoning(exchangeId, delta) {
+        const exchange = this.getExchange(exchangeId);
+        if (!exchange) return;
+        
+        if (typeof exchange.assistant.reasoning_content !== 'string') {
+            exchange.assistant.reasoning_content = '';
+        }
+        exchange.assistant.reasoning_content += delta;
+    }
+
     setAssistantComplete(exchangeId, usage = null, contextInfo = null, thinkingData = null) {
         const exchange = this.getExchange(exchangeId);
         if (!exchange) return;
@@ -325,25 +335,8 @@ export class Conversation {
             // PHASE-3: Tool exchanges - add tool result as tool message, skip normal user/assistant
             if (exchange.type === 'tool') {
                 if (exchange.tool.status === 'success' || exchange.tool.status === 'error') {
-                    // 1) First, insert the assistant's tool call so the LLM remembers what it did
-                    // Strip base64 data from tool args to prevent bloating context
-                    const sanitizedArgs = this._sanitizeToolArgs(exchange.tool.args);
                     const callId = exchange.tool.callId || `call_${exchange.id}`;
                     
-                    rawMessages.push({
-                        role: 'assistant',
-                        content: null,
-                        tool_calls: [{
-                            id: callId,
-                            type: 'function',
-                            function: {
-                                name: exchange.tool.name,
-                                arguments: JSON.stringify(sanitizedArgs)
-                            }
-                        }]
-                    });
-
-                    // 2) Then, provide the tool result back
                     const toolResultObj = {
                         role: 'tool',
                         tool_call_id: callId,
@@ -404,12 +397,12 @@ export class Conversation {
             }
 
             // Assistant message (only if complete)
-            if (exchange.assistant.isComplete && (exchange.assistant.content || exchange.assistant.reasoning_content)) {
+            if (exchange.assistant.isComplete && (exchange.assistant.content || exchange.assistant.reasoning_content || exchange.assistant.tool_calls)) {
                 const cleanAssistantContent = exchange.assistant.content
                     ? this._stripExtraTimestamps(exchange.assistant.content).trim()
                     : '';
 
-                if (cleanAssistantContent || exchange.assistant.reasoning_content) {
+                if (cleanAssistantContent || exchange.assistant.reasoning_content || exchange.assistant.tool_calls) {
                     const msg = {
                         role: 'assistant',
                         content: cleanAssistantContent || null
@@ -426,9 +419,32 @@ export class Conversation {
                         }
                     }
 
+                    if (exchange.assistant.tool_calls) {
+                        msg.tool_calls = exchange.assistant.tool_calls.map(tc => {
+                            let sanitizedArgs = {};
+                            try {
+                                if (typeof tc.function?.arguments === 'string') {
+                                    sanitizedArgs = this._sanitizeToolArgs(JSON.parse(tc.function.arguments));
+                                } else if (typeof tc.function?.arguments === 'object') {
+                                    sanitizedArgs = this._sanitizeToolArgs(tc.function.arguments);
+                                }
+                            } catch (e) {
+                                // If parsing fails, pass raw as string
+                                sanitizedArgs = tc.function?.arguments;
+                            }
+                            return {
+                                id: tc.id,
+                                type: 'function',
+                                function: {
+                                    name: tc.function?.name,
+                                    arguments: typeof sanitizedArgs === 'string' ? sanitizedArgs : JSON.stringify(sanitizedArgs)
+                                }
+                            };
+                        });
+                    }
+
                     rawMessages.push(msg);
                 }
-            }
             }
         }
 

@@ -54,7 +54,7 @@
                         <button type="button"><nui-icon name="add"></nui-icon> New Chat</button>
                     </nui-button>
                     <nui-button id="import-chat-btn" title="Import Chat">
-                        <button type="button"><nui-icon name="upload"></nui-icon></button>
+                        <button type="button" aria-label="Upload navigation"><nui-icon name="upload"></nui-icon></button>
                     </nui-button>
                 </div>
 
@@ -201,10 +201,10 @@
                             <nui-tooltip id="overall-context-tooltip" class="context-tooltip">Context Usage</nui-tooltip>
                             <nui-rich-text id="message-input" class="chat-input" no-toolbar placeholder="Type a message... (Shift+Enter for new line, Ctrl+Alt+V for code block)"></nui-rich-text>
                             <nui-button id="attach-btn" class="icon-only" title="Attach Image">
-                                <button type="button"><nui-icon name="image"></nui-icon></button>
+                                <button type="button" aria-label="Image"><nui-icon name="image"></nui-icon></button>
                             </nui-button>
                             <nui-button id="send-btn" variant="primary" title="Send">
-                                <button type="button"><nui-icon name="send"></nui-icon></button>
+                                <button type="button" aria-label="Send"><nui-icon name="send"></nui-icon></button>
                             </nui-button>
                         </div>
                         <input type="file" id="file-input" accept="image/*" multiple hidden>
