@@ -225,6 +225,7 @@ export class Conversation {
         if (!exchange) return Promise.resolve();
         
         exchange.assistant.isStreaming = false;
+        exchange.assistant.isComplete = true; // Mark as complete so history exporter picks up the exchange
         exchange.assistant.error = error;
         return this.save(); // Persist error state
     }
@@ -343,7 +344,6 @@ export class Conversation {
                         content: exchange.tool.content || ''
                     };
                     
-                    // Attach images for tool exchanges if present
                     if (exchange.tool.images && exchange.tool.images.length > 0) {
                         toolResultObj.content = [
                             { type: 'text', text: exchange.tool.content || '' },
@@ -357,9 +357,7 @@ export class Conversation {
                     rawMessages.push(toolResultObj);
                 }
                 
-                // Do not 'continue;' here! We must allow the assistant's response that generated AFTER the tool execution
-                // to be appended to the context, just like normal exchanges.
-                // However, since it is a tool exchange, it has no `user` message to push, so we just skip the user part and let the assistant part be evaluated below.
+                // Fall through to emit the assistant response (the follow-up after tool execution)
             } else {
                 // User message (Only parse for normal exchanges)
                 // Only include attachments for the current (last) exchange
@@ -446,18 +444,53 @@ export class Conversation {
                     rawMessages.push(msg);
                 }
             }
+
+            if (exchange.assistant.error) {
+                rawMessages.push({
+                    role: 'user',
+                    content: `[System Error Notification: The LLM Provider API rejected the payload or execution failed:\n${exchange.assistant.error}\nPlease correct the issue or state that you cannot proceed.]`
+                });
+            }
         }
 
         // Merge back-to-back messages of the same role to prevent API validation errors
         // (This happens if an assistant speaks, then calls a tool, creating two assistant parts)
+        // NEVER merge 'tool' or 'system' roles! Each tool response must be an independent block.
         const messages = [];
         for (const msg of rawMessages) {
-            if (messages.length > 0 && messages[messages.length - 1].role === msg.role && typeof msg.content === 'string' && typeof messages[messages.length - 1].content === 'string') {
+            if (messages.length > 0 && 
+                messages[messages.length - 1].role === msg.role && 
+                msg.role !== 'tool' && msg.role !== 'system' &&
+                typeof msg.content === 'string' && 
+                typeof messages[messages.length - 1].content === 'string' &&
+                !msg.tool_calls && !messages[messages.length - 1].tool_calls) {
+                
                 messages[messages.length - 1].content += '\n' + msg.content;
             } else {
                 messages.push(msg);
             }
         }
+
+        // Auto-heal: Remove unmatched tool_calls to prevent permanent chat corruption (HTTP 400s).
+        // If a tool execution crashed totally or was aborted before generating a tool_result block,
+        // we strip the orphan tool_call from the history so the conversation can seamlessly continue.
+        const validToolCallIds = new Set();
+        for (const msg of messages) {
+            if (msg.role === 'tool' && msg.tool_call_id) {
+                validToolCallIds.add(msg.tool_call_id);
+            }
+        }
+        
+        for (const msg of messages) {
+            if (msg.role === 'assistant' && msg.tool_calls) {
+                msg.tool_calls = msg.tool_calls.filter(tc => validToolCallIds.has(tc.id));
+                if (msg.tool_calls.length === 0) {
+                    delete msg.tool_calls;
+                }
+            }
+        }
+
+        console.log('[getMessagesForApi] Final exact API payload:', JSON.stringify(messages, null, 2));
 
         return messages;
     }

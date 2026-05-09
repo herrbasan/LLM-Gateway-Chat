@@ -1346,19 +1346,29 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                             if (event.thinking_signature) toolDoneEx.assistant.thinking_signature = event.thinking_signature;
                             toolDoneEx.assistant.tool_calls = event.tool_calls;
                         }
+                        
+                        const toolPromises = [];
                         for (const tc of event.tool_calls) {
                             try {
                                 const args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
-                                handleToolExecution(exchangeId, {
+                                toolPromises.push(handleToolExecution(exchangeId, {
                                     name: tc.function.name,
                                     args: args,
                                     id: tc.id
-                                }, chatId, originalUserExchangeId);
+                                }, chatId, originalUserExchangeId, false)); // false = don't auto-resume stream
                             } catch (err) {
                                 console.error('Failed to parse tool arguments', tc.function.arguments, err);
                             }
                         }
-                        return; // Handle tool execution will continue streamResponse
+                        
+                        // We await the Promise.all here inside the async loop so streamResponse doesn't exit early
+                        // This locks the UI from clicking 'Send' while tools execute.
+                        const toolExchangeIds = await Promise.all(toolPromises);
+                        if (toolExchangeIds.length > 0) {
+                            const lastToolExchangeId = toolExchangeIds[toolExchangeIds.length - 1];
+                            await streamResponse(lastToolExchangeId, chatId, originalUserExchangeId || exchangeId);
+                        }
+                        return; // Done handling tool execution
                     }
 
                     // contentBuffer doesn't include our injected timestamp
@@ -1854,7 +1864,7 @@ function showPendingToolUI(exchangeId, chatId) {
     scrollToBottom();
 }
 
-async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, origUserExchangeId = null) {
+async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, origUserExchangeId = null, resumeStream = true) {
     console.log('[Tool Call Intercepted]', parsedObj);
 
     // Guard: Reject vision tool calls if MCP Vision is disabled
@@ -2053,7 +2063,11 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         if (toolChatInfo?.model) {
             currentModel = toolChatInfo.model;
         }
-        await streamResponse(toolExchangeId, toolChatId, userExchangeId);
+        
+        if (resumeStream) {
+            await streamResponse(toolExchangeId, toolChatId, userExchangeId);
+        }
+        return toolExchangeId;
         
     } catch (err) {
         console.error('Tool execution error', err);
@@ -2079,8 +2093,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             toolEl.querySelector('.tool-status').innerHTML = 'Pending';
             toolEl.querySelector('.tool-notifications').innerHTML = '<span class="tool-spinner"></span> Running...';
             toolEl.querySelector('.tool-status').setAttribute('variant', 'primary');
-            handleToolExecution(originalExchangeId, parsedObj); // re-run recursively! wait, we might duplicate exchange. Instead, just execute again inside here.
-            // Simplified: just let user delete/regenerate, or handle properly inside handleToolExecution.
+            handleToolExecution(originalExchangeId, parsedObj, toolChatId, origUserExchangeId, resumeStream);
         });
         
         toolEl.querySelector('.dismiss-tool')?.addEventListener('click', () => {
@@ -2093,9 +2106,15 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             if (dismissChatInfo?.model) {
                 currentModel = dismissChatInfo.model;
             }
-            streamResponse(toolExchangeId, toolChatId, userExchangeId);
+            if (resumeStream) {
+                streamResponse(toolExchangeId, toolChatId, userExchangeId);
+            }
             toolEl.querySelector('.dismiss-tool').parentElement.style.display = 'none';
         });
+        
+        if (!resumeStream) {
+            return toolExchangeId;
+        }
     }
 }
 
