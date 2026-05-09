@@ -3046,7 +3046,7 @@ function renderHistoryList() {
         
         const optionsBtn = document.createElement('nui-button');
         optionsBtn.className = 'chat-history-item-action';
-        optionsBtn.innerHTML = '<button type="button"><nui-icon name="more_vert"></nui-icon></button>';
+        optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
         optionsBtn.title = 'Chat Options';
         optionsBtn.addEventListener('click', (e) => {
             e.stopPropagation();
