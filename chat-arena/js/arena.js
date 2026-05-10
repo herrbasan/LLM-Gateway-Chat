@@ -5,6 +5,7 @@
 // Reuse existing utilities (import only, no modifications)
 import { GatewayClient } from '../../chat/js/client-sdk.js';
 import { renderMarkdown, parseThinking } from '../../chat/js/markdown.js';
+import { getPlainText } from '../../chat/js/tts-utils.js';
 import { arenaStorage } from './storage.js';
 
 // ============================================
@@ -1000,6 +1001,13 @@ class ArenaUI {
         this.sendPromptBtn = document.getElementById('arena-send-btn');
         this.continueBtn = document.getElementById('continue-btn');
         this.scrollToBottomBtn = document.getElementById('scroll-to-bottom');
+
+        // TTS Elements
+        this.ttsEndpoint = document.getElementById('tts-endpoint');
+        this.ttsVoiceASelect = document.getElementById('tts-voice-a-select');
+        this.ttsVoiceBSelect = document.getElementById('tts-voice-b-select');
+        this.ttsSpeed = document.getElementById('tts-speed');
+        this.ttsStatus = document.getElementById('tts-status');
     }
 
     _bindEvents() {
@@ -1042,6 +1050,32 @@ class ArenaUI {
         this._importInput.style.display = 'none';
         this._importInput.addEventListener('change', (e) => this._handleFileImport(e));
         document.body.appendChild(this._importInput);
+
+        // TTS endpoint change - reload voices
+        this.ttsEndpoint?.querySelector('input')?.addEventListener('change', () => {
+            this._loadTtsVoices();
+        });
+
+        // TTS voice A
+        this.ttsVoiceASelect?.querySelector('select')?.addEventListener('change', (e) => {
+            const voice = e.target.value;
+            localStorage.setItem('arena-tts-voice-a', voice);
+            this._ttsVoiceA = voice;
+        });
+
+        // TTS voice B
+        this.ttsVoiceBSelect?.querySelector('select')?.addEventListener('change', (e) => {
+            const voice = e.target.value;
+            localStorage.setItem('arena-tts-voice-b', voice);
+            this._ttsVoiceB = voice;
+        });
+
+        // TTS speed
+        this.ttsSpeed?.querySelector('input')?.addEventListener('change', (e) => {
+            const speed = parseFloat(e.target.value) || 1.0;
+            localStorage.setItem('arena-tts-speed', speed);
+            this._ttsSpeed = speed;
+        });
     }
 
     _waitForNUI() {
@@ -1070,6 +1104,9 @@ class ArenaUI {
             this.models = response.data || response.models || [];
 
             this._populateModelSelects();
+
+            // Initialize TTS
+            await this._initTts();
 
             // Set default topic
             if (config.defaultTopic && this.topicInput) {
@@ -1242,6 +1279,165 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         this.arena.advanceAndRespond();
     }
 
+    // ============================================
+    // TTS Methods
+    // ============================================
+
+    async _initTts() {
+        const config = window.ARENA_CONFIG || {};
+
+        this._ttsEndpoint = localStorage.getItem('arena-tts-endpoint') || config.ttsEndpoint || 'http://localhost:2244';
+        this._ttsVoiceA = localStorage.getItem('arena-tts-voice-a') || config.ttsVoiceA || '';
+        this._ttsVoiceB = localStorage.getItem('arena-tts-voice-b') || config.ttsVoiceB || '';
+        const storedSpeed = localStorage.getItem('arena-tts-speed');
+        this._ttsSpeed = storedSpeed !== null ? parseFloat(storedSpeed) : (config.ttsSpeed ?? 1.0);
+        this._ttsVoices = [];
+        this._ttsAudio = null;
+        this._ttsMessageEl = null;
+
+        if (this.ttsEndpoint) {
+            const input = this.ttsEndpoint.querySelector('input');
+            if (input) input.value = this._ttsEndpoint;
+        }
+        if (this.ttsSpeed) {
+            const input = this.ttsSpeed.querySelector('input');
+            if (input) input.value = this._ttsSpeed;
+        }
+
+        await this._loadTtsVoices();
+    }
+
+    async _loadTtsVoices() {
+        const input = this.ttsEndpoint?.querySelector('input');
+        const endpoint = input?.value || this._ttsEndpoint;
+        if (!endpoint) return;
+
+        try {
+            const resp = await fetch(`${endpoint}/voices`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            this._ttsVoices = data.voices || [];
+            localStorage.setItem('arena-tts-endpoint', endpoint);
+            this._ttsEndpoint = endpoint;
+            this._updateTtsVoiceSelects();
+            this._showTtsStatus(null);
+        } catch (error) {
+            console.warn('[Arena TTS] Failed to load voices:', error.message);
+            this._showTtsStatus('Failed to load voices. Check endpoint.');
+        }
+    }
+
+    _updateTtsVoiceSelects() {
+        const voices = this._ttsVoices;
+        if (voices.length === 0) return;
+
+        const items = voices.map(v => ({ label: v.name || v, value: v.name || v }));
+
+        [this.ttsVoiceASelect, this.ttsVoiceBSelect].forEach(select => {
+            if (!select) return;
+            if (select.setItems) select.setItems(items);
+            const innerSelect = select.querySelector('select');
+            if (!innerSelect) return;
+
+            const voiceKey = select === this.ttsVoiceASelect ? this._ttsVoiceA : this._ttsVoiceB;
+            if (voiceKey) {
+                innerSelect.value = voiceKey;
+                innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (voices.length > 0) {
+                const first = voices[0].name || voices[0];
+                innerSelect.value = first;
+                innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+                if (select === this.ttsVoiceASelect) {
+                    this._ttsVoiceA = first;
+                    localStorage.setItem('arena-tts-voice-a', first);
+                } else {
+                    this._ttsVoiceB = first;
+                    localStorage.setItem('arena-tts-voice-b', first);
+                }
+            }
+        });
+    }
+
+    _showTtsStatus(message) {
+        if (!this.ttsStatus) return;
+        if (message) {
+            this.ttsStatus.textContent = message;
+            this.ttsStatus.style.display = 'block';
+        } else {
+            this.ttsStatus.textContent = '';
+            this.ttsStatus.style.display = 'none';
+        }
+    }
+
+    _getTtsVoiceForSpeaker(speakerName) {
+        if (!this.arena || !this.arena.participantA || !this.arena.participantB) return this._ttsVoiceA;
+        if (speakerName === this.arena.participantA.name) return this._ttsVoiceA;
+        if (speakerName === this.arena.participantB.name) return this._ttsVoiceB;
+        return this._ttsVoiceA;
+    }
+
+    _stopTts() {
+        if (this._ttsAudio) {
+            this._ttsAudio.pause();
+            this._ttsAudio.src = '';
+            this._ttsAudio.load();
+            this._ttsAudio = null;
+        }
+        if (this._ttsMessageEl) {
+            const btn = this._ttsMessageEl.querySelector('.speaker');
+            if (btn) {
+                btn.classList.remove('playing');
+                btn.setAttribute('title', 'Read Aloud');
+                const icon = btn.querySelector('nui-icon');
+                if (icon) icon.setAttribute('name', 'speaker');
+            }
+            this._ttsMessageEl = null;
+        }
+    }
+
+    _toggleTts(msg, messageEl) {
+        const btn = messageEl.querySelector('.speaker');
+        if (!btn) return;
+
+        if (this._ttsMessageEl === messageEl && this._ttsAudio) {
+            this._stopTts();
+            return;
+        }
+
+        this._stopTts();
+
+        const text = this._getPlainText(msg.content);
+        if (!text) return;
+
+        const voice = this._getTtsVoiceForSpeaker(msg.speaker);
+        const url = `${this._ttsEndpoint}/tts?text=${encodeURIComponent(text)}&voice_name=${encodeURIComponent(voice)}&speed=${this._ttsSpeed}&output_format=mp3`;
+
+        const audio = new Audio(url);
+        audio.preload = 'auto';
+        audio.onended = () => this._stopTts();
+        audio.onerror = () => {
+            console.warn('[Arena TTS] Playback failed');
+            this._stopTts();
+        };
+
+        this._ttsAudio = audio;
+        this._ttsMessageEl = messageEl;
+
+        btn.classList.add('playing');
+        btn.setAttribute('title', 'Stop Reading');
+        const icon = btn.querySelector('nui-icon');
+        if (icon) icon.setAttribute('name', 'close');
+
+        audio.play().catch((err) => {
+            console.warn('[Arena TTS] Playback error:', err.message);
+            this._stopTts();
+        });
+    }
+
+    _getPlainText(content) {
+        return getPlainText(content);
+    }
+
     _renderMessage(msg) {
         if (!this.messagesContainer) return;
 
@@ -1296,15 +1492,21 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 <span class="message-timestamp">${timestamp}${msg.isStreaming ? '<span class="streaming-indicator"></span>' : ''}</span>
             </div>
             ${contentHtml}
-            ${!msg.isStreaming ? `
+            ${!msg.isStreaming && msg.speaker !== 'moderator' ? `
+            <div class="message-actions">
+                <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="speaker"></nui-icon></button></nui-button>
+                <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
+            </div>
+            ` : (!msg.isStreaming ? `
             <div class="message-actions">
                 <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
             </div>
-            ` : ''}
+            ` : '')}
         `;
 
         if (!msg.isStreaming) {
             messageEl.querySelector('.copy-message')?.addEventListener('click', (e) => this._copyMessageToClipboard(msg, e.currentTarget));
+            messageEl.querySelector('.speaker')?.addEventListener('click', () => this._toggleTts(msg, messageEl));
         }
 
         this.messagesContainer.appendChild(messageEl);

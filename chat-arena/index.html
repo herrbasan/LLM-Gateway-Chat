@@ -62,79 +62,126 @@
         <nui-sidebar position="right">
             <div class="sidebar-content">
                 <span class="title">Configuration</span>
+                
+                <nui-tabs>
+                    <nav>
+                        <button>Conversation</button>
+                        <button>TTS</button>
+                    </nav>
+                    
+                    <!-- Conversation Tab -->
+                    <div>
+                        <div class="sidebar-section">
+                            <label>Topic</label>
+                            <nui-textarea>
+                                <textarea id="topic-input" placeholder="Enter a topic for the conversation..." rows="2"></textarea>
+                            </nui-textarea>
+                        </div>
 
-                <div class="sidebar-section">
-                    <label>Topic</label>
-                    <nui-textarea>
-                        <textarea id="topic-input" placeholder="Enter a topic for the conversation..." rows="2"></textarea>
-                    </nui-textarea>
-                </div>
+                        <div class="sidebar-section">
+                            <label>Participant A</label>
+                            <nui-select id="model-a-select" searchable data-label="Select model...">
+                                <select>
+                                    <option value="">Loading models...</option>
+                                </select>
+                            </nui-select>
+                        </div>
 
-                <div class="sidebar-section">
-                    <label>Participant A</label>
-                    <nui-select id="model-a-select" searchable data-label="Select model...">
-                        <select>
-                            <option value="">Loading models...</option>
-                        </select>
-                    </nui-select>
-                </div>
+                        <div class="sidebar-section">
+                            <label>Participant B</label>
+                            <nui-select id="model-b-select" searchable data-label="Select model...">
+                                <select>
+                                    <option value="">Loading models...</option>
+                                </select>
+                            </nui-select>
+                        </div>
 
-                <div class="sidebar-section">
-                    <label>Participant B</label>
-                    <nui-select id="model-b-select" searchable data-label="Select model...">
-                        <select>
-                            <option value="">Loading models...</option>
-                        </select>
-                    </nui-select>
-                </div>
+                        <div class="sidebar-section">
+                            <label>Max Tokens per Response</label>
+                            <nui-input>
+                                <input type="number" id="max-tokens" min="1" placeholder="Empty = gateway default">
+                            </nui-input>
+                        </div>
 
-                <div class="sidebar-section">
-                    <label>Max Tokens per Response</label>
-                    <nui-input>
-                        <input type="number" id="max-tokens" min="1" placeholder="Empty = gateway default">
-                    </nui-input>
-                </div>
+                        <div class="sidebar-section">
+                            <label>Max Turns</label>
+                            <nui-input>
+                                <input type="number" id="max-turns" min="1" max="50" value="10">
+                            </nui-input>
+                        </div>
 
-                <div class="sidebar-section">
-                    <label>Max Turns</label>
-                    <nui-input>
-                        <input type="number" id="max-turns" min="1" max="50" value="10">
-                    </nui-input>
-                </div>
+                        <div class="sidebar-section">
+                            <div class="checkbox-group">
+                                <nui-checkbox>
+                                    <input type="checkbox" id="roleplay-checkbox">
+                                </nui-checkbox>
+                                <label for="roleplay-checkbox">Roleplay Mode</label>
+                            </div>
+                        </div>
 
-                <div class="sidebar-section">
-                    <div class="checkbox-group">
-                        <nui-checkbox>
-                            <input type="checkbox" id="roleplay-checkbox">
-                        </nui-checkbox>
-                        <label for="roleplay-checkbox">Roleplay Mode</label>
-                    </div>
-                </div>
-
-                <div id="roleplay-section" class="roleplay-section" style="display: none;">
-                    <div class="sidebar-section">
-                        <label>Participant A System Prompt</label>
-                        <nui-textarea>
-                            <textarea id="system-prompt-a" rows="3">You are in a conversation. Your identity: {modelName}.
+                        <div id="roleplay-section" class="roleplay-section" style="display: none;">
+                            <div class="sidebar-section">
+                                <label>Participant A System Prompt</label>
+                                <nui-textarea>
+                                    <textarea id="system-prompt-a" rows="3">You are in a conversation. Your identity: {modelName}.
 You are speaking with {otherParticipantName} (model: {otherModelName}).
 Topic: {topic}
 Speak naturally as if in a thoughtful conversation.</textarea>
-                        </nui-textarea>
-                    </div>
-                    <div class="sidebar-section">
-                        <label>Participant B System Prompt</label>
-                        <nui-textarea>
-                            <textarea id="system-prompt-b" rows="3">You are in a conversation. Your identity: {modelName}.
+                                </nui-textarea>
+                            </div>
+                            <div class="sidebar-section">
+                                <label>Participant B System Prompt</label>
+                                <nui-textarea>
+                                    <textarea id="system-prompt-b" rows="3">You are in a conversation. Your identity: {modelName}.
 You are speaking with {otherParticipantName} (model: {otherModelName}).
 Topic: {topic}
 Speak naturally as if in a thoughtful conversation.</textarea>
-                        </nui-textarea>
-                    </div>
-                </div>
+                                </nui-textarea>
+                            </div>
+                        </div>
 
-                <nui-button variant="primary" id="start-btn" style="margin-top: 1rem;">
-                    <button type="button">Start Conversation</button>
-                </nui-button>
+                        <nui-button variant="primary" id="start-btn" style="margin-top: 1rem;">
+                            <button type="button">Start Conversation</button>
+                        </nui-button>
+                    </div>
+                    
+                    <!-- TTS Tab -->
+                    <div>
+                        <div class="sidebar-section">
+                            <label>Endpoint URL</label>
+                            <nui-input id="tts-endpoint">
+                                <input type="url" placeholder="http://localhost:2244">
+                            </nui-input>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Voice A</label>
+                            <nui-select id="tts-voice-a-select" searchable data-label="Select voice...">
+                                <select>
+                                    <option value="">Loading voices...</option>
+                                </select>
+                            </nui-select>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Voice B</label>
+                            <nui-select id="tts-voice-b-select" searchable data-label="Select voice...">
+                                <select>
+                                    <option value="">Loading voices...</option>
+                                </select>
+                            </nui-select>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Speed</label>
+                            <nui-input id="tts-speed">
+                                <input type="number" min="0.1" max="2.0" step="0.1" value="1.0">
+                            </nui-input>
+                        </div>
+                        
+                        <div id="tts-status" class="tts-status" style="display: none;"></div>
+                    </div>
+                </nui-tabs>
             </div>
         </nui-sidebar>
 

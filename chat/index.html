@@ -75,6 +75,7 @@
                         <button>User</button>
                         <button>System</button>
                         <button>MCP</button>
+                        <button>TTS</button>
                     </nav>
                     
                     <!-- Model Tab -->
@@ -171,6 +172,36 @@
                             <div id="mcp-servers-list" style="display: flex; flex-direction: column; gap: 1rem;">
                                 <!-- MCP Servers injected here -->
                             </div>
+                        </div>
+                    </div>
+                    
+                    <!-- TTS Tab -->
+                    <div>
+                        <div class="sidebar-section">
+                            <label>Endpoint URL</label>
+                            <nui-input id="tts-endpoint">
+                                <input type="url" placeholder="http://localhost:2244">
+                            </nui-input>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Voice</label>
+                            <nui-select id="tts-voice-select" searchable data-label="Select voice...">
+                                <select>
+                                    <option value="">Loading voices...</option>
+                                </select>
+                            </nui-select>
+                        </div>
+                        
+                        <div class="sidebar-section">
+                            <label>Speed</label>
+                            <nui-input id="tts-speed">
+                                <input type="number" min="0.1" max="2.0" step="0.1" value="1.0">
+                            </nui-input>
+                        </div>
+                        
+                        <div id="tts-status" class="tts-status" style="display: none;">
+                            <!-- Status messages -->
                         </div>
                     </div>
                 </nui-tabs>

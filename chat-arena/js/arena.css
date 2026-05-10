@@ -511,6 +511,17 @@ nui-app[nui-vars-sidebar_width] nui-content>nui-main {
     }
 }
 
+/* TTS Status */
+.tts-status {
+    padding: 0.5rem;
+    margin-top: 0.5rem;
+    border-radius: var(--border-radius1);
+    background: var(--color-shade2);
+    color: var(--palette-alert);
+    font-size: 0.8rem;
+    text-align: center;
+}
+
 /* Summarize Dialog - Model select row */
 #summarize-content .summarize-model-row {
     --nui-form-row-align: center;

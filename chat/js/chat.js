@@ -9,6 +9,7 @@ import { imageStore } from './image-store.js';
 import { mcpClient } from './mcp-client.js';
 import { chatHistory } from './chat-history.js';
 import { storage } from './storage.js';
+import { getPlainText } from './tts-utils.js';
 
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
@@ -16,6 +17,9 @@ const GATEWAY_URL = CONFIG.gatewayUrl || 'http://localhost:3400';
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
+const TTS_ENDPOINT = CONFIG.ttsEndpoint || 'http://localhost:2244';
+const TTS_VOICE = CONFIG.ttsVoice || '';
+const TTS_SPEED = CONFIG.ttsSpeed ?? 1.0;
 
 // State
 let currentChatId = null;
@@ -34,6 +38,14 @@ let isStreaming = false;
 let currentExchangeId = null;
 let attachedImages = []; // Array of {dataUrl, name, type}
 let useVisionAnalysis = false; // Toggle for using vision tool instead of direct image upload
+
+// TTS State
+let ttsEndpoint = TTS_ENDPOINT;
+let ttsVoice = TTS_VOICE;
+let ttsSpeed = TTS_SPEED;
+let ttsVoices = [];
+let currentTtsAudio = null;
+let currentTtsExchangeId = null;
 
 // DOM Elements
 const elements = {
@@ -73,7 +85,13 @@ const elements = {
     mcpLogsDialog: document.getElementById('mcp-logs-dialog'),
     mcpLogsClearBtn: document.getElementById('mcp-logs-clear-btn'),
     mcpLogsTextarea: document.getElementById('mcp-logs-textarea'),
-    mcpServersList: document.getElementById('mcp-servers-list')
+    mcpServersList: document.getElementById('mcp-servers-list'),
+
+    // TTS Elements
+    ttsEndpoint: document.getElementById('tts-endpoint'),
+    ttsVoiceSelect: document.getElementById('tts-voice-select'),
+    ttsSpeed: document.getElementById('tts-speed'),
+    ttsStatus: document.getElementById('tts-status')
 };
 
 // ============================================
@@ -478,6 +496,27 @@ async function applyDefaultConfig() {
         const input = elements.userLanguage.querySelector('input');
         if (input) input.value = language;
     }
+
+    // Load TTS preferences from storage (with config defaults)
+    const savedTtsEndpoint = await storage.getPref('tts-endpoint');
+    const savedTtsVoice = await storage.getPref('tts-voice');
+    const savedTtsSpeed = await storage.getPref('tts-speed');
+
+    ttsEndpoint = savedTtsEndpoint !== null ? savedTtsEndpoint : TTS_ENDPOINT;
+    ttsVoice = savedTtsVoice !== null ? savedTtsVoice : TTS_VOICE;
+    ttsSpeed = savedTtsSpeed !== null ? parseFloat(savedTtsSpeed) : TTS_SPEED;
+
+    if (elements.ttsEndpoint) {
+        const input = elements.ttsEndpoint.querySelector('input');
+        if (input) input.value = ttsEndpoint;
+    }
+    if (elements.ttsSpeed) {
+        const input = elements.ttsSpeed.querySelector('input');
+        if (input) input.value = ttsSpeed;
+    }
+
+    // Load voices from TTS endpoint
+    await loadTtsVoices();
 }
 
 function waitForNUI() {
@@ -641,6 +680,66 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
 }
 
 // ============================================
+// TTS Voice Loading
+// ============================================
+
+async function loadTtsVoices() {
+    if (!ttsEndpoint) return;
+    try {
+        const resp = await fetch(`${ttsEndpoint}/voices`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        ttsVoices = data.voices || [];
+        updateTtsVoiceSelect();
+        showTtsStatus(null);
+        console.log('[TTS] Loaded voices:', ttsVoices.length);
+    } catch (error) {
+        console.warn('[TTS] Failed to load voices:', error.message);
+        showTtsStatus('Failed to load voices. Check endpoint.');
+    }
+}
+
+function updateTtsVoiceSelect() {
+    const select = elements.ttsVoiceSelect;
+    if (!select) return;
+    const innerSelect = select.querySelector('select');
+    if (!innerSelect) return;
+
+    if (ttsVoices.length === 0) {
+        const items = [{ value: '', label: 'No voices available', disabled: true }];
+        if (select.setItems) select.setItems(items);
+        return;
+    }
+
+    const items = ttsVoices.map(v => ({ label: v.name || v, value: v.name || v }));
+    if (select.setItems) {
+        select.setItems(items);
+    }
+
+    if (ttsVoice) {
+        innerSelect.value = ttsVoice;
+        innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (ttsVoices.length > 0) {
+        const firstVoice = ttsVoices[0].name || ttsVoices[0];
+        ttsVoice = firstVoice;
+        innerSelect.value = firstVoice;
+        innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        storage.setPref('tts-voice', firstVoice).catch(() => {});
+    }
+}
+
+function showTtsStatus(message) {
+    if (!elements.ttsStatus) return;
+    if (message) {
+        elements.ttsStatus.textContent = message;
+        elements.ttsStatus.style.display = 'block';
+    } else {
+        elements.ttsStatus.textContent = '';
+        elements.ttsStatus.style.display = 'none';
+    }
+}
+
+// ============================================
 // Event Listeners
 // ============================================
 
@@ -661,6 +760,28 @@ function setupEventListeners() {
         client.operationMode = newMode;
         storage.setPref('operation-mode', newMode).catch(() => {});
         console.log(`[Chat] Operation mode changed to ${newMode}`);
+    });
+
+    // TTS endpoint - save and reload voices on change
+    elements.ttsEndpoint?.querySelector('input')?.addEventListener('change', (e) => {
+        ttsEndpoint = e.target.value || TTS_ENDPOINT;
+        storage.setPref('tts-endpoint', ttsEndpoint).catch(() => {});
+        console.log('[TTS] Endpoint changed to:', ttsEndpoint);
+        loadTtsVoices();
+    });
+
+    // TTS voice
+    elements.ttsVoiceSelect?.querySelector('select')?.addEventListener('change', (e) => {
+        ttsVoice = e.target.value;
+        storage.setPref('tts-voice', ttsVoice).catch(() => {});
+        console.log('[TTS] Voice changed to:', ttsVoice);
+    });
+
+    // TTS speed
+    elements.ttsSpeed?.querySelector('input')?.addEventListener('change', (e) => {
+        ttsSpeed = parseFloat(e.target.value) || 1.0;
+        storage.setPref('tts-speed', ttsSpeed).catch(() => {});
+        console.log('[TTS] Speed changed to:', ttsSpeed);
     });
     
     // Send message / Toggle Stop
@@ -1646,6 +1767,7 @@ function createAssistantElement(exchangeId, timestamp = '') {
         <div class="progress-status"></div>
         <div class="message-content"></div>
         <div class="message-actions">
+            <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="speaker"></nui-icon></button></nui-button>
             <nui-button class="action-btn regenerate" title="Regenerate"><button type="button"><nui-icon name="sync"></nui-icon></button></nui-button>
             <nui-button class="action-btn prev-version" title="Previous version"><button type="button"><nui-icon name="arrow" class="arrow-rotated"></nui-icon></button></nui-button>
             <span class="version-info"></span>
@@ -1658,6 +1780,7 @@ function createAssistantElement(exchangeId, timestamp = '') {
     `;
 
     // Bind action buttons
+    el.querySelector('.speaker')?.addEventListener('click', () => toggleTts(exchangeId, el));
     el.querySelector('.regenerate')?.addEventListener('click', () => regenerate(exchangeId));
     el.querySelector('.prev-version')?.addEventListener('click', () => switchVersion(exchangeId, 'prev'));
     el.querySelector('.next-version')?.addEventListener('click', () => switchVersion(exchangeId, 'next'));
@@ -2386,10 +2509,12 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     if (actions && info?.hasMultiple) {
         actions.classList.add('visible');
         updateVersionControls(el, exchangeId);
+        actions.querySelector('.speaker').style.display = 'inline-block';
     } else if (actions) {
-        // Only show regenerate button initially
+        // Only show regenerate and speaker buttons initially
         actions.classList.add('visible');
         actions.querySelector('.regenerate').style.display = 'inline-block';
+        actions.querySelector('.speaker').style.display = 'inline-block';
         actions.querySelector('.prev-version').style.display = 'none';
         actions.querySelector('.next-version').style.display = 'none';
         actions.querySelector('.version-info').style.display = 'none';
@@ -2428,11 +2553,84 @@ function updateVersionControls(el, exchangeId) {
     
     // Always show regenerate
     if (regenerateBtn) regenerateBtn.style.display = 'inline-block';
+    // Always show speaker
+    const speakerBtn = el.querySelector('.speaker');
+    if (speakerBtn) speakerBtn.style.display = 'inline-block';
 }
 
 // ============================================
 // Actions
 // ============================================
+
+function getAssistantPlainText(exchangeId) {
+    const exchange = conversation.getExchange(exchangeId);
+    if (!exchange || !exchange.assistant) return '';
+    let content = exchange.assistant.content || '';
+    const parsed = parseTimestamp(content);
+    content = parsed.cleanContent || content;
+    return getPlainText(content);
+}
+
+function stopTts() {
+    if (currentTtsAudio) {
+        currentTtsAudio.pause();
+        currentTtsAudio.src = '';
+        currentTtsAudio.load();
+        currentTtsAudio = null;
+    }
+    if (currentTtsExchangeId) {
+        const el = document.querySelector(`.chat-message.assistant[data-exchange-id="${currentTtsExchangeId}"]`);
+        if (el) {
+            const speakerBtn = el.querySelector('.speaker');
+            if (speakerBtn) {
+                speakerBtn.classList.remove('playing');
+                speakerBtn.setAttribute('title', 'Read Aloud');
+                const icon = speakerBtn.querySelector('nui-icon');
+                if (icon) icon.setAttribute('name', 'speaker');
+            }
+        }
+        currentTtsExchangeId = null;
+    }
+}
+
+function toggleTts(exchangeId, el) {
+    if (currentTtsExchangeId === exchangeId) {
+        stopTts();
+        return;
+    }
+
+    stopTts();
+
+    const text = getAssistantPlainText(exchangeId);
+    if (!text) return;
+
+    const url = `${ttsEndpoint}/tts?text=${encodeURIComponent(text)}&voice_name=${encodeURIComponent(ttsVoice)}&speed=${ttsSpeed}&output_format=mp3`;
+
+    const audio = new Audio(url);
+    audio.preload = 'auto';
+
+    audio.onended = () => stopTts();
+    audio.onerror = () => {
+        console.warn('[TTS] Playback failed');
+        stopTts();
+    };
+
+    currentTtsAudio = audio;
+    currentTtsExchangeId = exchangeId;
+
+    const speakerBtn = el.querySelector('.speaker');
+    if (speakerBtn) {
+        speakerBtn.classList.add('playing');
+        speakerBtn.setAttribute('title', 'Stop Reading');
+        const icon = speakerBtn.querySelector('nui-icon');
+        if (icon) icon.setAttribute('name', 'close');
+    }
+
+    audio.play().catch((err) => {
+        console.warn('[TTS] Playback error:', err.message);
+        stopTts();
+    });
+}
 
 async function regenerate(exchangeId) {
     if (client.hasActiveStream(currentChatId)) return;
