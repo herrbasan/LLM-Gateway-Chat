@@ -2584,7 +2584,7 @@ function updateAssistantContent(el, content, reasoningContent = null) {
             thinkingBlock.id = thinkingId;
             thinkingBlock.innerHTML = `
                 <div class="thinking-header" onclick="toggleThinking('${thinkingId}')">
-                    <nui-icon name="lightbulb_2" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><use href="/nui_wc2/NUI/assets/material-icons-sprite.svg#image"></use></svg></nui-icon>
+                    <nui-icon name="lightbulb_2" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><use href="/lib/nui_wc2/NUI/assets/material-icons-sprite.svg#image"></use></svg></nui-icon>
                     <span class="thinking-title">Thoughts</span>
                     <span class="thinking-toggle">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

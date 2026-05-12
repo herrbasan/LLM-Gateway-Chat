@@ -1,5 +1,5 @@
-[submodule "nui_wc2"]
-	path = nui_wc2
+[submodule "lib/nui_wc2"]
+	path = lib/nui_wc2
 	url = https://github.com/herrbasan/nui_wc2.git
 [submodule "lib/ndb"]
 	path = lib/ndb
