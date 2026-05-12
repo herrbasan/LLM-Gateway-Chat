@@ -26,4 +26,11 @@ window.CHAT_CONFIG = {
 
     // Optional: Add to system prompt to discourage LLM from generating timestamps
     // timestampInstruction: 'Do not include timestamps in your responses.',
+
+    // Chat Backend (port 3500) — archive search, session management
+    backendUrl: 'http://localhost:3500',
+    backendApiKey: 'migrated-775c80b8-7731-4930-b3b7-49b061eefe4c',
+
+    // Enable archive tools in chat (chat_archive_search etc.)
+    enableArchiveTools: true,
 };

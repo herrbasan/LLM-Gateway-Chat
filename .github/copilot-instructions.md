@@ -400,6 +400,60 @@ The LLM Gateway is our proprietary project - we can and should modify it when ne
 
 ---
 
+## Timeout & Progress Rules
+
+These rules prevent indefinite hangs during task execution. The agent must never silently block for >15s.
+
+### 1. Every command gets a timeout and expected output
+
+Before any bash/node command that could block (servers, model loading, HTTP calls), state:
+
+```
+Running: <command>
+Expect: <result> within <N>s
+```
+
+If the command exceeds its timeout, report what happened and what to do next.
+
+### 2. Never start server processes in the foreground
+
+Servers that bind ports and run indefinitely must be started in background mode. Use:
+
+```powershell
+# PowerShell: background start, then poll health
+Start-Process -NoNewWindow node -ArgumentList "server/server.js"
+```
+
+After starting, poll the health endpoint with a separate short-lived command to confirm it's ready.
+
+### 3. Progress reporting for operations >10s
+
+If any operation takes longer than 10 seconds, report progress at least once:
+
+- Model loading: "Waiting for model to load, ~30s estimated"
+- Batch processing: "Processing batch 3/11, ETA 45s"
+- Embedding: "Embedding 50 texts, ~5s remaining"
+- HTTP call hanging: "Request to Fatten timed out after 30s. Retrying."
+
+### 4. Self-contained E2E tests over server interactions
+
+When validating end-to-end functionality, prefer single-script tests that run start-to-finish without requiring a long-running server:
+
+```javascript
+// Inline test: init nVDB → embed test data → search → verify → exit
+node -e "(async () => { /* test logic */ })()"
+```
+
+### 5. No ambiguous "let me try" without a fallback
+
+Every approach gets one attempt. If it fails, state the failure, diagnose the root cause, and propose a fix — don't retry the same approach silently.
+
+### 6. Read AI-generated output patterns carefully
+
+Output that looks like a server log line (e.g., "Chat Backend running at http://localhost:3500") means the process started but hasn't returned. Recognize this pattern immediately and don't wait for it to "finish."
+
+---
+
 ## Testing Checklist
 
 Before submitting changes:

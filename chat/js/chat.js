@@ -20,6 +20,262 @@ const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
 const TTS_ENDPOINT = CONFIG.ttsEndpoint || 'http://localhost:2244';
 const TTS_VOICE = CONFIG.ttsVoice || '';
 const TTS_SPEED = CONFIG.ttsSpeed ?? 1.0;
+const BACKEND_URL = CONFIG.backendUrl || 'http://localhost:3500';
+const BACKEND_API_KEY = CONFIG.backendApiKey || '';
+const ENABLE_ARCHIVE_TOOLS = CONFIG.enableArchiveTools !== false;
+
+// Archive tool definitions (local, not MCP servers)
+const ARCHIVE_TOOLS = [
+    {
+        type: 'function',
+        function: {
+            name: 'chat_archive_search',
+            description: 'Search the conversation archive. Use semantic mode for themes/ideas, keyword mode for specific terms, hybrid for both. Returns messages ranked by relevance.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'The search query' },
+                    mode: { type: 'string', enum: ['direct', 'arena', 'all'], description: 'Filter by session type (default: all)' },
+                    search_type: { type: 'string', enum: ['semantic', 'keyword', 'hybrid'], description: 'Search method (default: semantic)' },
+                    limit: { type: 'number', description: 'Max results (default 10)' },
+                    date_from: { type: 'string', description: 'ISO date — messages after this date' },
+                    date_to: { type: 'string', description: 'ISO date — messages before this date' }
+                },
+                required: ['query']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_archive_get_session',
+            description: 'Retrieve a specific conversation session by ID. Returns full message history with pagination.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    session_id: { type: 'string', description: 'The session/channel ID to retrieve' },
+                    offset: { type: 'number', description: 'Message offset for pagination (default 0)' },
+                    limit: { type: 'number', description: 'Max messages to return (default 100)' }
+                },
+                required: ['session_id']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_archive_list_arena',
+            description: 'List all arena sessions with metadata. Use to browse available conversations.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    limit: { type: 'number', description: 'Max results (default 20)' },
+                    offset: { type: 'number', description: 'Pagination offset (default 0)' },
+                    date_from: { type: 'string', description: 'ISO date string — filter sessions created after this date' },
+                    date_to: { type: 'string', description: 'ISO date string — filter sessions created before this date' }
+                }
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_archive_find_similar',
+            description: 'Given a session ID, find the most semantically similar sessions in the archive. Use to discover related conversations without guessing search terms.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    session_id: { type: 'string', description: 'The session ID to find similar sessions for' },
+                    limit: { type: 'number', description: 'Max results (default 5)' }
+                },
+                required: ['session_id']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_archive_find_references',
+            description: 'Trace conversation lineage. Finds which sessions reference this one (inbound) and which sessions this one references (outbound). Matches session IDs in message content.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    session_id: { type: 'string', description: 'The session ID to trace references for' },
+                    direction: { type: 'string', enum: ['inbound', 'outbound', 'both'], description: 'Reference direction (default: both)' }
+                },
+                required: ['session_id']
+            }
+        }
+    }
+];
+
+// Local tool execution — calls backend REST API, not MCP servers
+async function executeLocalTool(toolName, args) {
+    const headers = {
+        'Content-Type': 'application/json',
+        'X-API-Key': BACKEND_API_KEY
+    };
+
+    switch (toolName) {
+        case 'chat_archive_search': {
+            const res = await fetch(`${BACKEND_URL}/api/search`, {
+                method: 'POST', headers,
+                body: JSON.stringify({
+                    query: args.query, mode: args.mode || 'all',
+                    limit: args.limit || 10,
+                    search_type: args.search_type || 'semantic',
+                    date_from: args.date_from || null,
+                    date_to: args.date_to || null
+                })
+            });
+            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            const data = await res.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        query: data.query,
+                        method: data.method,
+                        results: data.results.map(r => ({
+                            score: r.score,
+                            sessionId: r.session?.id,
+                            sessionTitle: r.session?.title,
+                            mode: r.session?.mode,
+                            role: r.message?.role,
+                            model: r.message?.model,
+                            date: r.session?.createdAt || r.message?.createdAt,
+                            content: r.message?.content?.slice(0, 500)
+                        }))
+                    }, null, 2)
+                }]
+            };
+        }
+
+        case 'chat_archive_get_session': {
+            const offset = args.offset || 0;
+            const limit = args.limit || 100;
+            const res = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, { method: 'GET', headers });
+            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            const data = await res.json();
+            const paged = data.messages?.slice(offset, offset + limit) || [];
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        session: {
+                            id: data.session?.id,
+                            title: data.session?.title,
+                            mode: data.session?.mode,
+                            model: data.session?.model,
+                            arenaConfig: data.session?.arenaConfig,
+                            messageCount: data.messages?.length
+                        },
+                        offset, limit,
+                        returned: paged.length,
+                        messages: paged.map(m => ({
+                            role: m.role, model: m.model, turnIndex: m.turnIndex,
+                            speaker: m.speaker,
+                            content: m.content
+                        }))
+                    }, null, 2)
+                }]
+            };
+        }
+
+        case 'chat_archive_list_arena': {
+            const res = await fetch(`${BACKEND_URL}/api/arena`, { method: 'GET', headers });
+            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            const data = await res.json();
+            let results = data.data;
+            if (args.date_from) results = results.filter(a => a.createdAt >= args.date_from);
+            if (args.date_to) results = results.filter(a => a.createdAt <= args.date_to);
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify(results.slice(0, args.limit || 20).map(a => ({
+                        id: a.id, title: a.title,
+                        models: a.arenaConfig ? `${a.arenaConfig.modelA} vs ${a.arenaConfig.modelB}` : 'unknown',
+                        messages: a.messageCount,
+                        created: a.createdAt
+                    })), null, 2)
+                }]
+            };
+        }
+
+        case 'chat_archive_find_similar': {
+            const srcRes = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, { method: 'GET', headers });
+            if (!srcRes.ok) throw new Error(`Backend ${srcRes.status}`);
+            const srcData = await srcRes.json();
+            const srcTitle = srcData.session?.title || args.session_id;
+            const srcMessages = srcData.messages || [];
+            const srcModels = srcData.session?.model || 'unknown';
+
+            // Embed assistant messages (the actual conversation), not the system prompt
+            const assistantTexts = srcMessages
+                .filter(m => m.role === 'assistant')
+                .map(m => m.content || '')
+                .join(' ');
+            const queryText = assistantTexts.slice(0, 3000);
+            const messageCount = srcMessages.length;
+
+            const searchRes = await fetch(`${BACKEND_URL}/api/search`, {
+                method: 'POST', headers,
+                body: JSON.stringify({ query: queryText, limit: (args.limit || 5) + 1 })
+            });
+            if (!searchRes.ok) throw new Error(`Backend ${searchRes.status}`);
+            const searchData = await searchRes.json();
+
+            const similar = searchData.results
+                .filter(r => r.session?.id !== args.session_id)
+                .slice(0, args.limit || 5);
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        source: {
+                            id: args.session_id,
+                            title: srcTitle,
+                            models: srcModels,
+                            messageCount
+                        },
+                        similar: similar.map(r => ({
+                            score: r.score,
+                            sessionId: r.session?.id,
+                            sessionTitle: r.session?.title,
+                            mode: r.session?.mode,
+                            date: r.session?.createdAt || r.message?.createdAt,
+                            content: r.message?.content?.slice(0, 300)
+                        }))
+                    }, null, 2)
+                }]
+            };
+        }
+
+        case 'chat_archive_find_references': {
+            const res = await fetch(`${BACKEND_URL}/api/references`, {
+                method: 'POST', headers,
+                body: JSON.stringify({
+                    session_id: args.session_id,
+                    direction: args.direction || 'both'
+                })
+            });
+            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            const data = await res.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify(data, null, 2)
+                }]
+            };
+        }
+
+        default:
+            throw new Error(`Unknown local tool: ${toolName}`);
+    }
+}
+
+const LOCAL_TOOL_NAMES = new Set(ARCHIVE_TOOLS.map(t => t.function.name));
 
 // State
 let currentChatId = null;
@@ -949,6 +1205,11 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
         prompt = metadata;
     }
 
+    // Archive tool context: let the LLM know it can search past conversations
+    if (ENABLE_ARCHIVE_TOOLS) {
+        prompt = prompt + '\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other).';
+    }
+
     return prompt;
 }
 
@@ -1352,7 +1613,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
             console.log('[Vision] Filtering decision: modelSupportsVision=', modelSupportsVision, '| useVisionAnalysis=', useVisionAnalysis, '| shouldFilter=', shouldFilterVisionTools);
             
             if (shouldFilterVisionTools) {
-                // Filter out vision-related tools when model has native vision and MCP Vision is OFF
                 const filteredTools = allMcpTools.filter(tool => {
                     const toolName = tool.function?.name?.toLowerCase() || '';
                     const isVision = toolName.includes('vision_');
@@ -1365,10 +1625,15 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     requestBody.tools = filteredTools;
                 }
             } else {
-                // Include all tools (either MCP Vision is ON, or model doesn't support vision)
                 console.log('[Vision] Including ALL tools');
                 requestBody.tools = allMcpTools;
             }
+        }
+
+        // Add archive tools (local backend, not MCP)
+        if (ENABLE_ARCHIVE_TOOLS) {
+            if (!requestBody.tools) requestBody.tools = [];
+            requestBody.tools.push(...ARCHIVE_TOOLS);
         }
 
         // Add image processing if images attached (skip for tool exchanges - they have no user message)
@@ -2104,10 +2369,13 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
     });
 
-    // 4. Execute tool
+    // 4. Execute tool (local archive tools first, then MCP servers)
     try {
-        const result = await mcpClient.executeTool(parsedObj.name, parsedObj.args, (progressParams) => {
-            // Update UI on progress
+        const isLocalTool = LOCAL_TOOL_NAMES.has(parsedObj.name);
+        const result = isLocalTool
+            ? await executeLocalTool(parsedObj.name, parsedObj.args)
+            : await mcpClient.executeTool(parsedObj.name, parsedObj.args, (progressParams) => {
+                // Update UI on progress
             const { progress, total, message } = progressParams;
             let statusText = 'Running...';
             if (message) statusText = message;
