@@ -1,14 +1,14 @@
 # Chat Architecture Refactor — Development Plan
 
 > Branch: `refactor/chat-architecture`
-> Status: Phase 4 complete, Phase 5 pending
+> Status: Phase 4 complete, Phase 5 in progress
 > Last updated: 2026-05-12
 
 ---
 
 ## Objective
 
-Transform the LLM Gateway Chat from a pure frontend SPA (localStorage/IndexedDB) into a multi-user, database-backed application with semantic search. The archive becomes queryable by LLMs via MCP tools, and arena sessions are automatically published.
+Transform the LLM Gateway Chat from a NeDB-backed single-user app into a multi-user, nDB-backed application with semantic search. The archive becomes queryable by LLMs via MCP tools, and arena sessions are automatically published.
 
 ---
 
@@ -375,43 +375,178 @@ You have access to the conversation archive via tools. The user may ask you abou
 
 ---
 
-## Phase 5: Frontend Migration
+## Phase 5: Data Migration + Frontend Switch
 
-**Goal:** Frontend uses backend API instead of localStorage.
+**Goal:** Migrate all active data from NeDB (old) to nDB (new), then switch the frontend to use the new backend API.
 
-### 5.1 Client SDK Changes
+### 5.0 Architecture Context (CRITICAL — read before proceeding)
 
-`client-sdk.js` additions:
-- `client.createApiKey()` → `POST /api/auth/key`
-- `client.listChats()` → `GET /api/chats`
-- `client.createChat()` → `POST /api/chats`
-- `client.getChat(id)` → `GET /api/chats/:id`
-- `client.sendMessage()` → `POST /api/chats/:id/messages`
-- `client.search()` → `POST /api/search`
+**What was (before refactor):**
+- Node backend used **NeDB** (in-memory JS database, persisted to `server/data/storage.db`)
+- Frontend communicated via `/api/storage/*` key-value endpoints (the `ApiAdapter` in `storage.js`)
+- **IndexedDB was already retired** — it is NOT the current data source
+- `storage.js` has two adapters: `IndexedDBAdapter` (browser fallback) and `ApiAdapter` (Node backend)
+- Files/images stored on disk in `server/data/files/`
 
-### 5.2 State Management Changes
+**What is (after Phases 1–4):**
+- New backend uses **nDB** (Rust-based document DB) for structured data
+- New backend uses **nVDB** (Rust vector DB) for embeddings
+- New REST API: `/api/chats`, `/api/chats/:id/messages`, `/api/search`, `/api/arena`, etc.
+- The old `/api/storage/*` key-value API is NOT part of the new architecture
+- `server.js` serves static files AND the new API (port 3500)
 
-`chat-history.js`:
-- Replace `localStorage` reads/writes with API calls
-- Keep in-memory cache for active session
-- Lazy-load chat list on sidebar open
+**What the old `migrate.js` did wrong:**
+- Imported ALL `conv:*` entries (including deleted chats — there are 52 conv entries but only 17 active)
+- Created `-user`/`-assistant` ID suffixes that don't match frontend exchange IDs
+- Didn't use the `history:` index to filter active vs deleted chats
+- Didn't handle file/image migration (files remain in old location, not linked to nDB records)
+- Imported an `arena:history:` entry as a session (ghost entry, no messages)
 
-`conversation.js`:
-- `addExchange()` → POST to backend, then update local state
-- `getMessagesForApi()` → reads from local cache (already synced)
+**What must happen (correct migration):**
 
-### 5.3 Offline Behavior
+1. **Wipe the current nDB data** (it was populated by the broken migrate.js)
+2. **Read NeDB `storage.db`** — parse all entries
+3. **Filter active chats** using the `history:` index (17 direct chats are active out of 52)
+4. **Migrate all 57 arena sessions** (all are kept, arena has no "deleted" concept)
+5. **Transform exchange format → message format** (one exchange = 2 messages: user + assistant, same turnIndex)
+6. **Preserve original exchange IDs** (no `-user`/`-assistant` suffixes)
+7. **Create nDB file buckets** and copy files from `server/data/files/`
+8. **Link file references** in message attachment records to their bucket paths
+9. **Run `embed.js`** to populate nVDB for MCP search
+10. **Set `enableBackend: true`** in config
+11. **Test end-to-end** — verify chat list, message rendering, images, search
 
-- If backend unreachable, show offline indicator
-- Offer "local mode" fallback (existing localStorage behavior)
-- Queue sends for retry when connection returns
+### 5.1 NeDB Data Format Reference
 
-### 5.4 Deliverables
-- [ ] API client methods
-- [ ] chat-history.js uses backend
-- [ ] conversation.js syncs to backend
-- [ ] Offline indicator and fallback
-- [ ] Import existing localStorage data
+The NeDB `storage.db` file has one JSON object per line. Key prefixes:
+
+| Prefix | Count | Description |
+|--------|-------|-------------|
+| `conv:*` | 52 | Conversation data (exchanges array). Only 17 are active (see `history:`) |
+| `arena:*` | 57 | Arena sessions (all kept). Key format: `arena:session:{id}` or `arena:history:` |
+| `history:` | 1 | Array of active chat metadata — **THIS is the source of truth for which chats exist** |
+| `pref:*` | 4 | User preferences |
+| `activeChatId` | 1 | Last active chat ID |
+| `mcp:*` | 2 | MCP server config |
+
+**Exchange format (from `conv:*` entries):**
+```json
+{
+  "id": "ex_1234567890_abc123",
+  "timestamp": 1745000000000,
+  "user": { "role": "user", "content": "...", "attachments": [...] },
+  "assistant": {
+    "role": "assistant",
+    "content": "...",
+    "versions": [...],
+    "currentVersion": 0,
+    "isComplete": true,
+    "model": "badkid-llama-chat",
+    "usage": { ... },
+    "context": { ... }
+  },
+  "type": "tool",  // optional, for tool exchanges
+  "tool": { "name": "...", "args": {...}, "content": "...", "status": "success" }
+}
+```
+
+**nDB message format (target):**
+```json
+{
+  "_type": "message",
+  "id": "ex_1234567890_abc123",      // original exchange ID, NO suffix
+  "sessionId": "chat_1234567890_abc",
+  "userId": "user-migrated-default",
+  "role": "user",                      // or "assistant", "tool"
+  "model": "badkid-llama-chat",
+  "content": "...",
+  "rawContent": "...",
+  "attachments": [...],
+  "turnIndex": 0,                      // same turnIndex for user+assistant pair
+  "createdAt": "2026-04-24T18:56:59.337Z"
+}
+```
+
+### 5.2 Migration Script (`server/migrate.js` — REWRITE)
+
+**Input:** `server/data/storage.db` (NeDB file)
+**Output:** nDB database (`server/data/chat_app`) + nVDB embeddings + file buckets
+
+**Steps:**
+1. Open nDB, wipe existing data (broken migration)
+2. Create migration user
+3. Parse `storage.db` line by line
+4. Build history index from `history:` entry → Set of active chat IDs
+5. For each `conv:*` entry: skip if not in active set
+6. For each active `conv:*`: create session + messages
+7. For each `arena:*`: create session + messages (skip `arena:history:` ghost)
+8. Create file buckets and copy files
+9. Update message attachment references to point to bucket paths
+10. Report stats
+
+**File handling:**
+- Old files: `server/data/files/{exchangeId}/{filename}`
+- New buckets: `server/data/files/{sessionId}/{filename}` (grouped by session)
+- nDB has bucket concept (folders) — use `server/data/files/` as the bucket root
+
+### 5.3 Embedding Run
+
+After migration, run `node server/embed.js` to:
+1. Iterate all messages in nDB
+2. Call LLM Gateway `/v1/embeddings` for each message
+3. Store vectors in nVDB `embeddings` collection
+4. Report progress (this takes time — 9 texts/sec via Gateway)
+
+### 5.4 Frontend Files (ALREADY CREATED — need testing after migration)
+
+These files were created in a previous session but are currently disabled (`enableBackend: false`):
+
+| File | Status | Notes |
+|------|--------|-------|
+| `chat/js/api-client.js` | Created, untested | `BackendClient` class with all REST methods |
+| `chat/js/config.js` | Modified | `enableBackend: false` (flip to true after migration) |
+| `chat/js/chat-history.js` | Modified | Backend CRUD with localStorage fallback, filters arena+empty |
+| `chat/js/conversation.js` | Modified | Per-exchange message sync via `_syncMessage()` |
+
+**Key frontend transform:** Messages from backend use `turnIndex` grouping. The `_backendMessagesToExchanges()` method groups messages by `turnIndex`, finds user+assistant pair within each group. This handles the inconsistent ordering in migrated data (some turns have assistant before user).
+
+### 5.5 Execution Order
+
+```
+Step 1: Rewrite migrate.js         → Proper NeDB → nDB migration with history filter
+Step 2: Wipe nDB data              → Delete broken migration data
+Step 3: Run migrate.js             → Populate nDB with clean data + file buckets
+Step 4: Run embed.js               → Populate nVDB for search
+Step 5: Set enableBackend: true    → Flip config flag
+Step 6: Test chat list             → Verify 17 direct chats appear in sidebar
+Step 7: Test chat rendering        → Open a chat, verify user+assistant messages render
+Step 8: Test images                → Verify image attachments display
+Step 9: Test search                → Use MCP tools to search archive
+Step 10: Fix issues                → Iterate on any rendering/data problems
+```
+
+### 5.6 Risk Mitigation
+
+| Risk | Mitigation |
+|------|-----------|
+| Migration data loss | NeDB `storage.db` is read-only, never modified. Can re-run anytime |
+| Missing files | Log warnings for referenced files that don't exist on disk |
+| Message format mismatch | Migration preserves original exchange IDs, no suffixes |
+| Frontend rendering broken | `enableBackend` flag allows instant rollback to old storage |
+| Embedding pipeline slow | ~9 texts/sec, progress reporting built into `embed.js` |
+| nDB file not found | Re-run migration, nDB is populated from NeDB source |
+
+### 5.7 Deliverables
+- [ ] Rewrite `server/migrate.js` — Clean NeDB → nDB migration
+- [ ] Wipe broken nDB data
+- [ ] Run migration — 17 direct chats + 57 arena sessions + file buckets
+- [ ] Run `embed.js` — Populate nVDB for MCP search
+- [ ] Enable backend (`enableBackend: true`)
+- [ ] Verify chat list — 17 direct chats, no arena, no empties
+- [ ] Verify chat rendering — User + assistant messages display correctly
+- [ ] Verify images — File attachments load from disk
+- [ ] Verify search — MCP archive tools return results
+- [ ] Auth UI — Login modal + key management (optional, key can stay hardcoded for single-user)
 
 ---
 
@@ -530,7 +665,7 @@ EMBEDDING_DIMENSIONS=2560
 | 2 | Embed per-message or per-exchange? | Retrieval quality | Per-exchange preserves context. **Decision:** Per-message for granular retrieval, per-exchange as post-filter. |
 | 3 | Rate limiting on embedding calls? | Gateway/Fatten resource protection | Not needed — 9 texts/sec regardless of concurrency (wrapper serializes) |
 | 4 | Should public arena pages have SEO/meta tags? | Shareability | HTML title + description |
-| 5 | Image storage — keep IndexedDB or move to backend? | Architecture complexity | Keep IndexedDB for v1, store references in nDB |
+| 5 | Image storage — keep IndexedDB or move to backend? | Architecture complexity | **RESOLVED: Files on disk.** nDB has bucket concept (folders). Images stored as files in `server/data/files/{sessionId}/`, referenced in message attachments. Not blobs, not IndexedDB. |
 | 6 | Arena completion trigger | Auto-publish reliability | Page 6.1 — explicit frontend trigger |
 | 7 | Pre-tokenization strategy | Embedding pipeline complexity | **RESOLVED: NOT NEEDED.** Raw text is 2.3x faster than pre-tok with real words. Tokenization ~20ms/text. |
 

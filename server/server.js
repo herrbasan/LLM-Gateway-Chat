@@ -477,7 +477,9 @@ const routes = {
     }
 
     json(res, { source: { id: sid }, direction: dir, referenced_by: inbound, references: outbound });
-  }
+  },
+   
+  // (file serving handled below via prefix check)
 
 };
 
@@ -535,6 +537,26 @@ const server = http.createServer(async (req, res) => {
   }
   if (pathname === '/chat/') {
     pathname = '/chat/index.html';
+  }
+  if (pathname === '/chat-arena') {
+    res.writeHead(302, { 'Location': '/chat-arena/' });
+    res.end();
+    return;
+  }
+  if (pathname === '/chat-arena/') {
+    pathname = '/chat-arena/index.html';
+  }
+
+  // File serving from data directory
+  if (pathname.startsWith('/files/')) {
+    const subPath = req.url.slice(7).split('?')[0];
+    const filePath = path.join(FILES_DIR, decodeURIComponent(subPath));
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      serveFile(req, res, filePath);
+    } else {
+      json(res, { error: 'File not found' }, 404);
+    }
+    return;
   }
 
   // Route matching

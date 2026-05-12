@@ -4,17 +4,39 @@
 
 import { imageStore } from './image-store.js';
 import { storage } from './storage.js';
+import { backendClient } from './api-client.js';
+
+const _CONFIG = window.CHAT_CONFIG || {};
+const _USE_BACKEND = _CONFIG.enableBackend === true && !!_CONFIG.backendUrl;
 
 export class Conversation {
-    constructor(storageKey = 'chat-conversation') {
-        this.exchanges = []; // {id, user: {role, content, attachments}, assistant: {role, content, versions: [], currentVersion}}
+    constructor(storageKey = 'chat-conversation', sessionId = null) {
+        this.exchanges = [];
         this.storageKey = storageKey;
+        this.sessionId = sessionId || this._extractId();
+        this._pendingBackendSync = new Map();
         this.load();
+    }
+
+    _extractId() {
+        return this.storageKey.replace('chat-conversation-', '');
     }
 
     // Generate unique ID
     _generateId() {
         return 'ex_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    }
+
+    _syncMessage(role, content, model = null, exchangeId = null) {
+        if (!_USE_BACKEND || !backendClient.apiKey || !this.sessionId) return;
+        backendClient.sendMessage(this.sessionId, { role, content, model })
+            .then(() => {
+                if (exchangeId) this._pendingBackendSync.delete(exchangeId);
+            })
+            .catch(err => {
+                console.warn('[Conversation] Backend sync failed:', err.message);
+                if (exchangeId) this._pendingBackendSync.set(exchangeId, { role, content, model });
+            });
     }
 
     // ============================================
@@ -75,6 +97,7 @@ export class Conversation {
         };
         this.exchanges.push(exchange);
         this.save();
+        this._syncMessage('tool', JSON.stringify({ name: toolName, args: toolArgs, callId }), null, exchange.id);
         return exchange.id;
     }
 
@@ -121,6 +144,7 @@ export class Conversation {
         
         this.exchanges.push(exchange);
         this.save();
+        this._syncMessage('user', contentWithTimestamp, null, exchange.id);
         return exchange.id;
     }
 
@@ -209,6 +233,8 @@ export class Conversation {
             // Update current version to point to the latest
             exchange.assistant.currentVersion = exchange.assistant.versions.length - 1;
         }
+
+        this._syncMessage('assistant', cleanedContent, null, exchangeId);
 
         return this.save();
     }
@@ -603,26 +629,40 @@ export class Conversation {
 
     async load() {
         try {
-            // Extract conversation ID from storageKey (format: "chat-conversation-{id}")
             const conversationId = this.storageKey.replace('chat-conversation-', '');
-            const data = await storage.loadConversation(conversationId);
+            let loadedFromBackend = false;
 
-            if (data && data.length > 0) {
-                this.exchanges = data;
+            if (_USE_BACKEND && backendClient.apiKey && this.sessionId) {
+                try {
+                    const data = await backendClient.getSession(this.sessionId);
+                    if (data && data.messages && data.messages.length > 0) {
+                        this.exchanges = this._backendMessagesToExchanges(data.messages);
+                        loadedFromBackend = true;
+                    }
+                } catch (err) {
+                    console.warn('[Conversation] Backend load failed, falling back to local:', err.message);
+                }
+            }
 
-                // Load images from IndexedDB for each exchange
+            if (!loadedFromBackend) {
+                const data = await storage.loadConversation(conversationId);
+                if (data && data.length > 0) {
+                    this.exchanges = data;
+                }
+            }
+
+            if (this.exchanges.length > 0) {
                 for (const ex of this.exchanges) {
                     if (ex.user && ex.user.attachments?.some(att => att.hasImage)) {
                         try {
                             const images = await imageStore.load(ex.id);
-                            // Merge image data with metadata
                             ex.user.attachments = ex.user.attachments.map((att, idx) => {
                                 const img = images[idx];
                                 if (!img) return att;
                                 return {
                                     ...att,
-                                    blobUrl: img.blobUrl,      // For display
-                                    getDataUrl: img.getDataUrl // Function for API
+                                    blobUrl: img.blobUrl,
+                                    getDataUrl: img.getDataUrl
                                 };
                             });
                         } catch (err) {
@@ -630,7 +670,6 @@ export class Conversation {
                         }
                     }
 
-                    // Cleanup routine for historically duplicated versions
                     if (ex.assistant && Array.isArray(ex.assistant.versions) && ex.assistant.versions.length > 0) {
                         const uniqueVersions = [];
                         const seen = new Set();
@@ -654,6 +693,100 @@ export class Conversation {
             console.error("[Conversation] Failed to load:", error);
             this.exchanges = [];
         }
+    }
+
+    _backendMessagesToExchanges(messages) {
+        const sorted = [...messages].sort((a, b) => a.turnIndex - b.turnIndex);
+
+        const groups = new Map();
+        for (const msg of sorted) {
+            const key = msg.turnIndex;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(msg);
+        }
+
+        const exchanges = [];
+        for (const [turnIndex, msgs] of groups) {
+            const userMsg = msgs.find(m => m.role === 'user');
+            const assistantMsg = msgs.find(m => m.role === 'assistant');
+            const toolMsg = msgs.find(m => m.role === 'tool');
+
+            // Tool exchange — has tool message but no user content
+            if (toolMsg && !userMsg?.content) {
+                const ts = new Date(toolMsg.createdAt).getTime();
+                const exchange = {
+                    id: toolMsg.id?.replace(/-tool$/, '') || ('ex_' + turnIndex),
+                    timestamp: !isNaN(ts) ? ts : Date.now(),
+                    type: 'tool',
+                    tool: {
+                        name: toolMsg.toolName || 'unknown',
+                        args: toolMsg.toolArgs || {},
+                        status: toolMsg.toolStatus || 'success',
+                        content: toolMsg.content || '',
+                        images: toolMsg.toolImages || []
+                    },
+                    user: {
+                        role: 'user',
+                        content: '',
+                        attachments: []
+                    },
+                    assistant: {
+                        role: 'assistant',
+                        content: '',
+                        versions: [],
+                        currentVersion: 0,
+                        isStreaming: false,
+                        isComplete: false
+                    }
+                };
+                // If assistant responded after tool, include it
+                if (assistantMsg) {
+                    exchange.assistant.content = assistantMsg.content || '';
+                    exchange.assistant.isComplete = true;
+                    exchange.assistant.versions = [{
+                        content: assistantMsg.content || '',
+                        timestamp: (t => !isNaN(t) ? t : Date.now())(new Date(assistantMsg.createdAt).getTime())
+                    }];
+                    if (assistantMsg.model) exchange.assistant.model = assistantMsg.model;
+                }
+                exchanges.push(exchange);
+                continue;
+            }
+
+            const ts = new Date((userMsg || assistantMsg)?.createdAt).getTime();
+            const exchange = {
+                id: (userMsg || assistantMsg)?.id?.replace(/-user$/, '').replace(/-assistant$/, '') || ('ex_' + turnIndex),
+                timestamp: !isNaN(ts) ? ts : Date.now(),
+                user: {
+                    role: 'user',
+                    content: userMsg?.content || '',
+                    attachments: userMsg?.attachments || []
+                },
+                assistant: {
+                    role: 'assistant',
+                    content: '',
+                    versions: [],
+                    currentVersion: 0,
+                    isStreaming: false,
+                    isComplete: false
+                }
+            };
+
+            if (assistantMsg) {
+                exchange.assistant.content = assistantMsg.content || '';
+                exchange.assistant.isComplete = true;
+                exchange.assistant.versions = [{
+                    content: assistantMsg.content || '',
+                    timestamp: (t => !isNaN(t) ? t : Date.now())(new Date(assistantMsg.createdAt).getTime())
+                }];
+                if (assistantMsg.model) exchange.assistant.model = assistantMsg.model;
+                if (assistantMsg.usage) exchange.assistant.usage = assistantMsg.usage;
+            }
+
+            exchanges.push(exchange);
+        }
+
+        return exchanges;
     }
 
     async clear() {

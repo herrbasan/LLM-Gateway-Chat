@@ -488,7 +488,7 @@ function buildExchangeElement(exchange) {
 
     // Regular user + assistant exchange
     const userParsed = parseTimestamp(exchange.user.content);
-    const userTimestamp = userParsed.timestamp || new Date(exchange.timestamp).toISOString().slice(0, 16).replace('T', ' @ ');
+    const userTimestamp = userParsed.timestamp || (exchange.timestamp && !isNaN(exchange.timestamp) ? new Date(exchange.timestamp).toISOString().slice(0, 16).replace('T', ' @ ') : '');
 
     let userContent = renderMarkdown(userParsed.cleanContent);
     if (exchange.user?.attachments?.length > 0) {
@@ -2157,7 +2157,7 @@ function renderExchange(exchange) {
 
     // Parse timestamps from content
     const userParsed = parseTimestamp(exchange.user.content);
-    const userTimestamp = userParsed.timestamp || new Date(exchange.timestamp).toISOString().slice(0,16).replace('T',' @ ');
+    const userTimestamp = userParsed.timestamp || (exchange.timestamp && !isNaN(exchange.timestamp) ? new Date(exchange.timestamp).toISOString().slice(0,16).replace('T',' @ ') : '');
     
     // User message
     const userEl = document.createElement('div');
