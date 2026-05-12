@@ -132,6 +132,14 @@
                     <div>
                         <div class="sidebar-section">
                             <label>System Prompt</label>
+                            <div class="preset-row">
+                                <nui-select id="preset-select" data-label="Load preset...">
+                                    <select></select>
+                                </nui-select>
+                                <nui-button id="manage-presets-btn">
+                                    <button type="button"><nui-icon name="settings"></nui-icon>Manage</button>
+                                </nui-button>
+                            </div>
                             <nui-textarea id="system-prompt">
                                 <textarea rows="6" placeholder="Optional system instructions..."></textarea>
                             </nui-textarea>
@@ -387,6 +395,33 @@
             }
         });
     </script>
+
+    <nui-dialog id="presets-dialog" mode="page" title="System Prompt Presets" style="--space-page-maxwidth: 90%;">
+        <div class="presets-dialog-layout">
+            <div class="presets-sidebar-col">
+                <div class="presets-sidebar-header">
+                    <nui-button id="preset-add-btn">
+                        <button type="button"><nui-icon name="add"></nui-icon>New</button>
+                    </nui-button>
+                </div>
+                <nui-column-flow class="presets-sidebar">
+                    <!-- Filled by JS -->
+                </nui-column-flow>
+            </div>
+            <div class="presets-editor">
+                <div class="presets-editor-top">
+                    <nui-input id="preset-name-input" style="flex:1;">
+                        <input type="text" placeholder="Preset name...">
+                    </nui-input>
+                    <nui-button id="preset-save">
+                        <button type="button"><nui-icon name="save"></nui-icon>Save Preset</button>
+                    </nui-button>
+                </div>
+                <nui-rich-text id="preset-editor">
+                </nui-rich-text>
+            </div>
+        </div>
+    </nui-dialog>
 </body>
 </html>
 

@@ -1,8 +1,8 @@
 # Chat Architecture Refactor — Development Plan
 
 > Branch: `refactor/chat-architecture`
-> Status: Phase 2 complete, Phase 3 in progress
-> Last updated: 2026-05-11
+> Status: Phase 4 complete, Phase 5 pending
+> Last updated: 2026-05-12
 
 ---
 
@@ -54,6 +54,16 @@ Transform the LLM Gateway Chat from a pure frontend SPA (localStorage/IndexedDB)
 
 **Important:** The Arena is a recording device — it writes to the archive but never reads from it. MCP tools are only exposed in Direct Chat, where the user can ask an LLM to analyze past arena conversations.
 
+### Architectural Deviations from Original Plan
+
+| Deviation | Reason |
+|-----------|--------|
+| Flat `server/` structure (no `server/src/`) | All server code is in a single file for AI-first maintainability |
+| Local tool execution in frontend (not MCP servers) | Direct REST calls to backend, simpler than SSE/JSON-RPC for archive tools |
+| 5 archive tools (added `find_references`) | Lineage tracking surfaced as high-value during LLM stress testing |
+| OpenRouter cloud embedding (not Fatten local) | 20x faster (28ms vs 110ms/text), <$0.05 for full backfill |
+| nui_wc2 moved to `lib/` | Consolidated all libraries under one directory |
+
 
 ---
 
@@ -66,7 +76,7 @@ Transform the LLM Gateway Chat from a pure frontend SPA (localStorage/IndexedDB)
 | Vector DB | nVDB (npm module) | HNSW search for semantic retrieval |
 | NOT using | nGDB wrapper | Unnecessary proxy layer for single service |
 | Auth | API keys + session cookies | Simple, sufficient for lab use |
-| Embedding | Gateway `/v1/embeddings` | Gateway proxies to Fatten internally |
+| Embedding | Gateway `/v1/embeddings` | Cloud via OpenRouter (Qwen3-Embedding-4B), Fatten as backup |
 
 ---
 
@@ -235,9 +245,10 @@ Collection: `embeddings`
 **Embedding flow (current):**
 ```
 Message → buildText(msg, session) → 
-  POST to Wrapper:4080/embedding or Gateway:3400/v1/embeddings → 
-  Qwen3-Embedding-4B on Fatten (Intel Arc A770) →
+  POST to LLM Gateway:3400/v1/embeddings (OpenRouter cloud, Qwen3-Embedding-4B, 2560d) →
   Store [2560] vector in nVDB
+  
+Fallback: POST to Wrapper:4080/embedding (Fatten, Intel Arc A770)
 ```
 
 ### 3.3 Search API
@@ -270,7 +281,7 @@ Response:
 ### 3.4 Deliverables
 - [x] nVDB integration (`nvdb` npm module) — working via `embed.js` + `server.js`
 - [x] Embedding pipeline — `server/embed.js` handles bulk + incremental embedding
-- [ ] `/api/search` endpoint — text-based only (line 225). Needs nVDB vector search.
+- [x] `/api/search` endpoint — hybrid semantic + text with search_type, date filters, session metadata
 - [x] Gateway embedding client — embedded in `embed.js` (wrapper + Gateway routes)
 - [x] Benchmark infrastructure — `server/benchmark-embed.js` tests throughput across routes
 
@@ -357,10 +368,10 @@ You have access to the conversation archive via tools. The user may ask you abou
 ```
 
 ### 4.4 Deliverables
-- [ ] MCP tool definitions
-- [ ] Backend endpoints for each tool
-- [ ] Frontend integration (chat.js tool execution)
-- [ ] System prompt injection when tools active
+- [x] MCP tool definitions — 5 tools: search, get_session, list_arena, find_similar, find_references
+- [x] Backend endpoints for each tool — `/api/search`, `/api/references`, `/api/arena`, `/api/chats/:id`
+- [x] Frontend integration — local tool execution in `chat/js/chat.js`, intercepts before MCP dispatch
+- [x] System prompt injection when tools active — archive context appended to system prompt
 
 ---
 

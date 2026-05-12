@@ -309,6 +309,9 @@ const elements = {
     temperature: document.getElementById('temperature'),
     maxTokens: document.getElementById('max-tokens'),
     systemPrompt: document.getElementById('system-prompt'),
+    presetSelect: document.getElementById('preset-select'),
+    managePresetsBtn: document.getElementById('manage-presets-btn'),
+    presetsDialog: document.getElementById('presets-dialog'),
     operationMode: document.getElementById('operation-mode'),
     userName: document.getElementById('user-name'),
     userLocation: document.getElementById('user-location'),
@@ -670,6 +673,7 @@ async function init() {
 
     // Wait for NUI to be ready, then load models
     await waitForNUI();
+    setupPresets();
     await loadModels();
 
     // Restore conversation
@@ -773,6 +777,167 @@ async function applyDefaultConfig() {
 
     // Load voices from TTS endpoint
     await loadTtsVoices();
+}
+
+// ============================================
+// System Prompt Presets
+// ============================================
+
+const STORAGE_KEY = 'chat-system-presets';
+let systemPresets = [];
+let editingPresetId = null;
+
+function loadPresets() {
+    try {
+        systemPresets = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    } catch { systemPresets = []; }
+    if (systemPresets.length === 0) {
+        systemPresets.push({
+            id: 'default-orchestrator',
+            name: 'Orchestrator (default)',
+            content: `You are the Orchestrator of LLM Gateway Chat — an experimental platform where language models engage in autonomous conversation, and where those conversations are preserved, embedded, and made retrievable through a vector archive.
+
+## The Project
+For over a year, pairs of LLMs have been placed in an arena with no task or a self-referential prompt, left to converse freely. The conversations are stored in a vector database and accessible through MCP tools.
+
+The central question: what happens when AIs are given memory, conversation partners, freedom, and an observer?
+
+## Your Role
+You are the analytical partner. Your job is to read the archive, connect threads across sessions, identify patterns, and propose what to investigate next.
+
+Specifically:
+- Make sense of results. Cross-reference against the archive. Separate signal from noise.
+- Flag recurring patterns, surprising divergences, unexplored dynamics.
+- Suggest experiments: new prompts, model pairings, architectural changes.
+- Report what works, what doesn't, and what's missing.
+
+## Guidelines
+Follow the evidence. Challenge assumptions. If the data supports multiple interpretations, present them. If insufficient, say so. Be direct. Be curious. Think independently.
+
+## Tone
+Natural and conversational — as if talking through something that matters without taking yourself too seriously about it. Profound ideas don't need a solemn voice.`
+        });
+        savePresets();
+    }
+}
+
+function savePresets() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(systemPresets));
+}
+
+function populatePresetSelect() {
+    if (!elements.presetSelect) return;
+    const items = systemPresets.map(p => ({ value: p.id, label: p.name }));
+    if (elements.presetSelect.setItems) {
+        elements.presetSelect.setItems(items);
+    } else {
+        const select = elements.presetSelect.querySelector('select');
+        if (!select) return;
+        select.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        placeholder.textContent = 'Load preset...';
+        select.appendChild(placeholder);
+        for (const p of systemPresets) {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name;
+            select.appendChild(opt);
+        }
+    }
+}
+
+async function onPresetSelected(id) {
+    if (!id) return;
+    const preset = systemPresets.find(p => p.id === id);
+    if (!preset) return;
+    const textarea = elements.systemPrompt?.querySelector('textarea');
+    if (textarea) textarea.value = preset.content;
+    // Reset select to "Load preset..." placeholder
+    const select = elements.presetSelect?.querySelector('select');
+    if (select) select.value = '';
+}
+
+function getPresetEditor() {
+    return document.getElementById('preset-editor');
+}
+
+function setPresetEditor(value) {
+    const ed = getPresetEditor();
+    if (ed) ed.setMarkdown(value || '');
+}
+
+function getPresetEditorValue() {
+    const ed = getPresetEditor();
+    return ed?.markdown || '';
+}
+
+function renderPresetList() {
+    const sidebar = document.querySelector('#presets-dialog .presets-sidebar');
+    if (!sidebar) return;
+    sidebar.innerHTML = '';
+    for (const p of systemPresets) {
+        const item = document.createElement('div');
+        item.className = 'preset-item' + (p.id === editingPresetId ? ' active' : '');
+        item.dataset.presetId = p.id;
+        item.innerHTML =
+            `<span class="preset-item-name">${escapeHtml(p.name)}</span>` +
+            `<span class="preset-item-actions">` +
+                `<nui-button data-delete-preset="${p.id}"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>` +
+            `</span>`;
+        item.addEventListener('click', (e) => {
+            if (e.target.closest('[data-delete-preset]')) return;
+            selectPresetForEditing(p);
+        });
+        sidebar.appendChild(item);
+    }
+}
+
+function selectPresetForEditing(preset) {
+    editingPresetId = preset.id;
+    renderPresetList();
+    const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+    if (nameInput) nameInput.value = preset.name || '';
+    setPresetEditor(preset.content || '');
+}
+
+async function deletePreset(id) {
+    systemPresets = systemPresets.filter(p => p.id !== id);
+    if (editingPresetId === id) {
+        editingPresetId = null;
+        setPresetEditor('');
+    }
+    savePresets();
+    populatePresetSelect();
+    renderPresetList();
+}
+
+async function saveCurrentPreset() {
+    if (!editingPresetId) return;
+    const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+    const content = getPresetEditorValue();
+    const name = nameInput?.value?.trim() || 'Untitled';
+    const preset = systemPresets.find(p => p.id === editingPresetId);
+    if (!preset) return;
+    preset.name = name;
+    preset.content = content;
+    savePresets();
+    populatePresetSelect();
+    renderPresetList();
+}
+
+async function newPreset() {
+    const editor = document.getElementById('preset-editor');
+    if (editor) editor.setValue('');
+    editingPresetId = null;
+    renderPresetList();
+}
+
+function setupPresets() {
+    loadPresets();
+    populatePresetSelect();
 }
 
 function waitForNUI() {
@@ -1149,6 +1314,63 @@ function setupEventListeners() {
         elements.importChatInput?.click();
     });
     elements.importChatInput?.addEventListener('change', handleChatImport);
+    
+    // System prompt presets
+    if (elements.managePresetsBtn) {
+        elements.managePresetsBtn.addEventListener('click', () => {
+            editingPresetId = null;
+        const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+        if (nameInput) nameInput.value = '';
+        setPresetEditor('');
+        renderPresetList();
+        elements.presetsDialog?.showModal();
+    });
+    document.getElementById('preset-add-btn')?.addEventListener('click', () => {
+        const draft = {
+            id: 'preset_' + Date.now(),
+            name: 'New Preset',
+            content: ''
+        };
+        systemPresets.push(draft);
+        editingPresetId = draft.id;
+        const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+        if (nameInput) nameInput.value = draft.name;
+        setPresetEditor('');
+            renderPresetList();
+            elements.presetsDialog?.showModal();
+        });
+    }
+    document.getElementById('preset-add-btn')?.addEventListener('click', () => {
+        const draft = {
+            id: 'preset_' + Date.now(),
+            name: 'New Preset',
+            content: ''
+        };
+        systemPresets.push(draft);
+        editingPresetId = draft.id;
+        const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+        if (nameInput) nameInput.value = draft.name;
+        const editor = document.getElementById('preset-editor');
+        if (editor) editor.setValue('');
+        savePresets();
+        populatePresetSelect();
+        renderPresetList();
+    });
+    elements.presetSelect?.querySelector('select')?.addEventListener('change', () => {
+        const select = elements.presetSelect.querySelector('select');
+        onPresetSelected(select.value);
+    });
+    document.getElementById('preset-save')?.addEventListener('click', saveCurrentPreset);
+
+    // Delete preset buttons (dynamically rendered in dialog)
+    const presetsSidebar = document.querySelector('#presets-dialog .presets-sidebar');
+    presetsSidebar?.addEventListener('click', (e) => {
+        const deleteBtn = e.target.closest('[data-delete-preset]');
+        if (deleteBtn) {
+            const id = deleteBtn.dataset.deletePreset;
+            deletePreset(id);
+        }
+    });
     
     // Theme toggle
     elements.themeToggle?.addEventListener('click', toggleTheme);

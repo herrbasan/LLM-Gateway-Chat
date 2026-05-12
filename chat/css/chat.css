@@ -1413,3 +1413,104 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     to { transform: rotate(360deg); }
 }
 
+/* ============================================
+   System Prompt Presets
+   ============================================ */
+
+.preset-row {
+    display: flex;
+    gap: var(--nui-space-half);
+    align-items: center;
+    margin-bottom: var(--nui-space-half);
+}
+
+.preset-row > nui-select {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Dialog layout: preset list sidebar + editor */
+.presets-dialog-layout {
+    display: flex;
+    gap: var(--nui-space);
+    height: 100%;
+}
+
+.presets-dialog-layout > nui-column-flow,
+.presets-sidebar-col {
+    width: 220px;
+    flex-shrink: 0;
+    border-right: thin solid var(--border-shade1);
+    padding-right: var(--nui-space);
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-space-half);
+}
+
+.presets-sidebar-col > nui-column-flow {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.presets-sidebar-header {
+    display: flex;
+    justify-content: flex-end;
+    padding-bottom: var(--nui-space-half);
+    border-bottom: thin solid var(--border-shade1);
+}
+
+.presets-editor {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-space);
+    min-width: 0;
+}
+
+.presets-editor-top {
+    display: flex;
+    gap: var(--nui-space-half);
+    align-items: center;
+}
+
+.presets-editor-top > nui-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.presets-editor nui-rich-text {
+    flex: 1;
+    min-height: 0;
+}
+
+/* Preset item in sidebar list */
+.preset-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--nui-space-half) var(--nui-space);
+    border-radius: var(--border-radius1);
+    cursor: pointer;
+}
+
+.preset-item:hover {
+    background: var(--color-shade1);
+}
+
+.preset-item.active {
+    background: var(--color-highlight);
+    color: var(--text-color);
+}
+
+.preset-item-name {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.preset-item-actions nui-button {
+    flex-shrink: 0;
+}
+
