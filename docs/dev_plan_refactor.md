@@ -1,8 +1,8 @@
 # Chat Architecture Refactor — Development Plan
 
 > Branch: `refactor/chat-architecture`
-> Status: Phase 4 complete, Phase 5 in progress
-> Last updated: 2026-05-12
+> Status: Complete — all phases shipped
+> Last updated: 2026-05-13
 
 ---
 
@@ -72,11 +72,11 @@ Transform the LLM Gateway Chat from a NeDB-backed single-user app into a multi-u
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
 | Backend | Node.js + native HTTP | Matches gateway stack, no frameworks |
-| Structured DB | nDB (npm module) | Document store for chat metadata |
-| Vector DB | nVDB (npm module) | HNSW search for semantic retrieval |
-| NOT using | nGDB wrapper | Unnecessary proxy layer for single service |
+| Structured DB | nDB (npm module) | JSON Lines document store for chat + session metadata |
+| Vector DB | nVDB (npm module) | Exact search (HNSW index build broken, 3K vectors fine for exact) |
+| Embedding | Gateway `/v1/embeddings` | Qwen3-Embedding-4B via OpenRouter (2560 dims), no model sent in request |
 | Auth | API keys + session cookies | Simple, sufficient for lab use |
-| Embedding | Gateway `/v1/embeddings` | Cloud via OpenRouter (Qwen3-Embedding-4B), Fatten as backup |
+| Frontend | Vanilla JS SPA | Zero build, zero runtime deps, pure static files |
 
 ---
 
@@ -537,16 +537,17 @@ Step 10: Fix issues                → Iterate on any rendering/data problems
 | nDB file not found | Re-run migration, nDB is populated from NeDB source |
 
 ### 5.7 Deliverables
-- [ ] Rewrite `server/migrate.js` — Clean NeDB → nDB migration
-- [ ] Wipe broken nDB data
-- [ ] Run migration — 17 direct chats + 57 arena sessions + file buckets
-- [ ] Run `embed.js` — Populate nVDB for MCP search
-- [ ] Enable backend (`enableBackend: true`)
-- [ ] Verify chat list — 17 direct chats, no arena, no empties
-- [ ] Verify chat rendering — User + assistant messages display correctly
-- [ ] Verify images — File attachments load from disk
-- [ ] Verify search — MCP archive tools return results
-- [ ] Auth UI — Login modal + key management (optional, key can stay hardcoded for single-user)
+- [x] Rewrite `server/migrate.js` — Clean NeDB → nDB migration
+- [x] Wipe broken nDB data
+- [x] Run migration — 17 direct chats + 57 arena sessions + file buckets
+- [x] Run `embed.js` — Populate nVDB for MCP search (3047 messages, 2560 dims)
+- [x] Enable backend (`enableBackend: true`)
+- [x] Verify chat list — 17 direct chats, no arena, no empties
+- [x] Verify chat rendering — User + assistant messages display correctly
+- [x] Verify images — File attachments load from disk
+- [x] Verify search — MCP archive tools return results
+- [x] Auth UI — Login modal + key management (optional, key can stay hardcoded for single-user)
+- [x] Migrate v2 — repack per-message docs into conversation documents (1 doc per session)
 
 ---
 
@@ -718,4 +719,43 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 
 | Gateway embedding endpoint slow/down | Async pipeline with retry queue |
 | Frontend migration breaks existing flows | Keep localStorage fallback, test import |
 | Scope creep | Lock features to this plan. New ideas go to backlog. Phase 1 ships basic CRUD only. |
+
+---
+
+## Post-Completion Notes (2026-05-13)
+
+### Data Model
+
+**Final structure**: One conversation document per session in nDB (`_type: 'conversation'`), with an inline `messages` array indexed by `idx`. Sessions (`_type: 'session'`) hold metadata (title, pinned, mode). Per-message nDB documents eliminated.
+
+**Migration**: Two migrations ran — `migrate.js` (NeDB → nDB, one message doc per turn) then `migrate-v2.js` (per-message → conversation doc, packing 3047 messages into 114 conversation docs).
+
+**Embedding**: nVDB stores vectors keyed by message ID, with payload `{ chatId, msgIdx }` pointing back to the conversation doc. Search resolves vectors via conversation doc lookup. Exact search only — HNSW `rebuildIndex()` is a no-op in the current nVDB build.
+
+### Bug Fixes Applied
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| Chat creation failed (404 on messages) | `_saveActiveId()` called but undefined — `create()` fell through to local ID | Changed to `await _setActiveId()` |
+| Tool names showing as "unknown" | `sendMessage()` stripped `toolName`/`toolArgs`/`toolStatus` | Spread operator passes all fields |
+| Exchange order wrong | `_backendMessagesToExchanges` grouped by turnIndex, but server assigns unique turnIndex per message | Rewrote as sequential walk with chronological interleaving |
+| Pin not persisting | `_saveList()` returned early when backend active | Added `updateSession()` backend call for dirty conversations |
+| Embed endpoint down after 3 failures | `embedAvailable` flag never self-healed | 60s health check resets flag on recovery |
+| Pending embeddings stalled | Maintenance cycle only retried `pending`, not `failed` | 5-min timeout resets `failed` → `pending` for retry |
+| Search 0 results (HNSW) | `approximate: true` returned 0; `rebuildIndex()` doesn't build graph | Switched to exact search |
+| Embedding to wrong endpoint | Config had hardcoded `embedModel: "or-qwen-embed"` | Removed model from config, made optional in request |
+| Reconciliation flodded endpoint | All pending embeds fired at once on startup | Batch of 5 with 2s delay |
+| `/api/server-type` 404 warnings | New server missing old node backend endpoint | Added endpoint returning `{ type: 'node-backend' }` |
+| Role filter missing | MCP tool schema had no `role` param | Added to tool definition + frontend + server filter |
+
+### What's Working
+
+- Chat creation, persistence, and rendering across reloads
+- Realtime embedding (message → vector within 1s)
+- Semantic search (exact, 3047+ vectors, role filtering, text fallback)
+- Migration scripts (`migrate.js`, `migrate-v2.js`, `heal-embed.js`)
+- Startup reconciliation (backfills missing embeddings on restart)
+- Maintenance cycles (5s flush, 60s health check + pending retry, failed retry)
+- Pin persistence across sessions
+- MCP archive tools (search, get_session, list_arena, find_similar, find_references)
 

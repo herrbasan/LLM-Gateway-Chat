@@ -29,7 +29,7 @@ window.CHAT_CONFIG = {
 
     // Chat Backend (port 3500) — archive search, session management
     backendUrl: 'http://localhost:3500',
-    backendApiKey: 'migrated-45bcc7a7-8c39-4be4-91b6-ff130dcb14fe',
+    backendApiKey: 'migrated-94650f5a-360d-43f8-b1b5-9ee5a2db4d5a',
 
     // Enable backend persistence (false = legacy localStorage-only mode)
     enableBackend: true,

@@ -5,23 +5,29 @@ const url = require('url');
 
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
+const nLogger = require('../lib/nlogger-cjs');
 
-const PORT = process.argv[2] || 3500;
-const DATA_DIR = path.join(__dirname, 'data');
-const NDB_PATH = path.join(DATA_DIR, 'chat_app');
-const NVDB_DIR = path.join(DATA_DIR, 'nvdb');
-const FILES_DIR = path.join(DATA_DIR, 'files');
-const EMBEDDING_DIMS = 768;
+// Load config
+let cfg = {};
+try {
+    cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
+} catch { /* use defaults below */ }
 
-// Embedding config (LLM Gateway — OpenRouter cloud)
-const EMBED_URL = 'http://192.168.0.100:3400/v1/embeddings';
+const PORT           = process.env.CHAT_PORT           || cfg.port              || 3500;
+const LOGS_DIR       = process.env.CHAT_LOGS_DIR       || cfg.logsDir           || 'server/logs';
+const LOG_RETENTION  = process.env.CHAT_LOG_RETENTION  || cfg.logRetentionDays  || 1;
+const NDB_PATH       = process.env.CHAT_NDB_PATH       || cfg.ndbPath           || 'server/data/chat_app';
+const NVDB_DIR       = process.env.CHAT_NVDB_DIR       || cfg.nvdbDir           || 'server/data/nvdb';
+const FILES_DIR      = process.env.CHAT_FILES_DIR      || cfg.filesDir          || 'server/data/files';
+const EMBED_URL      = process.env.CHAT_EMBED_URL      || cfg.embedUrl          || 'http://192.168.0.100:3400/v1/embeddings';
+const EMBED_MODEL    = process.env.CHAT_EMBED_MODEL    || cfg.embedModel        || null;
+const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   || 2560;
+const EMBED_MAX_TOKENS = parseInt(process.env.CHAT_EMBED_MAX_TOKENS || cfg.embedMaxTokens) || 30000;
+const EMBED_TOK_RATIO  = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
+
 const EMBED_HEADERS = {
     'Content-Type': 'application/json'
 };
-
-// Fatten wrapper backup (use with --wrapper flag in embed.js)
-// const WRAPPER_URL = 'http://192.168.0.145:4080/embedding';
-// const WRAPPER_HEADERS = { ... };
 
 let embedAvailable = true;
 let embedFailCount = 0;
@@ -32,17 +38,26 @@ let embedFailCount = 0;
 
 const db = nDB.open(NDB_PATH);
 let vdb, embeddingsCol;
+let needsFlush = 0;
+let logger = null;
+
+(async () => {
+logger = await nLogger.init({ logsDir: path.resolve(LOGS_DIR), sessionPrefix: 'chat' });
+logger.info('Chat Backend starting', { port: PORT }, 'Server');
 
 try {
   vdb = new nVDB(NVDB_DIR);
   embeddingsCol = vdb.getCollection('embeddings');
+  logger.info('nVDB embeddings collection ready', { dims: EMBEDDING_DIMS }, 'Server');
 } catch {
-  console.log('nVDB not initialized yet (run embed.js when Gateway is up)');
+  logger.warn('nVDB not initialized (run embed.js when Gateway is up)', {}, 'Server');
 }
 
 // ============================================
 // Auth
 // ============================================
+
+const L = () => logger || { info() {}, warn() {}, error() {}, debug() {} };
 
 function getAuthUser(req) {
   const key = req.headers['x-api-key'];
@@ -96,10 +111,12 @@ function readBody(req) {
 async function embedQuery(text) {
     if (!embedAvailable) throw new Error('Embedding unavailable');
     try {
+        const reqBody = { input: [text], dimensions: EMBEDDING_DIMS };
+        if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
         const res = await fetch(EMBED_URL, {
             method: 'POST',
             headers: EMBED_HEADERS,
-            body: JSON.stringify({ input: [text], dimensions: 2560 })
+            body: JSON.stringify(reqBody)
         });
         if (!res.ok) {
             embedFailCount++;
@@ -131,19 +148,83 @@ function buildEmbedText(msg, session) {
     return parts.join(' ');
 }
 
-async function embedMessageAsync(msg, session) {
-    if (!embeddingsCol || !embedAvailable) return;
-    try {
-        const text = buildEmbedText(msg, session);
-        const vector = await embedQuery(text);
+function middleTruncateEmbedText(text) {
+    const estTok = Math.ceil(text.length / EMBED_TOK_RATIO);
+    if (estTok <= EMBED_MAX_TOKENS) return { text, truncated: false };
+    const maxChars = Math.floor(EMBED_MAX_TOKENS * EMBED_TOK_RATIO);
+    const headLen = Math.floor(maxChars * 0.4);
+    const tailLen = maxChars - headLen;
+    return {
+        text: text.slice(0, headLen) + '\n\n[... truncated middle ...]\n\n' + text.slice(-tailLen),
+        truncated: true
+    };
+}
 
-        embeddingsCol.insert(msg.id, vector, JSON.stringify({
-            messageId: msg.id, sessionId: msg.sessionId,
-            role: msg.role, model: msg.model, turnIndex: msg.turnIndex
-        }));
-    } catch (err) {
-        console.error('Async embed failed:', msg.id.slice(0, 16), err.message);
-        // Non-blocking — message is already saved
+async function embedMessageAsync(msg, session, convNdbId, msgIdx) {
+    if (!embeddingsCol || !embedAvailable) {
+        if (msg.embedStatus === 'pending') {
+            L().info('Embed skipped (nVDB unavailable)', { msgId: msg.id, role: msg.role }, 'Embed');
+        }
+        return;
+    }
+
+    const rawText = buildEmbedText(msg, session);
+    const { text, truncated } = middleTruncateEmbedText(rawText);
+
+    if (truncated) {
+        L().warn('Message truncated for embedding', { msgId: msg.id, charLen: rawText.length, truncLen: text.length }, 'Embed');
+    }
+
+    let lastError = null;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const vector = await embedQuery(text);
+
+            if (!Array.isArray(vector) || vector.length === 0 || vector.length !== EMBEDDING_DIMS) {
+                throw new Error('invalid_vector_shape');
+            }
+
+            // Store reference to conversation doc — coordinates, not data
+            embeddingsCol.insert(msg.id, vector, JSON.stringify({
+                chatId: session.id, msgIdx
+            }));
+            needsFlush++;
+
+            // Update embed status on the message within the conversation doc
+            const conv = db.get(convNdbId);
+            if (conv && conv.messages && conv.messages[msgIdx]) {
+                conv.messages[msgIdx].embedStatus = 'embedded';
+                conv.messages[msgIdx].embedAttempts = attempt + 1;
+                conv.messages[msgIdx].embedError = null;
+                db.update(convNdbId, conv);
+            }
+
+            L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: text.length, attempt: attempt + 1 }, 'Embed');
+            return;
+
+        } catch (err) {
+            lastError = err;
+
+            if (err.message?.includes('too many') && err.message?.includes('token')) {
+                L().error('Embed too many tokens', err, { msgId: msg.id, charLen: text.length }, 'Embed');
+                break;
+            }
+
+            if (attempt < 2) {
+                const delay = Math.pow(4, attempt) * 1000;
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+    }
+
+    L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3 }, 'Embed');
+    const conv = db.get(convNdbId);
+    if (conv && conv.messages && conv.messages[msgIdx]) {
+        conv.messages[msgIdx].embedStatus = 'failed';
+        conv.messages[msgIdx].embedAttempts = 3;
+        conv.messages[msgIdx].embedError = (lastError?.message || '').slice(0, 200);
+        db.update(convNdbId, conv);
     }
 }
 
@@ -153,13 +234,19 @@ async function embedMessageAsync(msg, session) {
 
 const routes = {
   
-  // Health
+  // Health + server type detection
   'GET /health': async (req, res) => {
+    const embedAvailable = !!embeddingsCol;
     json(res, {
       status: 'ok',
-      ndb: db.len(),
-      nvdb: embeddingsCol?.stats?.documentCount || 0
+      version: '1.0.0',
+      embedAvailable,
+      nvdb: embeddingsCol?.stats?.totalSegmentDocs || 0
     });
+  },
+
+  'GET /api/server-type': async (req, res) => {
+    json(res, { type: 'node-backend' });
   },
   
   // Auth
@@ -185,7 +272,7 @@ const routes = {
     json(res, { data: sessions });
   },
   
-  // Get session with messages
+  // Get session with messages (from conversation doc)
   'GET /api/chats/:id': async (req, res, params) => {
     const user = requireAuth(req, res);
     if (!user) return;
@@ -198,6 +285,15 @@ const routes = {
       return;
     }
     
+    // Try conversation doc first (post-migration)
+    const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
+    if (convs.length > 0) {
+      const conv = convs[0];
+      json(res, { session, messages: conv.messages || [] });
+      return;
+    }
+    
+    // Fallback: legacy per-message docs
     const messages = db.find('sessionId', params.id)
       .filter(m => m._type === 'message')
       .sort((a, b) => a.turnIndex - b.turnIndex);
@@ -227,10 +323,42 @@ const routes = {
     };
     
     db.insert(session);
+    L().info('Session created', { id, title: body.title || 'New Chat', mode: body.mode || 'direct' }, 'Session');
+    
+    // Also create empty conversation document
+    const conv = {
+      _type: 'conversation',
+      id,
+      userId: user.id,
+      title: body.title || 'New Chat',
+      mode: body.mode || 'direct',
+      model: body.model || null,
+      isPublic: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messageCount: 0,
+      messages: []
+    };
+    db.insert(conv);
+    
     json(res, session, 201);
   },
   
-  // Add message
+  // Update session metadata (pinned, title, etc.)
+  'PATCH /api/chats/:id': async (req, res, params) => {
+    const user = requireAuth(req, res);
+    if (!user) return;
+    const body = await readBody(req);
+    const sessions = db.find('id', params.id);
+    const session = sessions.find(s => s._type === 'session' && s.userId === user.id);
+    if (!session) { json(res, { error: 'Not found' }, 404); return; }
+    if (body.pinned !== undefined) session.pinned = !!body.pinned;
+    session.updatedAt = new Date().toISOString();
+    db.update(session._id, session);
+    json(res, session);
+  },
+  
+  // Add message (appends to conversation doc)
   'POST /api/chats/:id/messages': async (req, res, params) => {
     const user = requireAuth(req, res);
     if (!user) return;
@@ -244,31 +372,62 @@ const routes = {
       return;
     }
     
+    // Find or create conversation document
+    let convs = db.find('id', params.id).filter(d => d._type === 'conversation');
+    let conv;
+    if (convs.length > 0) {
+      conv = convs[0];
+    } else {
+      conv = {
+        _type: 'conversation',
+        id: params.id,
+        userId: user.id,
+        title: session.title || 'New Chat',
+        mode: session.mode || 'direct',
+        model: session.model || null,
+        isPublic: false,
+        createdAt: session.createdAt,
+        updatedAt: new Date().toISOString(),
+        messageCount: 0,
+        messages: []
+      };
+      db.insert(conv);
+    }
+    
+    const idx = conv.messages.length;
     const msgId = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
-    const turnIndex = session.messageCount || 0;
     
     const message = {
-      _type: 'message',
+      idx,
       id: msgId,
-      sessionId: params.id,
-      userId: user.id,
       role: body.role || 'user',
       model: body.model || null,
       content: body.content || '',
       rawContent: body.content || '',
       attachments: body.attachments || [],
-      turnIndex,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      embedStatus: 'pending',
+      embedAttempts: 0,
+      embedError: null
     };
     
-    db.insert(message);
+    if (body.toolName) message.toolName = body.toolName;
+    if (body.toolArgs) message.toolArgs = body.toolArgs;
+    if (body.toolStatus) message.toolStatus = body.toolStatus;
     
-    session.messageCount = (session.messageCount || 0) + 1;
-    session.updatedAt = new Date().toISOString();
+    conv.messages.push(message);
+    conv.messageCount = conv.messages.length;
+    conv.updatedAt = new Date().toISOString();
+    db.update(conv._id, conv);
+    
+    session.messageCount = conv.messageCount;
+    session.updatedAt = conv.updatedAt;
     db.update(session._id, session);
     
-    // Async embed (fire-and-forget, non-blocking)
-    embedMessageAsync(message, session);
+    L().info('Message added', { sessionId: params.id, role: body.role, idx, contentLen: (body.content || '').length }, 'Message');
+    
+    // Async embed (fire-and-forget) — store chatId + idx reference
+    embedMessageAsync(message, session, conv._id, idx);
     
     json(res, message, 201);
   },
@@ -286,8 +445,10 @@ const routes = {
       return;
     }
     
-    // Soft delete session and messages
+    // Soft delete session, conversation doc, and legacy messages
     db.delete(session._id);
+    const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
+    for (const c of convs) db.delete(c._id);
     const messages = db.find('sessionId', params.id);
     for (const m of messages) {
       if (m._type === 'message') db.delete(m._id);
@@ -305,32 +466,44 @@ const routes = {
     const query = (body.query || '').trim();
     const limit = body.limit || 10;
     const filterMode = body.mode || body.filter?.mode;
+    const filterRole = body.role || body.filter?.role;
     const searchType = body.search_type || 'semantic';
     const dateFrom = body.date_from || null;
     const dateTo = body.date_to || null;
+
+    L().info('Search request', { query: query.slice(0, 50), role: filterRole, type: searchType, mode: filterMode }, 'Search');
 
     if (!query) {
       json(res, { results: [] });
       return;
     }
 
-    // Scope to user's sessions
-    let userSessions = db.find('_type', 'session').filter(s => s.userId === user.id);
-    const userSessionIds = new Set(userSessions.map(s => s.id));
-    let userMessages = db.find('_type', 'message').filter(m => userSessionIds.has(m.sessionId));
+    // Load user's conversation docs + build message index
+    const convs = db.find('_type', 'conversation').filter(c => c.userId === user.id);
+    const userSessions = db.find('_type', 'session').filter(s => s.userId === user.id);
+    const convById = new Map();
+    const msgIndex = []; // flat list of { chatId, idx, msg, session }
 
-    // Date filtering
-    if (dateFrom || dateTo) {
-      userMessages = userMessages.filter(m => {
-        const d = new Date(m.createdAt);
-        if (dateFrom && d < new Date(dateFrom)) return false;
-        if (dateTo && d > new Date(dateTo)) return false;
-        return true;
-      });
+    for (const c of convs) {
+      convById.set(c.id, c);
+      const session = userSessions.find(s => s.id === c.id);
+      if (!c.messages) continue;
+      for (const msg of c.messages) {
+        // Date filtering
+        if (dateFrom || dateTo) {
+          const d = new Date(msg.createdAt);
+          if (dateFrom && d < new Date(dateFrom)) continue;
+          if (dateTo && d > new Date(dateTo)) continue;
+        }
+        // Mode filtering
+        if (filterMode && filterMode !== 'all' && session?.mode && session.mode !== filterMode) continue;
+        if (filterRole && filterRole !== 'all' && msg.role !== filterRole) continue;
+        msgIndex.push({ chatId: c.id, idx: msg.idx, msg, session });
+      }
     }
 
     const results = [];
-    const seenIds = new Set();
+    const seen = new Set();
 
     // Semantic search via nVDB (skip if keyword-only)
     if ((searchType === 'semantic' || searchType === 'hybrid') && embeddingsCol && embedAvailable) {
@@ -339,62 +512,71 @@ const routes = {
 
         const vectorResults = embeddingsCol.search({
           vector: queryVector,
-          top_k: limit * 3,
-          approximate: true,
-          ef: 64
+          top_k: limit * 3
         });
 
         for (const hit of vectorResults) {
           if (results.length >= limit) break;
 
           const payload = hit.payload ? JSON.parse(hit.payload) : null;
+          const chatId = payload?.chatId;
+          const msgIdx = typeof payload?.msgIdx === 'number' ? payload.msgIdx : -1;
           const msgId = payload?.messageId || hit.id;
+          const seenKey = chatId ? `${chatId}#${msgIdx}` : msgId;
 
-          if (seenIds.has(msgId)) continue;
-          seenIds.add(msgId);
+          if (seen.has(seenKey)) continue;
+          seen.add(seenKey);
 
-          const msg = userMessages.find(m => m.id === msgId);
-          if (!msg) continue;
+          // Lookup via chatId+idx (new format) or msgId (legacy)
+          let entry;
+          if (chatId && msgIdx >= 0) {
+            entry = msgIndex.find(e => e.chatId === chatId && e.idx === msgIdx);
+            if (!entry) {
+              // Vector hit but no corresponding message in filtered index
+              continue;
+            }
+          } else {
+            entry = msgIndex.find(e => e.msg.id === msgId);
+            if (!entry) continue;
+          }
 
-          // Apply mode filter
-          const session = userSessions.find(s => s.id === msg.sessionId);
-          if (filterMode && filterMode !== 'all' && session?.mode !== filterMode) continue;
+          logger.info('Search vector hit', { chatId: chatId?.slice(-20), msgIdx, score: hit.score.toFixed(3), role: entry.msg.role }, 'Search');
 
           results.push({
             score: hit.score,
-            message: { id: msg.id, role: msg.role, model: msg.model, content: msg.content.slice(0, 300), turnIndex: msg.turnIndex, createdAt: msg.createdAt },
-            session: session ? { id: session.id, title: session.title, mode: session.mode, createdAt: session.createdAt } : null
+            message: { id: entry.msg.id, idx: entry.idx, role: entry.msg.role, model: entry.msg.model, content: entry.msg.content.slice(0, 300), createdAt: entry.msg.createdAt },
+            session: entry.session ? { id: entry.session.id, title: entry.session.title, mode: entry.session.mode, createdAt: entry.session.createdAt } : null
           });
         }
       } catch (err) {
-        console.error('Semantic search failed, falling back to text:', err.message);
+        L().error('Semantic search failed', err, {}, 'Search');
       }
     }
 
-    // Text search (skip if semantic-only)
-    if ((searchType === 'keyword' || searchType === 'hybrid') && results.length < limit) {
+    // Text search (skip if semantic-only with results already found)
+    const semanticHadResults = results.length > 0;
+    if ((searchType === 'keyword' || searchType === 'hybrid' || (searchType === 'semantic' && !semanticHadResults)) && results.length < limit) {
       const lowerQuery = query.toLowerCase();
-      const textHits = userMessages
-        .filter(m => !seenIds.has(m.id) && m.content?.toLowerCase().includes(lowerQuery))
+      const textHits = msgIndex
+        .filter(e => e.msg.content?.toLowerCase().includes(lowerQuery))
         .slice(0, limit - results.length);
 
-      for (const msg of textHits) {
+      for (const entry of textHits) {
         if (results.length >= limit) break;
-        if (seenIds.has(msg.id)) continue;
-        seenIds.add(msg.id);
-
-        const session = userSessions.find(s => s.id === msg.sessionId);
-        if (filterMode && filterMode !== 'all' && session?.mode !== filterMode) continue;
+        const seenKey = `${entry.chatId}#${entry.idx}`;
+        if (seen.has(seenKey)) continue;
+        seen.add(seenKey);
 
         results.push({
           score: 0,
-          message: { id: msg.id, role: msg.role, model: msg.model, content: msg.content.slice(0, 300), turnIndex: msg.turnIndex, createdAt: msg.createdAt },
-          session: session ? { id: session.id, title: session.title, mode: session.mode, createdAt: session.createdAt } : null,
+          message: { id: entry.msg.id, idx: entry.idx, role: entry.msg.role, model: entry.msg.model, content: entry.msg.content.slice(0, 300), createdAt: entry.msg.createdAt },
+          session: entry.session ? { id: entry.session.id, title: entry.session.title, mode: entry.session.mode, createdAt: entry.session.createdAt } : null,
           source: 'text-fallback'
         });
       }
     }
 
+    L().info('Search', { query: query.slice(0, 80), results: results.length, type: searchType }, 'Search');
     json(res, {
       results,
       query,
@@ -515,8 +697,36 @@ function serveFile(req, res, filepath) {
 // ============================================
 
 const server = http.createServer(async (req, res) => {
+  const startTime = Date.now();
   const parsed = url.parse(req.url, true);
   let pathname = parsed.pathname;
+
+  const logRequest = (status) => {
+    if (!pathname.startsWith('/api/') && pathname !== '/health') return; // only log API
+    const ms = Date.now() - startTime;
+    const method = req.method;
+    const fullPath = pathname + (parsed.search || '');
+    if (status < 400) {
+      L().info(`${method} ${fullPath}`, { status, ms }, 'HTTP');
+    } else if (status < 500) {
+      L().warn(`${method} ${fullPath}`, { status, ms }, 'HTTP');
+    } else {
+      L().error(`${method} ${fullPath}`, null, { status, ms }, 'HTTP');
+    }
+  };
+
+  // Wrap res.end to capture status
+  const origEnd = res.end.bind(res);
+  let _status = 200;
+  res.end = function(...args) {
+    logRequest(_status);
+    return origEnd(...args);
+  };
+  const origWriteHead = res.writeHead.bind(res);
+  res.writeHead = function(status, ...args) {
+    if (typeof status === 'number') _status = status;
+    return origWriteHead(status, ...args);
+  };
   
   // CORS preflight
   if (req.method === 'OPTIONS') {
@@ -631,8 +841,120 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Chat Backend running at http://localhost:${PORT}`);
-  console.log(`Health:  http://localhost:${PORT}/health`);
-  console.log(`API Key: ${db.find('_type', 'user')[0]?.apiKey || 'none'}`);
-  console.log('Press Ctrl+C to stop');
+  logger.info('Chat Backend running', { port: PORT }, 'Server');
+  logger.info('Health endpoint', { url: `http://localhost:${PORT}/health` }, 'Server');
+  const apiKey = db.find('_type', 'user')[0]?.apiKey || 'none';
+  logger.info('API key', { key: apiKey.slice(0, 20) + '...' }, 'Server');
+
+  // Retry stale pending embeds from previous crash/restart
+  const STALE_THRESHOLD = 5 * 60 * 1000;
+  const now = Date.now();
+  const convs = db.find('_type', 'conversation');
+  const sessions = {};
+  for (const s of db.find('_type', 'session')) sessions[s.id] = s;
+
+  // Startup reconciliation: embed any messages without vectors
+  const staleMessages = [];
+  for (const c of convs) {
+    if (!c.messages) continue;
+    for (let idx = 0; idx < c.messages.length; idx++) {
+      const m = c.messages[idx];
+      const needsEmbed = m.embedStatus !== 'embedded' && m.embedStatus !== 'ready';
+      const isStale = (now - new Date(m.createdAt).getTime()) > STALE_THRESHOLD;
+      if (needsEmbed || isStale) {
+        staleMessages.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+      }
+    }
+  }
+  if (staleMessages.length > 0) {
+    logger.info('Startup reconciliation', { count: staleMessages.length }, 'Server');
+    (async () => {
+      // Rate-limit: embed in batches of 5 with 2s delay between batches
+      const BATCH_SIZE = 5;
+      const BATCH_DELAY = 2000;
+      for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
+        const batch = staleMessages.slice(i, i + BATCH_SIZE);
+        for (const { msg, session, convNdbId, idx } of batch) {
+          embedMessageAsync(msg, session, convNdbId, idx);
+        }
+        if (i + BATCH_SIZE < staleMessages.length) {
+          await new Promise(r => setTimeout(r, BATCH_DELAY));
+        }
+      }
+    })();
+  }
+
+  // One-time flush + compact after startup
+  setTimeout(() => {
+    if (!embeddingsCol) return;
+    try {
+      embeddingsCol.flush();
+      logger.info('nVDB flushed after startup', { docs: embeddingsCol.stats?.totalSegmentDocs }, 'Index');
+    } catch (err) {
+      logger.error('nVDB flush failed', err, {}, 'Index');
+    }
+  }, 10000);
+
+  // Maintenance: periodic embed health check + pending retry
+  setInterval(async () => {
+    if (!embedAvailable) {
+      try {
+        const testText = 'health check';
+        const reqBody = { input: [testText], dimensions: EMBEDDING_DIMS };
+        if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
+        const res = await fetch(EMBED_URL, {
+          method: 'POST', headers: EMBED_HEADERS,
+          body: JSON.stringify(reqBody)
+        });
+        if (res.ok) {
+          embedAvailable = true;
+          embedFailCount = 0;
+          logger.info('Embed endpoint recovered', {}, 'Embed');
+        }
+      } catch {}
+    }
+
+    if (embedAvailable && embeddingsCol) {
+      const convs = db.find('_type', 'conversation');
+      const sessions = {};
+      for (const s of db.find('_type', 'session')) sessions[s.id] = s;
+      const pending = [];
+      const now = Date.now();
+      for (const c of convs) {
+        if (!c.messages) continue;
+        for (let idx = 0; idx < c.messages.length; idx++) {
+          const m = c.messages[idx];
+          if (m.embedStatus === 'pending') {
+            pending.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+          } else if (m.embedStatus === 'failed' && (now - new Date(m.createdAt).getTime()) > 5 * 60 * 1000) {
+            // Retry failed messages after 5 minutes (rate-limit recovery)
+            m.embedStatus = 'pending';
+            m.embedAttempts = 0;
+            db.update(c._id, c);
+            pending.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+          }
+        }
+      }
+      if (pending.length > 0) {
+        logger.info('Retrying pending embeddings', { count: pending.length }, 'Embed');
+        for (const { msg, session, convNdbId, idx } of pending) {
+          embedMessageAsync(msg, session, convNdbId, idx);
+        }
+      }
+
+      // Flush nVDB memtable → segments so exact search sees new vectors
+      if (needsFlush > 0 && embeddingsCol) {
+        try {
+          const t0 = Date.now();
+          embeddingsCol.flush();
+          logger.info('nVDB flushed', { docs: needsFlush, ms: Date.now() - t0 }, 'Embed');
+          needsFlush = 0;
+        } catch (err) {
+          logger.error('nVDB flush failed', err, {}, 'Embed');
+        }
+      }
+    }
+  }, 5000);
 });
+
+})();

@@ -14,16 +14,22 @@ const fs = require('fs');
 const path = require('path');
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
+const nLogger = require('../lib/nlogger-cjs');
 
 // ============================================
-// Config
+// Config — loaded from server/config.json with env overrides
 // ============================================
+
+let cfg = {};
+try {
+    cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
+} catch { /* use defaults */ }
 
 const WRAPPER_BASE = 'http://192.168.0.145:4080';
-const GATEWAY_URL = 'http://192.168.0.100:3400/v1/embeddings';
-const GATEWAY_MODEL = 'or-qwen-embed';
+const GATEWAY_URL = process.env.CHAT_EMBED_URL || cfg.embedUrl || 'http://192.168.0.100:3400/v1/embeddings';
+const GATEWAY_MODEL = process.env.CHAT_EMBED_MODEL || cfg.embedModel || null;
+const LOGS_DIR = process.env.CHAT_LOGS_DIR || cfg.logsDir || 'server/logs';
 
-// Direct OpenRouter (while Gateway dimension forwarding is broken)
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/embeddings';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 
@@ -37,13 +43,13 @@ const MODEL_HEADERS = {
     'X-Model-BatchSize': '32000'
 };
 
-const DATA_DIR = path.join(__dirname, 'data');
-const NDB_PATH = path.join(DATA_DIR, 'chat_app');
-const NVDB_DIR = path.join(DATA_DIR, 'nvdb');
-const PROGRESS_FILE = path.join(DATA_DIR, 'embed-progress.json');
-const EMBEDDING_DIMS = 2560;
-const BATCH_TOKEN_LIMIT = 5500;
-const MAX_SINGLE_TEXT_TOKENS = 5000;
+const NDB_PATH = process.env.CHAT_NDB_PATH || cfg.ndbPath || 'server/data/chat_app';
+const NVDB_DIR = process.env.CHAT_NVDB_DIR || cfg.nvdbDir || 'server/data/nvdb';
+const PROGRESS_FILE = path.join(path.dirname(NDB_PATH), 'embed-progress.json');
+const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims) || 2560;
+const BATCH_TOKEN_LIMIT = parseInt(process.env.CHAT_EMBED_BATCH_TOKENS || cfg.embedBatchTokenLimit) || 29000;
+const MAX_SINGLE_TEXT_TOKENS = parseInt(process.env.CHAT_EMBED_MAX_TOKENS || cfg.embedMaxTokens) || 30000;
+const TOK_CHARS_RATIO = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
 
 // ============================================
 // CLI
@@ -57,6 +63,8 @@ function parseArgs() {
         openrouter: false,
         batchSize: 100,
         resume: false,
+        retruncate: false,
+        retryFailed: false,
         dryRun: false,
         retries: 3
     };
@@ -66,6 +74,8 @@ function parseArgs() {
         else if (arg === '--wrapper') opts.wrapper = true;
         else if (arg === '--openrouter') opts.openrouter = true;
         else if (arg === '--resume') opts.resume = true;
+        else if (arg === '--retruncate') opts.retruncate = true;
+        else if (arg === '--retry-failed') opts.retryFailed = true;
         else if (arg === '--dry-run') opts.dryRun = true;
         else if (arg.startsWith('--batch-size=')) opts.batchSize = parseInt(arg.split('=')[1], 10);
     }
@@ -78,6 +88,16 @@ function parseArgs() {
 // ============================================
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function middleTruncate(text, maxTok) {
+    const maxChars = Math.floor(maxTok * TOK_CHARS_RATIO);
+    if (text.length <= maxChars) return text;
+    const headLen = Math.floor(maxChars * 0.4);
+    const tailLen = maxChars - headLen;
+    const head = text.slice(0, headLen);
+    const tail = text.slice(-tailLen);
+    return head + '\n\n[... truncated middle ...]\n\n' + tail;
+}
 
 function loadProgress() {
     try {
@@ -92,11 +112,11 @@ function saveProgress(data) {
 
 function buildText(msg, session) {
     const parts = [];
-    if (session.mode === 'arena') {
+    if (session?.mode === 'arena') {
         parts.push(`[Arena: ${(session.title || '').slice(0, 60)}]`);
         if (msg.speaker) parts.push(`[${msg.speaker}]`);
     } else {
-        parts.push(`[Chat: ${(session.title || '').slice(0, 60)}]`);
+        parts.push(`[Chat: ${(session?.title || '').slice(0, 60)}]`);
         parts.push(`[${msg.role}]`);
     }
     if (msg.model) parts.push(`[${msg.model}]`);
@@ -150,10 +170,12 @@ async function embedViaWrapper(texts, retries) {
 }
 
 async function embedViaGateway(texts, retries) {
+    const body = { input: texts, dimensions: EMBEDDING_DIMS };
+    if (GATEWAY_MODEL) body.model = GATEWAY_MODEL;
     const result = await fetchRetry(GATEWAY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: { model: GATEWAY_MODEL, input: texts }
+        body
     }, retries);
 
     const data = result.data || result;
@@ -168,7 +190,7 @@ async function embedViaOpenRouter(texts, retries) {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${OPENROUTER_KEY}`
         },
-        body: { model: 'qwen/qwen3-embedding-4b', input: texts, dimensions: 2560 }
+        body: { model: 'qwen/qwen3-embedding-4b', input: texts, dimensions: EMBEDDING_DIMS }
     }, retries);
 
     if (result.error) {
@@ -189,11 +211,8 @@ async function run() {
     const embedFn = opts.openrouter ? embedViaOpenRouter : opts.wrapper ? embedViaWrapper : embedViaGateway;
     const route = opts.openrouter ? 'OpenRouter' : opts.wrapper ? 'Wrapper' : 'Gateway';
 
-    console.log('=== Embedding Pipeline ===');
-    console.log('Route:', route);
-    console.log('Batch size:', opts.batchSize);
-    console.log('Dry run:', opts.dryRun);
-    console.log('');
+    const logger = await nLogger.init({ logsDir: path.resolve(LOGS_DIR), sessionPrefix: 'embed' });
+    logger.info('Embedding pipeline started', { route, mode: opts.retryFailed ? 'retry-failed' : opts.retruncate ? 'retruncate' : opts.resume ? 'resume' : 'full', batchSize: opts.batchSize, dryRun: opts.dryRun }, 'Embed');
 
     const startTime = Date.now();
 
@@ -208,36 +227,72 @@ async function run() {
     }
 
     const docs = db.iter();
-    const messages = docs.filter(d => d._type === 'message');
+    // Gather all messages from conversation documents
+    const messages = [];
+    for (const c of docs.filter(d => d._type === 'conversation')) {
+        if (!c.messages) continue;
+        for (const m of c.messages) {
+            m._sessionId = c.id; // attach sessionId for buildText
+            messages.push(m);
+        }
+    }
     const sessions = {};
     for (const s of docs.filter(d => d._type === 'session')) sessions[s.id] = s;
 
-    const progress = opts.resume ? loadProgress() : {};
+    const progress = (opts.resume && !opts.retruncate) ? loadProgress() : {};
 
     let already = 0;
     const todo = [];
 
     for (const m of messages) {
-        if (col.get(m.id) || progress[m.id]) {
+        if (!opts.retruncate && (col.get(m.id) || progress[m.id])) {
             already++;
         } else {
             todo.push(m);
         }
     }
 
-    console.log('Total:', messages.length, '| Done:', already, '| Todo:', todo.length);
-    console.log('');
+    // --retruncate: only re-embed messages that were previously truncated
+    if (opts.retruncate) {
+        const withEst = todo.map(m => {
+            const text = buildText(m, sessions[m._sessionId]);
+            return { msg: m, text, tokEst: Math.ceil(text.length / TOK_CHARS_RATIO) };
+        });
+        const oldLimit = 5000;  // previous MAX_SINGLE_TEXT_TOKENS
+        const affected = withEst.filter(w => w.tokEst > oldLimit);
+        todo.length = 0;
+        for (const w of affected) todo.push(w.msg);
+        const skipped = withEst.length - todo.length;
+        logger.info('Retruncate mode', { inNVDB: withEst.length, previouslyTruncated: todo.length, unchanged: skipped }, 'Embed');
+    }
+
+    // --retry-failed: scan nDB for failed + stale pending messages (ignore nVDB)
+    if (opts.retryFailed) {
+        const STALE_MS = 5 * 60 * 1000;
+        const now = Date.now();
+        const failed = messages.filter(m => {
+            if (m.embedStatus === 'failed') return true;
+            if (m.embedStatus === 'pending' && (now - new Date(m.createdAt).getTime()) > STALE_MS) return true;
+            return false;
+        });
+        already = messages.length - failed.length;
+        todo.length = 0;
+        for (const m of failed) todo.push(m);
+        logger.info('Retry-failed mode', { total: messages.length, failedStale: todo.length, ok: already }, 'Embed');
+    }
+
+    logger.info('Embedding stats', { total: messages.length, done: already, todo: todo.length }, 'Embed');
 
     if (todo.length === 0) {
-        console.log('All done!');
+        logger.info('Nothing to embed — all messages already embedded', {}, 'Embed');
         cleanup();
         return;
     }
 
     // Pre-build texts and estimate tokens
     const withText = todo.map(m => {
-        const text = buildText(m, sessions[m.sessionId]);
-        return { msg: m, text, tokEst: Math.ceil(text.length / 4) };
+        const text = buildText(m, sessions[m._sessionId]);
+        return { msg: m, text, tokEst: Math.ceil(text.length / TOK_CHARS_RATIO) };
     });
 
     // Dynamic batch sizing: stay under BATCH_TOKEN_LIMIT
@@ -246,8 +301,9 @@ async function run() {
 
     for (const item of withText) {
         if (item.tokEst > MAX_SINGLE_TEXT_TOKENS) {
-            item.text = item.text.slice(0, MAX_SINGLE_TEXT_TOKENS * 4);
-            item.tokEst = MAX_SINGLE_TEXT_TOKENS;
+            item.text = middleTruncate(item.text, MAX_SINGLE_TEXT_TOKENS);
+            item.tokEst = Math.ceil(item.text.length / TOK_CHARS_RATIO);
+            logger.info('Truncated (middle-extract)', { msgId: item.msg.id.slice(-20), role: item.msg.toolName || item.msg.role, chars: item.text.length, estTok: item.tokEst }, 'Embed');
         }
 
         if (currentBatch.length > 0 && currentTokens + item.tokEst > BATCH_TOKEN_LIMIT) {
@@ -262,7 +318,7 @@ async function run() {
     if (currentBatch.length > 0) batches.push(currentBatch);
 
     const totalTokEst = withText.reduce((s, t) => s + t.tokEst, 0);
-    console.log('Batches:', batches.length, `(~${(totalTokEst / 1000).toFixed(0)}k tokens total, ${BATCH_TOKEN_LIMIT} limit/batch)\n`);
+    logger.info('Batches', { count: batches.length, totalTokEst: (totalTokEst / 1000).toFixed(0) + 'k', limit: BATCH_TOKEN_LIMIT }, 'Embed');
 
     let embedded = 0;
     let failed = 0;
@@ -306,9 +362,19 @@ async function run() {
                 for (let j = 0; j < batch.length; j++) {
                     const m = batch[j].msg;
                     col.insert(m.id, embeddings[j], JSON.stringify({
-                        messageId: m.id, sessionId: m.sessionId,
-                        role: m.role, model: m.model, turnIndex: m.turnIndex
+                        chatId: m._sessionId, msgIdx: m.idx
                     }));
+                }
+                // Update embedStatus in conversation docs
+                const touchedConvs = new Set();
+                for (const b of batch) {
+                    touchedConvs.add(b.msg._sessionId);
+                    b.msg.embedStatus = 'embedded';
+                    b.msg.embedAttempts = 1;
+                }
+                for (const chatId of touchedConvs) {
+                    const conv = db.find('id', chatId).find(d => d._type === 'conversation');
+                    if (conv) db.update(conv._id, conv);
                 }
             }
 
@@ -318,7 +384,7 @@ async function run() {
             col.flush();
         } catch (err) {
             failed += batch.length;
-            console.log(`\nBatch ${i + 1} FAILED: ${err.message.slice(0, 120)}`);
+            logger.error(`Batch ${i + 1} failed`, err, { batchTokens, count: batch.length }, 'Embed');
         }
 
         const batchMs = Date.now() - batchStart;
@@ -340,27 +406,25 @@ async function run() {
     const elapsed = (Date.now() - startTime) / 1000;
     const avgBatchMs = batchTimes.reduce((a, b) => a + b, 0) / batchTimes.length;
 
-    console.log('\n\n=== Summary ===');
-    console.log('Route:', route);
-    console.log('Embedded:', embedded);
-    console.log('Failed:', failed);
-    console.log('Time:', elapsed.toFixed(1), 's');
-    console.log('Speed:', (embedded / elapsed).toFixed(1), 'msg/sec');
-    console.log('Avg batch:', (avgBatchMs / 1000).toFixed(1), 's');
-    console.log('Batches:', batchTimes.length, '| Failed batches:', failed ? Math.round(failed / (embedded ? embedded / batchTimes.length : 1)) : 0);
+    logger.info('Embedding pipeline complete', {
+        route,
+        embedded,
+        failed,
+        time: elapsed.toFixed(1),
+        speed: (embedded / elapsed).toFixed(1),
+        avgBatch: (avgBatchMs / 1000).toFixed(1),
+        batches: batchTimes.length
+    }, 'Embed');
 
-    if (batchTimes.length > 1) {
-        const sorted = [...batchTimes].sort((a, b) => a - b);
-        const p50 = sorted[Math.floor(sorted.length * 0.5)];
-        const p95 = sorted[Math.floor(sorted.length * 0.95)];
-        console.log('Batch P50:', (p50 / 1000).toFixed(1), 's  P95:', (p95 / 1000).toFixed(1), 's');
+    if (failed > 0) {
+        logger.warn('Some embeddings failed — run again with --retry-failed', { failed }, 'Embed');
     }
 
     if (!opts.dryRun) {
         col.flush();
-        console.log('nVDB docs:', col.stats?.memtableDocs || col.stats?.documentCount || '?');
     }
 
+    logger.close();
     cleanup();
 }
 

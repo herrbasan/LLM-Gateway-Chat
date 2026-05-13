@@ -36,6 +36,7 @@ const ARCHIVE_TOOLS = [
                 properties: {
                     query: { type: 'string', description: 'The search query' },
                     mode: { type: 'string', enum: ['direct', 'arena', 'all'], description: 'Filter by session type (default: all)' },
+                    role: { type: 'string', enum: ['user', 'assistant', 'tool', 'all'], description: 'Filter by message role (default: all). Use "user" to exclude tool output noise.' },
                     search_type: { type: 'string', enum: ['semantic', 'keyword', 'hybrid'], description: 'Search method (default: semantic)' },
                     limit: { type: 'number', description: 'Max results (default 10)' },
                     date_from: { type: 'string', description: 'ISO date — messages after this date' },
@@ -118,10 +119,12 @@ async function executeLocalTool(toolName, args) {
 
     switch (toolName) {
         case 'chat_archive_search': {
+            console.log('[Archive Search] Args:', JSON.stringify(args));
             const res = await fetch(`${BACKEND_URL}/api/search`, {
                 method: 'POST', headers,
                 body: JSON.stringify({
                     query: args.query, mode: args.mode || 'all',
+                    role: args.role || 'all',
                     limit: args.limit || 10,
                     search_type: args.search_type || 'semantic',
                     date_from: args.date_from || null,
@@ -638,11 +641,14 @@ async function init() {
     
     // Get or create active conversation
     let activeId = await chatHistory.getActiveId();
+    console.log('[Chat Init] getActiveId() returned:', activeId, '| has in list:', activeId ? chatHistory.has(activeId) : 'N/A');
     if (!activeId || !chatHistory.has(activeId)) {
-        activeId = chatHistory.create();
+        activeId = await chatHistory.create();
+        console.log('[Chat Init] Created new chat with ID:', activeId);
     }
 
     currentChatId = activeId;
+    console.log('[Chat Init] Setting up conversation with ID:', currentChatId);
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     await conversation.load();
 
@@ -2648,6 +2654,11 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             exchange.tool.images = resultImages;
         }
         toolConversation.save(); // persist
+        toolConversation._syncMessage('tool', resultText, null, exchange.id, {
+            toolName: exchange.tool.name,
+            toolArgs: exchange.tool.args,
+            toolStatus: 'success'
+        });
 
         toolEl.querySelector('.tool-status').setAttribute('variant', 'success');
           toolEl.querySelector('.tool-status').innerHTML = 'Success';
@@ -2689,6 +2700,11 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         exchange.tool.status = 'error';
         exchange.tool.content = err.message || String(err);
         toolConversation.save();
+        toolConversation._syncMessage('tool', exchange.tool.content, null, exchange.id, {
+            toolName: exchange.tool.name,
+            toolArgs: exchange.tool.args,
+            toolStatus: 'error'
+        });
 
         toolEl.querySelector('.tool-status').setAttribute('variant', 'danger');
           toolEl.querySelector('.tool-status').innerHTML = 'Failed';
@@ -3280,11 +3296,11 @@ function commitEdit(exchangeId, role, newContent) {
 // History Management
 // ============================================
 
-function startNewChat() {
+async function startNewChat() {
     // Note: we do NOT abort background streams when starting a new chat.
     // Each chat's stream continues in its hidden container.
 
-    const newChatId = chatHistory.create();
+    const newChatId = await chatHistory.create();
     currentChatId = newChatId;
 
     // Cache the new conversation
@@ -3421,7 +3437,7 @@ async function deleteChat(chatId, e) {
         if (allChats.length > 0) {
             await switchChat(allChats[0].id);
         } else {
-            startNewChat();
+            await startNewChat();
         }
     }
 }
@@ -3576,7 +3592,7 @@ async function handleChatImport(e) {
         }
 
         // Create new chat via chatHistory
-        const newChatId = chatHistory.create();
+        const newChatId = await chatHistory.create();
         const title = importData.chatInfo?.title || 'Imported Chat';
 
         // Update metadata
@@ -4374,6 +4390,7 @@ function setupDialogEventListeners() {
         const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
         if (chatMeta) {
             chatMeta.pinned = e.target.checked;
+            chatMeta._dirty = true;
             chatHistory._saveList();
             renderHistoryList();
         }

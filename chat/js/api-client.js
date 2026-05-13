@@ -147,17 +147,21 @@ export class BackendClient {
         return this._request('DELETE', `/api/chats/${encodeURIComponent(id)}`);
     }
 
+    async updateSession(id, fields) {
+        return this._request('PATCH', `/api/chats/${encodeURIComponent(id)}`, fields);
+    }
+
     // ============================================
     // Messages
     // ============================================
 
     async sendMessage(sessionId, msg) {
-        return this._request('POST', `/api/chats/${encodeURIComponent(sessionId)}/messages`, {
-            role: msg.role || 'user',
-            content: msg.content || '',
-            model: msg.model || null,
-            attachments: msg.attachments || []
-        });
+        const body = { ...msg };
+        if (!body.role) body.role = 'user';
+        if (!body.content) body.content = '';
+        body.model = body.model || null;
+        body.attachments = body.attachments || [];
+        return this._request('POST', `/api/chats/${encodeURIComponent(sessionId)}/messages`, body);
     }
 
     // ============================================

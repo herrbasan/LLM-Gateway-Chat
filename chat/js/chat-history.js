@@ -36,13 +36,18 @@ export class ChatHistory {
     }
 
     async _saveList() {
-        if (USE_BACKEND && backendClient.apiKey) {
-            return;
-        }
         try {
             await storage.saveHistory(this.conversations);
         } catch (error) {
             console.error('[ChatHistory] Failed to save list:', error);
+        }
+        if (USE_BACKEND && backendClient.apiKey) {
+            for (const conv of this.conversations) {
+                if (conv._dirty) {
+                    backendClient.updateSession(conv.sessionId || conv.id, { pinned: !!conv.pinned }).catch(() => {});
+                    conv._dirty = false;
+                }
+            }
         }
     }
 
@@ -66,7 +71,7 @@ export class ChatHistory {
     // Conversation CRUD
     // ============================================
 
-    create() {
+    async create() {
         const id = 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
         const conversation = {
@@ -83,16 +88,21 @@ export class ChatHistory {
         this._setActiveId(id);
 
         if (USE_BACKEND && backendClient.apiKey) {
-            backendClient.createSession({ title: 'New Chat' })
-                .then(serverSession => {
-                    conversation.id = serverSession.id;
-                    conversation.sessionId = serverSession.id;
-                    conversation.createdAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.createdAt).getTime());
-                    conversation.updatedAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.updatedAt).getTime());
-                })
-                .catch(err => {
-                    console.warn('[ChatHistory] Backend create failed:', err.message);
-                });
+            try {
+                const serverSession = await backendClient.createSession({ title: 'New Chat' });
+                console.log('[ChatHistory] Backend session created:', serverSession.id, '(local was:', id, ')');
+                conversation.id = serverSession.id;
+                conversation.sessionId = serverSession.id;
+                conversation.createdAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.createdAt).getTime());
+                conversation.updatedAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.updatedAt).getTime());
+                this.activeId = serverSession.id;
+                await this._setActiveId(serverSession.id);
+                console.log('[ChatHistory] ActiveId saved as server ID:', serverSession.id);
+                this._saveList();
+                return serverSession.id;
+            } catch (err) {
+                console.warn('[ChatHistory] Backend create failed:', err.message, '(falling back to local:', id, ')');
+            }
         } else {
             this._saveList();
             this._saveConversationData(id, []);
@@ -207,97 +217,78 @@ export class ChatHistory {
     // ============================================
 
     _messagesToExchanges(messages) {
-        const sorted = [...messages].sort((a, b) => a.turnIndex - b.turnIndex);
+        // Messages come in order from the conversation doc. Walk sequentially.
 
-        const groups = new Map();
-        for (const msg of sorted) {
-            const key = msg.turnIndex;
-            if (!groups.has(key)) groups.set(key, []);
-            groups.get(key).push(msg);
+        const groups = [];
+        let current = [];
+        for (const msg of messages) {
+            if (msg.role === 'user' && current.length > 0) {
+                groups.push(current);
+                current = [msg];
+            } else {
+                current.push(msg);
+            }
         }
+        if (current.length > 0) groups.push(current);
 
         const exchanges = [];
-        for (const [turnIndex, msgs] of groups) {
-            const userMsg = msgs.find(m => m.role === 'user');
-            const assistantMsg = msgs.find(m => m.role === 'assistant');
-            const toolMsg = msgs.find(m => m.role === 'tool');
 
-            // Tool exchange — has tool message but no user content
-            if (toolMsg && !userMsg?.content) {
-                const ts = new Date(toolMsg.createdAt).getTime();
-                const exchange = {
-                    id: toolMsg.id?.replace(/-tool$/, '') || ('ex_' + turnIndex),
-                    timestamp: !isNaN(ts) ? ts : Date.now(),
-                    type: 'tool',
-                    tool: {
-                        name: toolMsg.toolName || 'unknown',
-                        args: toolMsg.toolArgs || {},
-                        status: toolMsg.toolStatus || 'success',
-                        content: toolMsg.content || '',
-                        images: toolMsg.toolImages || []
-                    },
-                    user: {
-                        role: 'user',
-                        content: '',
-                        attachments: []
-                    },
-                    assistant: {
-                        role: 'assistant',
-                        content: '',
-                        versions: [],
-                        currentVersion: 0,
-                        isStreaming: false,
-                        isComplete: false
+        for (const group of groups) {
+            let regularExchange = null;
+            let lastToolExchange = null;
+            const pendingTools = new Map();
+
+            for (const msg of group) {
+                if (msg.role === 'user') {
+                    regularExchange = {
+                        id: 'ex_' + (Date.now() + Math.random()),
+                        timestamp: new Date(msg.createdAt).getTime() || Date.now(),
+                        user: { role: 'user', content: msg.content || '', attachments: msg.attachments || [] },
+                        assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
+                    };
+                } else if (msg.role === 'tool') {
+                    const toolName = msg.toolName;
+                    const toolContent = msg.content || '';
+                    if (!toolName && !toolContent) continue;
+                    if (msg.toolStatus === 'pending') { pendingTools.set(toolName, msg); continue; }
+                    if (msg.toolStatus === 'success') pendingTools.delete(toolName);
+
+                    const toolEx = {
+                        id: 'ex_' + (Date.now() + Math.random()),
+                        timestamp: new Date(msg.createdAt).getTime() || Date.now(),
+                        type: 'tool',
+                        tool: { name: toolName || 'unknown', args: msg.toolArgs || {}, status: msg.toolStatus || 'success', content: toolContent, images: msg.toolImages || [] },
+                        user: { role: 'user', content: '', attachments: [] },
+                        assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
+                    };
+                    exchanges.push(toolEx);
+                    lastToolExchange = toolEx;
+                } else if (msg.role === 'assistant') {
+                    const content = (msg.content || '').trim();
+                    if (!content) continue;
+                    const target = lastToolExchange || regularExchange;
+                    if (target) {
+                        target.assistant.content = target.assistant.content ? target.assistant.content + '\n' + content : content;
+                        target.assistant.isComplete = true;
+                        if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now() }];
                     }
-                };
-                // If assistant responded after tool, include it
-                if (assistantMsg) {
-                    exchange.assistant.content = assistantMsg.content || '';
-                    exchange.assistant.isComplete = true;
-                    exchange.assistant.versions = [{
-                        content: assistantMsg.content || '',
-                        timestamp: (t => !isNaN(t) ? t : Date.now())(new Date(assistantMsg.createdAt).getTime())
-                    }];
-                    if (assistantMsg.model) exchange.assistant.model = assistantMsg.model;
                 }
-                exchanges.push(exchange);
-                continue;
             }
 
-            const ts = new Date((userMsg || assistantMsg)?.createdAt).getTime();
-            const exchange = {
-                id: (userMsg || assistantMsg)?.id?.replace(/-user$/, '').replace(/-assistant$/, '') || ('ex_' + turnIndex),
-                timestamp: !isNaN(ts) ? ts : Date.now(),
-                user: {
-                    role: 'user',
-                    content: userMsg?.content || '',
-                    attachments: userMsg?.attachments || []
-                },
-                assistant: {
-                    role: 'assistant',
-                    content: '',
-                    versions: [],
-                    currentVersion: 0,
-                    isStreaming: false,
-                    isComplete: false
-                }
-            };
-
-            if (assistantMsg) {
-                exchange.assistant.content = assistantMsg.content || '';
-                exchange.assistant.isComplete = true;
-                exchange.assistant.versions = [{
-                    content: assistantMsg.content || '',
-                    timestamp: (t => !isNaN(t) ? t : Date.now())(new Date(assistantMsg.createdAt).getTime())
-                }];
-                if (assistantMsg.model) exchange.assistant.model = assistantMsg.model;
-                if (assistantMsg.usage) exchange.assistant.usage = assistantMsg.usage;
+            for (const [toolName, toolMsg] of pendingTools) {
+                exchanges.push({
+                    id: 'ex_' + (Date.now() + Math.random()),
+                    timestamp: new Date(toolMsg.createdAt).getTime() || Date.now(),
+                    type: 'tool',
+                    tool: { name: toolName || 'unknown', args: toolMsg.toolArgs || {}, status: 'pending', content: toolMsg.content || '', images: toolMsg.toolImages || [] },
+                    user: { role: 'user', content: '', attachments: [] },
+                    assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
+                });
             }
-
-            exchanges.push(exchange);
+            if (regularExchange) exchanges.push(regularExchange);
         }
 
-        return exchanges;
+        return exchanges.sort((a, b) => a.timestamp - b.timestamp);
     }
 
     // ============================================

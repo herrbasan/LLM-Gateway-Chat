@@ -7,3 +7,6 @@
 [submodule "lib/nvdb"]
 	path = lib/nvdb
 	url = https://github.com/herrbasan/nVDB.git
+[submodule "lib/nlogger"]
+	path = lib/nlogger
+	url = https://github.com/herrbasan/nLogger.git
