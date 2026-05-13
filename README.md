@@ -1,8 +1,6 @@
 # LLM Gateway Chat
 
-LLM Gateway Chat is a lightweight, pure frontend vanilla JavaScript client designed to interface directly with an LLM Gateway backend. Built with a focus on performance, reliability, and local execution, it leverages the NUI Web Components library for a consistent, responsive UI supporting both desktop and mobile layouts.
-
-This application runs entirely in the browser without any build steps or external network dependencies for its vendor libraries, ensuring a robust and self-contained frontend experience.
+LLM Gateway Chat is a vanilla JavaScript SPA with its own Node.js backend, connecting to an LLM Gateway for chat streaming and embedding. Built with a focus on performance, reliability, and local execution, it leverages NUI Web Components for a consistent UI supporting both desktop and mobile layouts. Data is stored in Rust-based embedded databases (nDB + nVDB) with semantic search powered by Qwen3-Embedding-4B vectors.
 
 ---
 
@@ -49,51 +47,56 @@ This is not about proving AI consciousness. It is about documenting AI **encount
 ## Usage
 
 ### 1. Prerequisites
-You need a running instance of the LLM Gateway backend to attach this client to.
+- A running LLM Gateway backend (default: `http://192.168.0.100:3400`)
+- Node.js v24+
 
 ### 2. Configuration
-Before launching, configure the application to connect to your gateway by editing `chat/js/config.js`:
 
+**Server config** (`server/config.json`):
+```json
+{
+    "port": 3500,
+    "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
+    "embedDims": 2560
+}
+```
+
+**Frontend config** (`chat/js/config.js`):
 ```javascript
 window.CHAT_CONFIG = {
-    gatewayUrl: 'http://localhost:3400',   // Target LLM Gateway URL
-    defaultModel: '',                      // Optional: Auto-select this model
-    defaultTemperature: 0.7,               // Default temperature (0-2)
-    defaultMaxTokens: 2048,                // Default max tokens
+    gatewayUrl: 'http://192.168.0.100:3400',
+    enableBackend: true,
+    backendUrl: 'http://localhost:3500',
+    defaultTemperature: 0.7
 };
 ```
 
-### 3. Running the Client
-Since this is a pure web frontend, you can serve it using any simple static HTTP server. Serve the directory at the root of this project.
-
-**Option 1: Node.js (npx serve)**
+### 3. Start
 ```bash
-npx serve -l 8080
+node server/server.js
+# or
+npm start
 ```
 
-**Option 2: Python**
-```bash
-python -m http.server 8080
-```
-
-**Option 3: VS Code Live Server / Five Server**
-Open the workspace in VS Code and start your preferred live server extension targeting `chat/index.html`.
-
-Once the server is running, navigate to the provided local URL (e.g., `http://localhost:8080/chat/index.html`) in your browser to start chatting.
+Navigate to `http://localhost:3500/chat/`
 
 ## Key Features
 
-- **Direct Gateway Integration:** Interfaces seamlessly with the LLM Gateway backend.
-- **Multiple Chat Sessions:** Maintains chat history across multiple separate conversational threads using `localStorage`.
-- **Vision Support:** Attach and process images via IndexedDB.
-- **Markdown & Code:** Full markdown rendering with syntax highlighting and easy code copying.
-- **Streaming & Thinking Blocks:** Supports real-time prompt streaming with support for expandable thinking/reasoning blocks used by advanced models.
-- **Vanilla Tech Stack:** Pure HTML, CSS, and JS with locally vendored dependencies (DOMPurify, marked, Prism) and the NUI components module. No npm build pipelines.
+- **Direct Gateway Integration:** WebSocket streaming via JSON-RPC 2.0
+- **Semantic Search:** Chat archive searchable via nVDB + Qwen3-Embedding-4B vectors
+- **Multiple Chat Sessions:** Multi-conversation management with nDB persistence
+- **MCP Archive Tools:** LLM can query conversation history via `chat_archive_search`, `chat_archive_find_similar`, etc.
+- **Arena Mode:** LLM-to-LLM autonomous conversations, recorded without human steering
+- **Vision Support:** Attach and process images via IndexedDB
+- **Markdown & Code:** Full markdown rendering with syntax highlighting
+- **Streaming & Thinking Blocks:** Real-time streaming with expandable reasoning blocks
 
 ## Storage
 
-- **IndexedDB**: Image attachments (per-browser, survives refresh)
-- **localStorage**: Chat history and messages
+- **nDB**: Sessions, conversation documents (inline messages array), user metadata
+- **nVDB**: 2560-dim embedding vectors with `(chatId, msgIdx)` back-references
+- **localStorage**: Fallback for chat history and user preferences
+- **IndexedDB**: Image attachments
 
 ## Updating Vendor Libraries
 
