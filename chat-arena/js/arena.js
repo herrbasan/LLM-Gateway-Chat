@@ -4,6 +4,7 @@
 
 // Reuse existing utilities (import only, no modifications)
 import { GatewayClient } from '../../chat/js/client-sdk.js';
+import { BackendClient } from '../../chat/js/api-client.js';
 import { renderMarkdown, parseThinking } from '../../chat/js/markdown.js';
 import { getPlainText } from '../../chat/js/tts-utils.js';
 import { arenaStorage } from './storage.js';
@@ -263,13 +264,39 @@ class Arena {
     async _saveToStorage() {
         try {
             const sessionData = this.exportJSON();
-            // Debug: console.log('[Arena] Saving session:', this.id, 'messages:', sessionData.messages.length);
             await arenaStorage.saveSession(this.id, sessionData);
             await this._updateHistory(sessionData);
+
+            // Sync new messages to backend for realtime embedding
+            const backend = this._getBackendClient();
+            if (backend) {
+                const syncedCount = this._lastSyncedCount || 0;
+                const newMessages = sessionData.messages.slice(syncedCount);
+                for (const msg of newMessages) {
+                    backend.sendMessage(this.id, {
+                        role: msg.role || 'assistant',
+                        content: msg.content || '',
+                        speaker: msg.speaker || (msg.role === 'system' ? 'moderator' : ''),
+                        model: this.participants?.[0]?.model || null
+                    }).catch(() => {});
+                }
+                this._lastSyncedCount = sessionData.messages.length;
+            }
+
             this.onSave();
         } catch (err) {
             console.error('Failed to save arena session:', err);
         }
+    }
+
+    _getBackendClient() {
+        if (!this._backendClientCached) {
+            const config = window.CHAT_CONFIG || {};
+            if (config.enableBackend && config.backendUrl && config.backendApiKey) {
+                this._backendClientCached = new BackendClient(config.backendUrl, config.backendApiKey);
+            }
+        }
+        return this._backendClientCached || null;
     }
 
     async _updateHistory(sessionData) {
