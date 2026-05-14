@@ -1,7 +1,6 @@
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
-const url = require('url');
 
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
@@ -802,14 +801,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const startTime = Date.now();
-  const parsed = url.parse(req.url, true);
-  let pathname = parsed.pathname;
+  const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  let pathname = parsedUrl.pathname;
 
   const logRequest = (status) => {
-    if (!pathname.startsWith('/api/') && pathname !== '/health') return; // only log API
+    if (!pathname.startsWith('/api/') && pathname !== '/health') return;
     const ms = Date.now() - startTime;
     const method = req.method;
-    const fullPath = pathname + (parsed.search || '');
+    const fullPath = pathname + parsedUrl.search;
     if (status < 400) {
       L().info(`${method} ${fullPath}`, { status, ms }, 'HTTP');
     } else if (status < 500) {
