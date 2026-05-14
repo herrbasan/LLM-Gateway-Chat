@@ -869,7 +869,7 @@ server.listen(PORT, () => {
   if (staleMessages.length > 0) {
     logger.info('Startup reconciliation (nVDB check)', { count: staleMessages.length }, 'Server');
     (async () => {
-      const BATCH_SIZE = 5;
+      const BATCH_SIZE = 1;
       for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
         const batch = staleMessages.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(({ msg, session, convNdbId, idx }) =>
@@ -932,7 +932,7 @@ server.listen(PORT, () => {
       if (pending.length > 0) {
         logger.info('Retrying pending embeddings', { count: pending.length }, 'Embed');
         for (const { msg, session, convNdbId, idx } of pending) {
-          embedMessageAsync(msg, session, convNdbId, idx);
+          await embedMessageAsync(msg, session, convNdbId, idx).catch(() => {});
         }
       }
 
