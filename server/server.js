@@ -36,14 +36,18 @@ let embedFailCount = 0;
 // Database
 // ============================================
 
-const db = nDB.open(NDB_PATH);
+let db = null;
 let vdb, embeddingsCol;
 let needsFlush = 0;
+let pendingQueue = [];
 let logger = null;
 
 (async () => {
 logger = await nLogger.init({ logsDir: path.resolve(LOGS_DIR), sessionPrefix: 'chat' });
 logger.info('Chat Backend starting', { port: PORT }, 'Server');
+
+db = nDB.open(NDB_PATH);
+logger.info('nDB opened', { path: NDB_PATH }, 'Server');
 
 try {
   vdb = new nVDB(NVDB_DIR);
@@ -219,13 +223,7 @@ async function embedMessageAsync(msg, session, convNdbId, msgIdx) {
     }
 
     L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3 }, 'Embed');
-    const conv = db.get(convNdbId);
-    if (conv && conv.messages && conv.messages[msgIdx]) {
-        conv.messages[msgIdx].embedStatus = 'failed';
-        conv.messages[msgIdx].embedAttempts = 3;
-        conv.messages[msgIdx].embedError = (lastError?.message || '').slice(0, 200);
-        db.update(convNdbId, conv);
-    }
+    pendingQueue.push({ msg, session, convNdbId, msgIdx });
 }
 
 // ============================================
@@ -761,9 +759,13 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/files/')) {
     const subPath = req.url.slice(7).split('?')[0];
     const filePath = path.join(FILES_DIR, decodeURIComponent(subPath));
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-      serveFile(req, res, filePath);
-    } else {
+    try {
+      if ((await fs.promises.stat(filePath)).isFile()) {
+        serveFile(req, res, filePath);
+      } else {
+        json(res, { error: 'File not found' }, 404);
+      }
+    } catch {
       json(res, { error: 'File not found' }, 404);
     }
     return;
@@ -808,18 +810,18 @@ const server = http.createServer(async (req, res) => {
   let filePath = pathname === '/' ? '/chat/index.html' : pathname;
   let fullPath = path.join(__dirname, '..', filePath);
 
-  // If file not found at path, try under /chat/ (base URL fix)
-  if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+  try {
+    await fs.promises.stat(fullPath);
+  } catch {
     filePath = '/chat' + pathname;
     fullPath = path.join(__dirname, '..', filePath);
   }
 
-  if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-    fs.readFile(fullPath, (err, data) => {
-      if (err) {
-        res.writeHead(500);
-        res.end('Error');
-        return;
+  fs.readFile(fullPath, (err, data) => {
+    if (err) {
+      res.writeHead(err.code === 'ENOENT' ? 404 : 500);
+      res.end(err.code === 'ENOENT' ? 'Not found' : 'Error');
+      return;
       }
       const ext = path.extname(fullPath).toLowerCase();
       const mime = {
@@ -834,9 +836,6 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': mime });
       res.end(data);
     });
-  } else {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
   }
 });
 
@@ -846,7 +845,6 @@ server.listen(PORT, () => {
   const apiKey = db.find('_type', 'user')[0]?.apiKey || 'none';
   logger.info('API key', { key: apiKey.slice(0, 20) + '...' }, 'Server');
 
-  // Retry stale pending embeds from previous crash/restart
   // One-time flush + compact after startup
   setTimeout(() => {
     if (!embeddingsCol) return;
@@ -888,18 +886,7 @@ server.listen(PORT, () => {
     })();
   }, 5000);
 
-  // One-time flush + compact after startup
-  setTimeout(() => {
-    if (!embeddingsCol) return;
-    try {
-      embeddingsCol.flush();
-      logger.info('nVDB flushed after startup', { docs: embeddingsCol.stats?.totalSegmentDocs }, 'Index');
-    } catch (err) {
-      logger.error('nVDB flush failed', err, {}, 'Index');
-    }
-  }, 10000);
-
-  // Maintenance: periodic embed health check + pending retry
+  // Maintenance: periodic embed health check (every 60s)
   setInterval(async () => {
     if (!embedAvailable) {
       try {
@@ -917,39 +904,25 @@ server.listen(PORT, () => {
         }
       } catch {}
     }
+  }, 60000);
 
-    if (embedAvailable && embeddingsCol) {
-      const convs = db.find('_type', 'conversation');
-      const sessions = {};
-      for (const s of db.find('_type', 'session')) sessions[s.id] = s;
-      const pending = [];
-      for (const c of convs) {
-        if (!c.messages) continue;
-        for (let idx = 0; idx < c.messages.length; idx++) {
-          const m = c.messages[idx];
-          if (!m.id) continue;
-          if (!embeddingsCol.get(m.id)) {
-            pending.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-          }
-        }
-      }
-      if (pending.length > 0) {
-        logger.info('Retrying pending embeddings', { count: pending.length }, 'Embed');
-        for (const { msg, session, convNdbId, idx } of pending) {
-          await embedMessageAsync(msg, session, convNdbId, idx).catch(() => {});
-        }
-      }
+  // Maintenance: drain pending embeds + flush nVDB (every 5s)
+  setInterval(async () => {
+    // Drain one pending embed per tick
+    if (pendingQueue.length > 0 && embedAvailable && embeddingsCol) {
+      const item = pendingQueue.shift();
+      await embedMessageAsync(item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
+    }
 
-      // Flush nVDB memtable → segments so exact search sees new vectors
-      if (needsFlush > 0 && embeddingsCol) {
-        try {
-          const t0 = Date.now();
-          embeddingsCol.flush();
-          logger.info('nVDB flushed', { docs: needsFlush, ms: Date.now() - t0 }, 'Embed');
-          needsFlush = 0;
-        } catch (err) {
-          logger.error('nVDB flush failed', err, {}, 'Embed');
-        }
+    // Flush nVDB memtable → segments
+    if (needsFlush > 0 && embeddingsCol) {
+      try {
+        const t0 = Date.now();
+        embeddingsCol.flush();
+        logger.info('nVDB flushed', { docs: needsFlush, ms: Date.now() - t0 }, 'Embed');
+        needsFlush = 0;
+      } catch (err) {
+        logger.error('nVDB flush failed', err, {}, 'Embed');
       }
     }
   }, 5000);
