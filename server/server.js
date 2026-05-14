@@ -75,6 +75,90 @@ try {
 console.timeEnd('nVDB.init');
 
 // ============================================
+// Startup reconciliation + maintenance
+// ============================================
+
+// One-time flush after startup
+setTimeout(() => {
+  if (!embeddingsCol) return;
+  try {
+    embeddingsCol.flush();
+    logger.info('nVDB flushed after startup', { docs: embeddingsCol.stats?.totalSegmentDocs }, 'Index');
+  } catch (err) {
+    logger.error('nVDB flush failed', err, {}, 'Index');
+  }
+}, 10000);
+
+// Startup reconciliation: deferred 5s, check nVDB for missing vectors
+setTimeout(() => {
+  if (!embeddingsCol) return;
+  const sessions = {};
+  for (const s of db.find('_type', 'session')) sessions[s.id] = s;
+  const stale = [];
+  for (const c of db.find('_type', 'conversation')) {
+    if (!c.messages) continue;
+    for (let idx = 0; idx < c.messages.length; idx++) {
+      const m = c.messages[idx];
+      if (!m.id) continue;
+      if (!embeddingsCol.get(m.id)) {
+        stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+      }
+    }
+  }
+  if (stale.length === 0) return;
+  logger.info('Startup reconciliation', { count: stale.length }, 'Server');
+  (async () => {
+    for (let i = 0; i < stale.length; i++) {
+      const { msg, session, convNdbId, idx } = stale[i];
+      await embedMessageAsync(msg, session, convNdbId, idx).catch(() => {});
+      if (i % 10 === 9 && i + 1 < stale.length) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+    logger.info('Startup reconciliation complete', {}, 'Server');
+  })();
+}, 5000);
+
+// Maintenance: embed health check (every 60s)
+setInterval(async () => {
+  if (!embedAvailable) {
+    try {
+      const reqBody = { input: ['health check'], dimensions: EMBEDDING_DIMS };
+      if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
+      const res = await fetch(EMBED_URL, {
+        method: 'POST', headers: EMBED_HEADERS,
+        body: JSON.stringify(reqBody)
+      });
+      if (res.ok) {
+        embedAvailable = true;
+        embedFailCount = 0;
+        logger.info('Embed endpoint recovered', {}, 'Embed');
+      }
+    } catch {}
+  }
+}, 60000);
+
+// Maintenance: drain pending queue + flush nVDB (every 5s)
+setInterval(async () => {
+  if (pendingQueue.length > 0 && embedAvailable && embeddingsCol) {
+    const item = pendingQueue.shift();
+    await embedMessageAsync(item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
+  }
+  if (needsFlush > 0 && embeddingsCol) {
+    try {
+      const t0 = Date.now();
+      embeddingsCol.flush();
+      logger.info('nVDB flushed', { docs: needsFlush, ms: Date.now() - t0 }, 'Embed');
+      needsFlush = 0;
+    } catch (err) {
+      logger.error('nVDB flush failed', err, {}, 'Embed');
+    }
+  }
+}, 5000);
+
+})();
+
+// ============================================
 // Auth
 // ============================================
 
@@ -859,88 +943,3 @@ const server = http.createServer(async (req, res) => {
       res.end(data);
     });
 });
-
-// ============================================
-  const apiKey = db.find('_type', 'user')[0]?.apiKey || 'none';
-  logger.info('API key', { key: apiKey.slice(0, 20) + '...' }, 'Server');
-
-  // One-time flush + compact after startup
-  setTimeout(() => {
-    if (!embeddingsCol) return;
-    try {
-      embeddingsCol.flush();
-      logger.info('nVDB flushed after startup', { docs: embeddingsCol.stats?.totalSegmentDocs }, 'Index');
-    } catch (err) {
-      logger.error('nVDB flush failed', err, {}, 'Index');
-    }
-  }, 10000);
-
-  // Startup reconciliation: deferred 5s to let server come up, serial embeds
-  setTimeout(() => {
-    if (!embeddingsCol) return;
-    const sessions = {};
-    for (const s of db.find('_type', 'session')) sessions[s.id] = s;
-    const staleMessages = [];
-    for (const c of db.find('_type', 'conversation')) {
-      if (!c.messages) continue;
-      for (let idx = 0; idx < c.messages.length; idx++) {
-        const m = c.messages[idx];
-        if (!m.id) continue;
-        if (!embeddingsCol.get(m.id)) {
-          staleMessages.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-        }
-      }
-    }
-    if (staleMessages.length === 0) return;
-    logger.info('Startup reconciliation (nVDB check)', { count: staleMessages.length }, 'Server');
-    (async () => {
-      for (let i = 0; i < staleMessages.length; i++) {
-        const { msg, session, convNdbId, idx } = staleMessages[i];
-        await embedMessageAsync(msg, session, convNdbId, idx).catch(() => {});
-        if (i % 10 === 9 && i + 1 < staleMessages.length) {
-          await new Promise(r => setTimeout(r, 2000));
-        }
-      }
-      logger.info('Startup reconciliation complete', {}, 'Server');
-    })();
-  }, 5000);
-
-  // Maintenance: periodic embed health check (every 60s)
-  setInterval(async () => {
-    if (!embedAvailable) {
-      try {
-        const testText = 'health check';
-        const reqBody = { input: [testText], dimensions: EMBEDDING_DIMS };
-        if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
-        const res = await fetch(EMBED_URL, {
-          method: 'POST', headers: EMBED_HEADERS,
-          body: JSON.stringify(reqBody)
-        });
-        if (res.ok) {
-          embedAvailable = true;
-          embedFailCount = 0;
-          logger.info('Embed endpoint recovered', {}, 'Embed');
-        }
-      } catch {}
-    }
-  }, 60000);
-
-  // Maintenance: drain pending embeds + flush nVDB (every 5s)
-  setInterval(async () => {
-    if (pendingQueue.length > 0 && embedAvailable && embeddingsCol) {
-      const item = pendingQueue.shift();
-      await embedMessageAsync(item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
-    }
-
-    if (needsFlush > 0 && embeddingsCol) {
-      try {
-        const t0 = Date.now();
-        embeddingsCol.flush();
-        logger.info('nVDB flushed', { docs: needsFlush, ms: Date.now() - t0 }, 'Embed');
-        needsFlush = 0;
-      } catch (err) {
-        logger.error('nVDB flush failed', err, {}, 'Embed');
-      }
-    }
-  }, 5000);
-})();
