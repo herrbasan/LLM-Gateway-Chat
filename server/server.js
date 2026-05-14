@@ -37,6 +37,7 @@ let embedFailCount = 0;
 // ============================================
 
 let db = null;
+let dbReady = false;
 let vdb, embeddingsCol;
 let needsFlush = 0;
 let pendingQueue = [];
@@ -46,12 +47,22 @@ let logger = null;
 console.time('nLogger.init');
 logger = await nLogger.init({ logsDir: path.resolve(LOGS_DIR), sessionPrefix: 'chat' });
 console.timeEnd('nLogger.init');
-logger.info('Chat Backend starting', { port: PORT }, 'Server');
 
+// Start HTTP server immediately — nDB/nVDB load in background
+server.listen(PORT, () => {
+  logger.info('Chat Backend running', { port: PORT }, 'Server');
+  logger.info('Health endpoint', { url: `http://localhost:${PORT}/health` }, 'Server');
+});
+logger.info('Chat Backend starting, loading databases...', { port: PORT }, 'Server');
+
+// Load nDB (slow: ~45s for 229 docs with large message arrays)
 console.time('nDB.open');
 db = nDB.open(NDB_PATH);
 console.timeEnd('nDB.open');
+dbReady = true;
 logger.info('nDB opened', { path: NDB_PATH }, 'Server');
+const apiKey = db.find('_type', 'user')[0]?.apiKey || 'none';
+logger.info('API key', { key: apiKey.slice(0, 20) + '...' }, 'Server');
 
 console.time('nVDB.init');
 try {
@@ -701,6 +712,11 @@ function serveFile(req, res, filepath) {
 // ============================================
 
 const server = http.createServer(async (req, res) => {
+  // Queue requests until databases are ready
+  if (!dbReady) {
+    json(res, { error: 'Starting up...', dbReady: false }, 503);
+    return;
+  }
   const startTime = Date.now();
   const parsed = url.parse(req.url, true);
   let pathname = parsed.pathname;
@@ -844,10 +860,7 @@ const server = http.createServer(async (req, res) => {
     });
 });
 
-
-server.listen(PORT, () => {
-  logger.info('Chat Backend running', { port: PORT }, 'Server');
-  logger.info('Health endpoint', { url: `http://localhost:${PORT}/health` }, 'Server');
+// ============================================
   const apiKey = db.find('_type', 'user')[0]?.apiKey || 'none';
   logger.info('API key', { key: apiKey.slice(0, 20) + '...' }, 'Server');
 
@@ -914,13 +927,11 @@ server.listen(PORT, () => {
 
   // Maintenance: drain pending embeds + flush nVDB (every 5s)
   setInterval(async () => {
-    // Drain one pending embed per tick
     if (pendingQueue.length > 0 && embedAvailable && embeddingsCol) {
       const item = pendingQueue.shift();
       await embedMessageAsync(item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
     }
 
-    // Flush nVDB memtable → segments
     if (needsFlush > 0 && embeddingsCol) {
       try {
         const t0 = Date.now();
@@ -932,6 +943,4 @@ server.listen(PORT, () => {
       }
     }
   }, 5000);
-});
-
 })();
