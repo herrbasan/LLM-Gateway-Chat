@@ -869,8 +869,12 @@ server.listen(PORT, () => {
   if (staleMessages.length > 0) {
     logger.info('Startup reconciliation', { count: staleMessages.length }, 'Server');
     (async () => {
-      for (const { msg, session, convNdbId, idx } of staleMessages) {
-        embedMessageAsync(msg, session, convNdbId, idx);
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
+        const batch = staleMessages.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(({ msg, session, convNdbId, idx }) =>
+          embedMessageAsync(msg, session, convNdbId, idx).catch(() => {})
+        ));
       }
     })();
   }
