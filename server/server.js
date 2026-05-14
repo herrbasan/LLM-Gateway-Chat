@@ -847,23 +847,46 @@ server.listen(PORT, () => {
   logger.info('API key', { key: apiKey.slice(0, 20) + '...' }, 'Server');
 
   // Retry stale pending embeds from previous crash/restart
-  const STALE_THRESHOLD = 5 * 60 * 1000;
-  const now = Date.now();
-  const convs = db.find('_type', 'conversation');
-  const sessions = {};
-  for (const s of db.find('_type', 'session')) sessions[s.id] = s;
+  // One-time flush + compact after startup
+  setTimeout(() => {
+    if (!embeddingsCol) return;
+    try {
+      embeddingsCol.flush();
+      logger.info('nVDB flushed after startup', { docs: embeddingsCol.stats?.totalSegmentDocs }, 'Index');
+    } catch (err) {
+      logger.error('nVDB flush failed', err, {}, 'Index');
+    }
+  }, 10000);
 
-  // Startup: reconcile messages missing nVDB vectors (sparse — only lost memtable on crash)
-  // Check nVDB directly — no embedStatus dependency. Fire-and-forget, sequential batches.
-  const staleMessages = [];
-  for (const c of db.find('_type', 'conversation')) {
-    if (!c.messages) continue;
-    for (let idx = 0; idx < c.messages.length; idx++) {
-      const m = c.messages[idx];
-      if (!m.id) continue;
-      if (!embeddingsCol.get(m.id)) {
-        staleMessages.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+  // Startup reconciliation: deferred 5s to let server come up, serial embeds
+  setTimeout(() => {
+    if (!embeddingsCol) return;
+    const sessions = {};
+    for (const s of db.find('_type', 'session')) sessions[s.id] = s;
+    const staleMessages = [];
+    for (const c of db.find('_type', 'conversation')) {
+      if (!c.messages) continue;
+      for (let idx = 0; idx < c.messages.length; idx++) {
+        const m = c.messages[idx];
+        if (!m.id) continue;
+        if (!embeddingsCol.get(m.id)) {
+          staleMessages.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+        }
       }
+    }
+    if (staleMessages.length === 0) return;
+    logger.info('Startup reconciliation (nVDB check)', { count: staleMessages.length }, 'Server');
+    (async () => {
+      for (let i = 0; i < staleMessages.length; i++) {
+        const { msg, session, convNdbId, idx } = staleMessages[i];
+        await embedMessageAsync(msg, session, convNdbId, idx).catch(() => {});
+        if (i % 10 === 9 && i + 1 < staleMessages.length) {
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+      logger.info('Startup reconciliation complete', {}, 'Server');
+    })();
+  }, 5000);
     }
   }
   if (staleMessages.length > 0) {
