@@ -853,8 +853,25 @@ server.listen(PORT, () => {
   const sessions = {};
   for (const s of db.find('_type', 'session')) sessions[s.id] = s;
 
-  // Startup: no bulk reconciliation — the 60s cycle handles pending embeds at a controlled pace.
-  // This prevents flooding the gateway queue on restart.
+  // Startup: reconcile messages missing nVDB vectors (sparse — only lost memtable on crash)
+  // Check nVDB directly — no embedStatus dependency. Fire-and-forget, sequential batches.
+  const staleMessages = [];
+  for (const c of db.find('_type', 'conversation')) {
+    if (!c.messages) continue;
+    for (let idx = 0; idx < c.messages.length; idx++) {
+      const m = c.messages[idx];
+      if (!m.id) continue;
+      if (!embeddingsCol.get(m.id)) {
+        staleMessages.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+      }
+    }
+  }
+  if (staleMessages.length > 0) {
+    logger.info('Startup reconciliation (nVDB check)', { count: staleMessages.length }, 'Server');
+    for (const { msg, session, convNdbId, idx } of staleMessages) {
+      embedMessageAsync(msg, session, convNdbId, idx);
+    }
+  }
 
   // One-time flush + compact after startup
   setTimeout(() => {
