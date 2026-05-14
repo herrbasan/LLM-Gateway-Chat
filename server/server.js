@@ -887,25 +887,6 @@ server.listen(PORT, () => {
       logger.info('Startup reconciliation complete', {}, 'Server');
     })();
   }, 5000);
-    }
-  }
-  if (staleMessages.length > 0) {
-    logger.info('Startup reconciliation (nVDB check)', { count: staleMessages.length }, 'Server');
-    (async () => {
-      const BATCH_SIZE = 1;
-      for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
-        const batch = staleMessages.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(({ msg, session, convNdbId, idx }) =>
-          embedMessageAsync(msg, session, convNdbId, idx).catch(() => {})
-        ));
-        // Small delay between batches to let gateway breathe
-        if (i + BATCH_SIZE < staleMessages.length) {
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-      logger.info('Startup reconciliation complete', {}, 'Server');
-    })();
-  }
 
   // One-time flush + compact after startup
   setTimeout(() => {
