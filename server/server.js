@@ -866,11 +866,12 @@ server.listen(PORT, () => {
       }
     }
   }
-  if (staleMessages.length > 0) {
+  if (staleMessages.length > 0 && embedAvailable && embeddingsCol) {
     logger.info('Startup reconciliation', { count: staleMessages.length }, 'Server');
     (async () => {
       const BATCH_SIZE = 5;
       for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
+        if (!embedAvailable) { logger.info('Reconciliation paused (embed down)', {}, 'Embed'); break; }
         const batch = staleMessages.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(({ msg, session, convNdbId, idx }) =>
           embedMessageAsync(msg, session, convNdbId, idx).catch(() => {})
