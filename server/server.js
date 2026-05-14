@@ -43,12 +43,17 @@ let pendingQueue = [];
 let logger = null;
 
 (async () => {
+console.time('nLogger.init');
 logger = await nLogger.init({ logsDir: path.resolve(LOGS_DIR), sessionPrefix: 'chat' });
+console.timeEnd('nLogger.init');
 logger.info('Chat Backend starting', { port: PORT }, 'Server');
 
+console.time('nDB.open');
 db = nDB.open(NDB_PATH);
+console.timeEnd('nDB.open');
 logger.info('nDB opened', { path: NDB_PATH }, 'Server');
 
+console.time('nVDB.init');
 try {
   vdb = new nVDB(NVDB_DIR);
   embeddingsCol = vdb.getCollection('embeddings');
@@ -56,6 +61,7 @@ try {
 } catch {
   logger.warn('nVDB not initialized (run embed.js when Gateway is up)', {}, 'Server');
 }
+console.timeEnd('nVDB.init');
 
 // ============================================
 // Auth
