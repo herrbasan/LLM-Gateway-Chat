@@ -868,9 +868,20 @@ server.listen(PORT, () => {
   }
   if (staleMessages.length > 0) {
     logger.info('Startup reconciliation (nVDB check)', { count: staleMessages.length }, 'Server');
-    for (const { msg, session, convNdbId, idx } of staleMessages) {
-      embedMessageAsync(msg, session, convNdbId, idx);
-    }
+    (async () => {
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
+        const batch = staleMessages.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(({ msg, session, convNdbId, idx }) =>
+          embedMessageAsync(msg, session, convNdbId, idx).catch(() => {})
+        ));
+        // Small delay between batches to let gateway breathe
+        if (i + BATCH_SIZE < staleMessages.length) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+      logger.info('Startup reconciliation complete', {}, 'Server');
+    })();
   }
 
   // One-time flush + compact after startup
@@ -908,18 +919,12 @@ server.listen(PORT, () => {
       const sessions = {};
       for (const s of db.find('_type', 'session')) sessions[s.id] = s;
       const pending = [];
-      const now = Date.now();
       for (const c of convs) {
         if (!c.messages) continue;
         for (let idx = 0; idx < c.messages.length; idx++) {
           const m = c.messages[idx];
-          if (m.embedStatus === 'pending') {
-            pending.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-          } else if (m.embedStatus === 'failed' && (now - new Date(m.createdAt).getTime()) > 5 * 60 * 1000) {
-            // Retry failed messages after 5 minutes (rate-limit recovery)
-            m.embedStatus = 'pending';
-            m.embedAttempts = 0;
-            db.update(c._id, c);
+          if (!m.id) continue;
+          if (!embeddingsCol.get(m.id)) {
             pending.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
           }
         }
