@@ -869,17 +869,8 @@ server.listen(PORT, () => {
   if (staleMessages.length > 0) {
     logger.info('Startup reconciliation', { count: staleMessages.length }, 'Server');
     (async () => {
-      // Rate-limit: embed in batches of 5 with 2s delay between batches
-      const BATCH_SIZE = 5;
-      const BATCH_DELAY = 2000;
-      for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
-        const batch = staleMessages.slice(i, i + BATCH_SIZE);
-        for (const { msg, session, convNdbId, idx } of batch) {
-          embedMessageAsync(msg, session, convNdbId, idx);
-        }
-        if (i + BATCH_SIZE < staleMessages.length) {
-          await new Promise(r => setTimeout(r, BATCH_DELAY));
-        }
+      for (const { msg, session, convNdbId, idx } of staleMessages) {
+        embedMessageAsync(msg, session, convNdbId, idx);
       }
     })();
   }
