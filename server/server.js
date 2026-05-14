@@ -853,32 +853,8 @@ server.listen(PORT, () => {
   const sessions = {};
   for (const s of db.find('_type', 'session')) sessions[s.id] = s;
 
-  // Startup reconciliation: embed any messages without vectors
-  const staleMessages = [];
-  for (const c of convs) {
-    if (!c.messages) continue;
-    for (let idx = 0; idx < c.messages.length; idx++) {
-      const m = c.messages[idx];
-      const needsEmbed = m.embedStatus !== 'embedded' && m.embedStatus !== 'ready';
-      const isStale = (now - new Date(m.createdAt).getTime()) > STALE_THRESHOLD;
-      if (needsEmbed && isStale) {
-        staleMessages.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-      }
-    }
-  }
-  if (staleMessages.length > 0 && embedAvailable && embeddingsCol) {
-    logger.info('Startup reconciliation', { count: staleMessages.length }, 'Server');
-    (async () => {
-      const BATCH_SIZE = 5;
-      for (let i = 0; i < staleMessages.length; i += BATCH_SIZE) {
-        if (!embedAvailable) { logger.info('Reconciliation paused (embed down)', {}, 'Embed'); break; }
-        const batch = staleMessages.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(({ msg, session, convNdbId, idx }) =>
-          embedMessageAsync(msg, session, convNdbId, idx).catch(() => {})
-        ));
-      }
-    })();
-  }
+  // Startup: no bulk reconciliation — the 60s cycle handles pending embeds at a controlled pace.
+  // This prevents flooding the gateway queue on restart.
 
   // One-time flush + compact after startup
   setTimeout(() => {
