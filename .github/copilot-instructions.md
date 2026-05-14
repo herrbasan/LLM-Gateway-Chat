@@ -2,15 +2,16 @@
 
 ## Project Overview
 
-LLM Gateway Chat is a **pure frontend vanilla JavaScript client** designed to interface with an LLM Gateway backend. It is a **single-page application (SPA)** that runs entirely in the browser without any build steps or external runtime dependencies.
+LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend** (port 3500). It connects to an LLM Gateway for chat streaming and embedding, and stores all data in Rust-based embedded databases.
 
 ### Key Characteristics
 
-- **No Build Process**: Directly serve static HTML/JS/CSS files
+- **No Build Process**: Directly serve static HTML/JS/CSS files via the backend
 - **Zero Runtime Dependencies**: All vendor libraries are locally vendored
-- **WebSocket-First**: Real-time communication with backend via JSON-RPC 2.0 over WebSocket
+- **WebSocket-First**: Real-time communication with gateway via JSON-RPC 2.0 over WebSocket
 - **Frontend-Driven Architecture**: MCP tool execution happens entirely in the browser
 - **AI-First Maintainability**: Code is optimized for LLM parsing, not human readability dogmas
+- **Own Backend**: Node.js server on port 3500 serves static files + REST API + search
 
 ---
 
@@ -20,10 +21,13 @@ LLM Gateway Chat is a **pure frontend vanilla JavaScript client** designed to in
 |-------|------------|
 | **Language** | Vanilla JavaScript (ES2022+), HTML5, CSS3 |
 | **UI Library** | NUI Web Components (proprietary, via Git submodule) |
-| **Communication** | WebSocket (JSON-RPC 2.0) + REST fallback |
-| **Storage** | localStorage (conversation metadata), IndexedDB (images) |
+| **Backend** | Node.js native HTTP (no framework), port 3500 |
+| **Structured DB** | nDB (Rust-based JSON Lines document store) |
+| **Vector DB** | nVDB (Rust-based vector DB, exact search) |
+| **Embedding** | Gateway `/v1/embeddings` (Qwen3-Embedding-4B via OpenRouter, 2560d) |
+| **Communication** | WebSocket (JSON-RPC 2.0) to gateway + REST to backend |
+| **Logging** | nLogger (JSON Lines structured logger) |
 | **Markdown** | markdown-it + DOMPurify + Prism.js |
-| **Server** | Any static file server (Python, Node, or VS Code Live Server) |
 
 ---
 
@@ -35,31 +39,38 @@ LLM Gateway Chat is a **pure frontend vanilla JavaScript client** designed to in
 │   ├── css/
 │   │   └── chat.css           # Application styles
 │   └── js/
-│       ├── chat.js            # Main controller (UI, event handling)
+│       ├── chat.js            # Main controller (UI, event handling, archive tools)
 │       ├── client-sdk.js      # GatewayClient (WebSocket/REST SDK)
+│       ├── api-client.js      # BackendClient (REST to Node backend)
+│       ├── storage.js         # localStorage/IndexedDB fallback
 │       ├── conversation.js    # Conversation state management
-│       ├── chat-history.js    # Multi-conversation history
+│       ├── chat-history.js    # Multi-conversation history + backend sync
 │       ├── mcp-client.js      # MCP tool client (SSE connections)
 │       ├── image-store.js     # IndexedDB image storage
 │       ├── markdown.js        # Markdown rendering with syntax highlight
-│       └── config.js          # User configuration (gateway URL, defaults)
-├── chat/vendor/             # Vendored dependencies + update scripts
-│   ├── markdown-it.js
-│   ├── markdown-it-prism.js
-│   ├── prism.js / prism.css
-│   └── purify.js
+│       └── config.js          # User configuration (gateway URL, backend toggle)
+├── chat/vendor/               # Vendored dependencies + update scripts
 ├── nui_wc2/                   # NUI Web Components (Git submodule)
-│   ├── NUI/nui.js             # Core library
-│   └── NUI/css/nui-theme.css  # Theme variables
+├── lib/                       # Shared libraries
+│   ├── ndb/napi/              # nDB Node bindings
+│   ├── nvdb/napi/             # nVDB Node bindings
+│   └── nlogger-cjs.js         # nLogger CJS bridge
+├── server/                    # Node.js backend
+│   ├── server.js              # HTTP server (port 3500), REST API, search, embeddings
+│   ├── embed.js               # Bulk embedding pipeline
+│   ├── migrate.js             # NeDB → nDB migration
+│   ├── migrate-v2.js          # Per-message → conversation doc migration
+│   ├── heal-embed.js          # Backfill missing embeddings
+│   ├── config.json            # Server configuration
+│   ├── logs/                  # JSON Lines log files (gitignored)
+│   └── data/                  # nDB + nVDB database files (gitignored)
 ├── docs/                      # Documentation
-│   ├── api_rest.md            # REST API documentation
-│   ├── api_websocket.md       # WebSocket API documentation
-│   ├── MCP_TOOL_INTEGRATION.md # MCP architecture guide
-│   ├── features_backlog.md    # Feature tracking
-│   └── dev_plan_edit.md       # Implementation plans
-├── package.json               # Minimal metadata (no runtime deps)
-├── start.py                   # Python HTTP server with CORS
-└── update-vendor.js           # Script to sync vendor files from WebAdmin
+│   ├── api_rest.md
+│   ├── api_websocket.md
+│   ├── dev_plan_refactor.md
+│   ├── features_backlog.md
+│   └── handover_*.md
+└── package.json               # Minimal metadata
 ```
 
 ---
@@ -68,40 +79,46 @@ LLM Gateway Chat is a **pure frontend vanilla JavaScript client** designed to in
 
 ### Prerequisites
 
-1. A running **LLM Gateway backend** instance (default: `http://localhost:3400`)
-2. Any static HTTP server
+1. A running **LLM Gateway backend** instance (default: `http://192.168.0.100:3400`)
+2. Node.js v24+
 
 ### Configuration
 
-Edit `chat/js/config.js` before launching:
+Edit `server/config.json` for backend settings and `chat/js/config.js` for frontend:
 
 ```javascript
+// chat/js/config.js
 window.CHAT_CONFIG = {
-    gatewayUrl: 'http://localhost:3400',   // Your gateway URL
-    defaultModel: '',                       // Optional: auto-select model
-    defaultTemperature: 0.7,               // Default temperature (0-2)
-    defaultMaxTokens: null,                // Optional max tokens
+    gatewayUrl: 'http://192.168.0.100:3400',
+    enableBackend: true,
+    backendUrl: 'http://localhost:3500',
+    defaultModel: '',
+    defaultTemperature: 0.7,
+    defaultMaxTokens: null,
 };
+```
+
+```json
+// server/config.json
+{
+    "port": 3500,
+    "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
+    "embedDims": 2560,
+    "embedMaxTokens": 30000,
+    "embedBatchTokenLimit": 29000
+}
 ```
 
 ### Start Commands
 
-**Option 1: Python (recommended)**
 ```bash
-python start.py [PORT]     # Default port 8080
-```
+# Start the backend (serves static files + API)
+node server/server.js
+# or
+npm start
 
-**Option 2: Node.js**
-```bash
-npx serve -l 8080
+# Navigate to http://localhost:3500/chat/
 ```
-
-**Option 3: Python one-liner**
-```bash
-python -m http.server 8080
-```
-
-Then navigate to: `http://localhost:8080/chat/`
 
 ---
 
@@ -113,7 +130,14 @@ Then navigate to: `http://localhost:8080/chat/`
 ┌─────────────┐      WebSocket       ┌─────────────┐      HTTP      ┌─────────────┐
 │   Chat UI   │ ◄──────────────────► │  LLM Gateway │ ◄───────────► │   LLM API   │
 │  (Browser)  │    (JSON-RPC 2.0)    │  (Backend)   │               │  (Provider) │
-└──────┬──────┘                      └─────────────┘               └─────────────┘
+└──────┬──────┘                      └──────┬──────┘               └─────────────┘
+       │                                    │
+       │ REST (port 3500)                   │ /v1/embeddings
+       ▼                                    ▼
+┌─────────────┐                    ┌─────────────┐
+│ Chat Backend│◄──── nDB/nVDB ───►│ Rust DBs    │
+│ (Node.js)   │                    │ (portable)  │
+└─────────────┘                    └─────────────┘
        │
        │ SSE (EventSource)
        ▼
@@ -126,10 +150,11 @@ Then navigate to: `http://localhost:8080/chat/`
 
 | Module | Purpose |
 |--------|---------|
-| `chat.js` | UI controller, event handlers, message rendering, streaming logic |
+| `chat.js` | UI controller, event handlers, message rendering, streaming logic, archive tools |
 | `client-sdk.js` | `GatewayClient` class - WebSocket connection, JSON-RPC protocol, auto-reconnect |
-| `conversation.js` | `Conversation` class - message history, versioning, API message formatting |
-| `chat-history.js` | `ChatHistory` class - multi-conversation management, localStorage persistence |
+| `api-client.js` | `BackendClient` class - REST calls to Node backend (/api/chats, /api/search) |
+| `conversation.js` | `Conversation` class - message history, versioning, API message formatting, backend sync |
+| `chat-history.js` | `ChatHistory` class - multi-conversation management, backend CRUD, localStorage fallback |
 | `mcp-client.js` | `MCPClient` class - SSE connections to MCP servers, tool registry, execution |
 | `image-store.js` | `ImageStore` class - IndexedDB storage for image attachments |
 | `markdown.js` | `renderMarkdown()` - markdown-it with Prism highlighting, DOMPurify sanitization |
@@ -184,11 +209,16 @@ Key variables:
 
 | Data Type | Storage | Key |
 |-----------|---------|-----|
-| Conversation history | localStorage | `chat-conversation-${chatId}` |
-| Chat list metadata | localStorage | `chat-history-index` |
+| Sessions | nDB | `_type: 'session'`, `id: chat_xxx` |
+| Conversation messages | nDB | `_type: 'conversation'`, `id: chat_xxx`, inline `messages` array |
+| Embedding vectors | nVDB | `chatId` + `msgIdx` payload, keyed by message ID |
+| Conversation history (fallback) | localStorage | `chat-conversation-${chatId}` |
+| Chat list metadata (fallback) | localStorage | `chat-history-index` |
 | User preferences | localStorage | `chat-user-*` |
 | MCP server config | localStorage | `mcp-servers`, `mcp-enabledTools` |
 | Image attachments | IndexedDB | `chat-images` store |
+
+**Data model**: One conversation document per session. Messages are an inline array indexed by `idx`. nVDB stores vectors keyed by message ID with `{ chatId, msgIdx }` payload for back-reference.
 
 ### MCP Tool Execution (Frontend-Driven)
 

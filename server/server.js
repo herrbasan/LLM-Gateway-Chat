@@ -861,7 +861,7 @@ server.listen(PORT, () => {
       const m = c.messages[idx];
       const needsEmbed = m.embedStatus !== 'embedded' && m.embedStatus !== 'ready';
       const isStale = (now - new Date(m.createdAt).getTime()) > STALE_THRESHOLD;
-      if (needsEmbed || isStale) {
+      if (needsEmbed && isStale) {
         staleMessages.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
       }
     }
