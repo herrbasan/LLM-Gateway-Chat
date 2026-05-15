@@ -26,9 +26,10 @@ export class Conversation {
         return 'ex_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     }
 
-    _syncMessage(role, content, model = null, exchangeId = null, metadata = null) {
+    _syncMessage(role, content, model = null, exchangeId = null, metadata = null, attachments = null) {
         if (!_USE_BACKEND || !backendClient.apiKey || !this.sessionId) return;
         const body = { role, content, model };
+        if (attachments) body.attachments = attachments;
         if (metadata) Object.assign(body, metadata);
         console.log('[Conversation] Syncing to backend:', role, 'sessionId:', this.sessionId);
         backendClient.sendMessage(this.sessionId, body)
@@ -136,22 +137,31 @@ export class Conversation {
             systemPrompt: '' // Will be set when sending to gateway
         };
         
-        // Store full images in IndexedDB
+        // Store full images in backend (disk), keep original dataUrl in memory for LLM submission
         if (attachments.length > 0) {
-            await imageStore.save(exchange.id, attachments);
-            // Store with blobUrl for display, getDataUrl for API
-            exchange.user.attachments = attachments.map(att => ({
-                name: att.name,
-                type: att.type,
-                hasImage: !!att.dataUrl,
-                dataUrl: att.dataUrl,  // Original dataUrl for immediate API use
-                blobUrl: att.dataUrl   // Use dataUrl as blobUrl for newly added images
-            }));
+            const savedFiles = await imageStore.save(exchange.id, attachments);
+            exchange.user.attachments = attachments.map((att, idx) => {
+                const savedUrl = (savedFiles && savedFiles[idx] && savedFiles[idx].url)
+                    ? savedFiles[idx].url
+                    : att.dataUrl;
+                return {
+                    name: att.name,
+                    type: att.type,
+                    hasImage: !!att.dataUrl,
+                    dataUrl: savedUrl,          // server URL — persisted to DB
+                    url: savedUrl,              // alias for display
+                    blobUrl: savedUrl,          // alias for display
+                    _origDataUrl: att.dataUrl   // original base64 — memory only, used for LLM submission
+                };
+            });
         }
         
         this.exchanges.push(exchange);
         this.save();
-        this._syncMessage('user', contentWithTimestamp, null, exchange.id);
+        this._syncMessage('user', contentWithTimestamp, null, exchange.id, null,
+            exchange.user?.attachments?.map(a => ({
+                name: a.name, type: a.type, dataUrl: a.dataUrl
+            })) || null);
         return exchange.id;
     }
 
@@ -347,7 +357,7 @@ export class Conversation {
         return sanitized;
     }
 
-    getMessagesForApi(systemPrompt = '') {
+    async getMessagesForApi(systemPrompt = '') {
         const rawMessages = [];
         
         // Add system prompt if provided
@@ -466,16 +476,25 @@ export class Conversation {
                 const cleanUserContent = this._stripExtraTimestamps(exchange.user?.content || '');
 
                 if (validAttachments.length > 0) {
-                    // Multimodal content - text first, then images
+                    // Resolve all image URLs asynchronously first,
+                    // then build the content array (await can't be inside .map())
+                    // Priority: _origDataUrl (current exchange) > getDataUrl() (loaded) > dataUrl (fallback)
+                    const resolvedUrls = await Promise.all(validAttachments.map(att =>
+                        att._origDataUrl
+                            ? Promise.resolve(att._origDataUrl)
+                            : att.getDataUrl
+                                ? att.getDataUrl()
+                                : Promise.resolve(att.dataUrl)
+                    ));
                     const content = [
                         {
                             type: 'text',
                             text: cleanUserContent
                         },
-                        ...validAttachments.map(att => ({
+                        ...validAttachments.map((att, idx) => ({
                             type: 'image_url',
                             image_url: {
-                                url: att.getDataUrl ? att.getDataUrl() : att.dataUrl,
+                                url: resolvedUrls[idx],
                                 detail: 'auto'
                             }
                         }))
@@ -505,20 +524,11 @@ export class Conversation {
 
                     if (exchange.assistant.reasoning_content) {
                         msg.reasoning_content = exchange.assistant.reasoning_content;
-                        if (exchange.assistant.thinking_signature) {
-                            msg.thinking_blocks = [{
-                                type: 'thinking',
-                                thinking: exchange.assistant.reasoning_content,
-                                signature: exchange.assistant.thinking_signature
-                            }];
-                        } else {
-                            // Anthropic/Deepseek models via specific gateways might require thinking even without signature
-                            msg.thinking_blocks = [{
-                                type: 'thinking',
-                                thinking: exchange.assistant.reasoning_content,
-                                signature: ''
-                            }];
-                        }
+                    }
+
+                    // DeepSeek thinking mode requires thinking_signature to be echoed back
+                    if (exchange.assistant.thinking_signature) {
+                        msg.thinking_signature = exchange.assistant.thinking_signature;
                     }
 
                     if (exchange.assistant.tool_calls) {
@@ -594,7 +604,20 @@ export class Conversation {
             }
         }
 
-        console.log('[getMessagesForApi] Final exact API payload:', JSON.stringify(messages, null, 2));
+        // Propagate thinking_signature forward across multi-step tool call chains.
+        // DeepSeek thinking mode requires thinking_signature from the first
+        // thinking response to be echoed on ALL subsequent assistant messages
+        // in the same tool call chain. Without this, the API returns 400.
+        let lastThinkingSignature = null;
+        for (const msg of messages) {
+            if (msg.role === 'assistant') {
+                if (msg.thinking_signature) {
+                    lastThinkingSignature = msg.thinking_signature;
+                } else if (lastThinkingSignature && msg.tool_calls) {
+                    msg.thinking_signature = lastThinkingSignature;
+                }
+            }
+        }
 
         return messages;
     }
@@ -604,8 +627,8 @@ export class Conversation {
     // ============================================
 
     async save() {
-        // Strip dataUrl and systemPrompt before saving
-        // (images are in IndexedDB via imageStore, systemPrompt is re-computed on load)
+        // Strip systemPrompt and memory-only fields before saving
+        // Keep dataUrl — it's now a lightweight server URL, not base64
         const exchangesToSave = this.exchanges.map(ex => {
             const base = { ...ex };
             // Omit systemPrompt - it's re-computed and not needed after load
@@ -614,12 +637,19 @@ export class Conversation {
             if (ex.user?.attachments) {
                 base.user = {
                     ...ex.user,
-                    attachments: ex.user.attachments.map(att => ({
-                        name: att.name,
-                        type: att.type,
-                        hasImage: att.hasImage
-                        // dataUrl is intentionally omitted
-                    }))
+                    attachments: ex.user.attachments.map(att => {
+                        // Preserve only what we need in the DB:
+                        // dataUrl (server URL), name, type, hasImage
+                        const saved = {
+                            name: att.name,
+                            type: att.type,
+                            hasImage: att.hasImage,
+                            dataUrl: att.dataUrl || '',
+                            url: att.dataUrl || '',
+                            blobUrl: att.dataUrl || ''
+                        };
+                        return saved;
+                    })
                 };
             }
             return base;
@@ -780,8 +810,10 @@ export class Conversation {
     }
 
     async clear() {
-        // Clear IndexedDB images
-        await imageStore.clear();
+        // Clear server images for all exchanges
+        for (const ex of this.exchanges) {
+            await imageStore.delete(ex.id);
+        }
         this.exchanges = [];
         const conversationId = this.storageKey.replace('chat-conversation-', '');
         storage.deleteConversation(conversationId);

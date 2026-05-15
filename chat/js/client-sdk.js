@@ -472,10 +472,12 @@ export class GatewayClient extends EventEmitter {
                 yield { type: 'delta', tool_calls: delta.tool_calls };
               }
 
+              // Capture _thinking_signature from ANY chunk, not just the final one
+              if (dataObj._thinking_signature) {
+                thinkingSignature = dataObj._thinking_signature;
+              }
+
               if (dataObj?.choices?.[0]?.finish_reason) {
-                if (dataObj._thinking_signature) {
-                  thinkingSignature = dataObj._thinking_signature;
-                }
                 yield { 
                   type: 'done', 
                   finish_reason: dataObj.choices[0].finish_reason,

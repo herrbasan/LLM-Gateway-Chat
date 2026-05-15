@@ -44,7 +44,12 @@ export class ChatHistory {
         if (USE_BACKEND && backendClient.apiKey) {
             for (const conv of this.conversations) {
                 if (conv._dirty) {
-                    backendClient.updateSession(conv.sessionId || conv.id, { pinned: !!conv.pinned }).catch(() => {});
+                    backendClient.updateSession(conv.sessionId || conv.id, { 
+                        pinned: !!conv.pinned,
+                        title: conv.title,
+                        model: conv.model,
+                        systemPrompt: conv.systemPrompt
+                    }).catch(() => {});
                     conv._dirty = false;
                 }
             }
@@ -62,6 +67,7 @@ export class ChatHistory {
                 updatedAt: !isNaN(updatedAt) ? updatedAt : Date.now(),
             messageCount: session.messageCount || 0,
             model: session.model || '',
+            systemPrompt: session.systemPrompt || '',
             mode: session.mode || 'direct',
             pinned: session.pinned || false
         };
@@ -81,7 +87,8 @@ export class ChatHistory {
             createdAt: Date.now(),
             updatedAt: Date.now(),
             messageCount: 0,
-            model: ''
+            model: '',
+            systemPrompt: ''
         };
 
         this.conversations.unshift(conversation);

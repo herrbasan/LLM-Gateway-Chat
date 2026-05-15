@@ -46,7 +46,7 @@ export const arenaStorage = {
             topic: s.title || s.arenaConfig?.topic || '',
             participants: [s.arenaConfig?.modelA || '', s.arenaConfig?.modelB || ''],
             messages: msgs.map(m => ({
-                speaker: m.speaker || m.role || '',
+                speaker: m.speaker || '',
                 role: m.role || 'assistant',
                 content: m.content || '',
                 model: m.model || null
@@ -59,25 +59,18 @@ export const arenaStorage = {
     async saveSession(id, sessionData) {
         const bc = _getClient();
         try {
-            const existing = await bc.getSession(id);
-            if (!existing?.session) {
-                await bc.createSession({
-                    title: sessionData.topic || 'Arena Session',
-                    mode: 'arena',
-                    model: sessionData.participants?.[0] || null,
-                    arenaConfig: sessionData.settings || {
-                        modelA: sessionData.participants?.[0] || '',
-                        modelB: sessionData.participants?.[1] || ''
-                    }
-                });
-            }
-        } catch {
-            await bc.createSession({
+            const created = await bc.createSession({
                 title: sessionData.topic || 'Arena Session',
                 mode: 'arena',
                 model: sessionData.participants?.[0] || null,
-                arenaConfig: sessionData.settings || {}
+                arenaConfig: sessionData.settings || {
+                    modelA: sessionData.participants?.[0] || '',
+                    modelB: sessionData.participants?.[1] || ''
+                }
             });
+            return created?.id || id;
+        } catch {
+            return id;
         }
     },
 

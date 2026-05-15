@@ -346,7 +346,128 @@ const routes = {
     });
   },
 
-  'GET /api/server-type': async (req, res) => {
+  
+    // --------------------------------------------------------
+    // File Attachments (Images)
+    // --------------------------------------------------------
+    
+    'PUT /api/chat-files/:exchangeId': async (req, res, { exchangeId }) => {
+      try {
+        const body = await readBody(req);
+        if (!body || !body.files || !Array.isArray(body.files)) {
+          return json(res, { error: 'Invalid files payload' }, 400);
+        }
+        
+        const exPath = require('path').join(FILES_DIR, exchangeId);
+        await fs.promises.mkdir(exPath, { recursive: true });
+        
+        const savedFiles = [];
+        for (let i = 0; i < body.files.length; i++) {
+          const file = body.files[i];
+          const extMap = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
+          const ext = extMap[file.type] || 'bin';
+          const filename = `ex_${exchangeId}_${i}.${ext}`;
+          
+          await fs.promises.writeFile(
+            require('path').join(exPath, filename), 
+            Buffer.from(file.data, 'base64')
+          );
+          
+          savedFiles.push({
+            name: file.name,
+            type: file.type,
+            url: `/files/${exchangeId}/${filename}`
+          });
+        }
+        json(res, { success: true, files: savedFiles });
+      } catch (err) {
+        logger.error('Failed to save files:', err.message);
+        json(res, { error: 'Failed to save files' }, 500);
+      }
+    },
+
+    'GET /api/chat-files/:exchangeId': async (req, res, { exchangeId }) => {
+      try {
+        const exPath = require('path').join(FILES_DIR, exchangeId);
+        if (!fs.existsSync(exPath)) {
+          return json(res, []);
+        }
+        
+        const files = await fs.promises.readdir(exPath);
+        const result = files.map(file => {
+          let type = 'application/octet-stream';
+          if (file.endsWith('.png')) type = 'image/png';
+          else if (file.endsWith('.jpg') || file.endsWith('.jpeg')) type = 'image/jpeg';
+          else if (file.endsWith('.gif')) type = 'image/gif';
+          else if (file.endsWith('.webp')) type = 'image/webp';
+          else if (file.endsWith('.svg')) type = 'image/svg+xml';
+          
+          return {
+            url: `/files/${exchangeId}/${file}`,
+            name: file,
+            type
+          };
+        });
+        json(res, result);
+      } catch (err) {
+        logger.error('Failed to load files:', err.message);
+        json(res, { error: 'Failed to load files' }, 500);
+      }
+    },
+
+    'DELETE /api/chat-files/:exchangeId': async (req, res, { exchangeId }) => {
+      try {
+        const exPath = require('path').join(FILES_DIR, exchangeId);
+        if (fs.existsSync(exPath)) {
+          await fs.promises.rm(exPath, { recursive: true, force: true });
+        }
+        json(res, { success: true });
+      } catch (err) {
+        logger.error('Failed to delete files:', err.message);
+        json(res, { error: 'Failed to delete files' }, 500);
+      }
+    },
+
+    'GET /api/files': async (req, res) => {
+      try {
+        if (!fs.existsSync(FILES_DIR)) {
+          return json(res, { entries: 0, bytes: 0, mb: '0.00' });
+        }
+        
+        let totalBytes = 0;
+        let fileCount = 0;
+        
+        const dirs = await fs.promises.readdir(FILES_DIR);
+        for (const dir of dirs) {
+          const dirPath = require('path').join(FILES_DIR, dir);
+          const stat = await fs.promises.stat(dirPath);
+          if (stat.isDirectory()) {
+            const files = await fs.promises.readdir(dirPath);
+            for (const file of files) {
+              const fStat = await fs.promises.stat(require('path').join(dirPath, file));
+              if (fStat.isFile()) {
+                fileCount++;
+                totalBytes += fStat.size;
+              }
+            }
+          } else if (stat.isFile()) {
+             fileCount++;
+             totalBytes += stat.size;
+          }
+        }
+        
+        json(res, { 
+          entries: fileCount, 
+          bytes: totalBytes, 
+          mb: (totalBytes / 1024 / 1024).toFixed(2) 
+        });
+      } catch (err) {
+        logger.error('Failed to stats files:', err.message);
+        json(res, { entries: 0, bytes: 0, mb: '0.00' });
+      }
+    },
+
+    'GET /api/server-type': async (req, res) => {
     json(res, { type: 'node-backend' });
   },
   
@@ -417,6 +538,7 @@ const routes = {
       title: body.title || 'New Chat',
       mode: body.mode || 'direct',
       model: body.model || null,
+      systemPrompt: body.systemPrompt || '',
       arenaConfig: body.arenaConfig || null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -455,6 +577,9 @@ const routes = {
     const session = sessions.find(s => s._type === 'session' && s.userId === user.id);
     if (!session) { json(res, { error: 'Not found' }, 404); return; }
     if (body.pinned !== undefined) session.pinned = !!body.pinned;
+    if (body.title !== undefined) session.title = body.title;
+    if (body.model !== undefined) session.model = body.model;
+    if (body.systemPrompt !== undefined) session.systemPrompt = body.systemPrompt;
     session.updatedAt = new Date().toISOString();
     db.update(session._id, session);
     json(res, session);

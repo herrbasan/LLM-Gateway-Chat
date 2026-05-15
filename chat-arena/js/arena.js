@@ -264,16 +264,26 @@ class Arena {
     async _saveToStorage() {
         try {
             const sessionData = this.exportJSON();
-            await arenaStorage.saveSession(this.id, sessionData);
-            await this._updateHistory(sessionData);
+            const backend = this._getBackendClient();
+
+            // Use the backend ID for all storage operations once we have one
+            const storageId = this._backendChatId || this.id;
+
+            if (!this._backendChatId) {
+                // First save: create the backend session, get the real ID
+                const createdId = await arenaStorage.saveSession(storageId, sessionData);
+                if (createdId && createdId !== storageId) {
+                    this._backendChatId = createdId;
+                }
+            }
 
             // Sync new messages to backend for realtime embedding
-            const backend = this._getBackendClient();
+            const effectiveId = this._backendChatId || this.id;
             if (backend) {
                 const syncedCount = this._lastSyncedCount || 0;
                 const newMessages = sessionData.messages.slice(syncedCount);
                 for (const msg of newMessages) {
-                    backend.sendMessage(this.id, {
+                    backend.sendMessage(effectiveId, {
                         role: msg.role || 'assistant',
                         content: msg.content || '',
                         speaker: msg.speaker || (msg.role === 'system' ? 'moderator' : ''),
@@ -283,6 +293,7 @@ class Arena {
                 this._lastSyncedCount = sessionData.messages.length;
             }
 
+            await this._updateHistory(sessionData, effectiveId);
             this.onSave();
         } catch (err) {
             console.error('Failed to save arena session:', err);
@@ -297,13 +308,13 @@ class Arena {
         return null;
     }
 
-    async _updateHistory(sessionData) {
+    async _updateHistory(sessionData, effectiveId) {
         try {
             const history = await arenaStorage.loadHistory();
-            const existingIndex = history.findIndex(h => h.id === this.id);
+            const existingIndex = history.findIndex(h => h.id === (effectiveId || this.id));
 
             const entry = {
-                id: this.id,
+                id: effectiveId || this.id,
                 sessionId: this.sessionId,
                 topic: sessionData.topic,
                 title: sessionData.summary?.title || '',
@@ -341,7 +352,7 @@ class Arena {
         // Each participant gets unique session ID to avoid backend cache collisions
         
         this.participantA = new Participant({
-            name: participantAConfig.name || 'Model A',
+            name: participantAConfig.name || participantAConfig.modelName || 'Model A',
             modelName: participantAConfig.modelName,
             gatewayUrl: this.gatewayUrl,
             systemPrompt: participantAConfig.systemPrompt,
@@ -351,7 +362,7 @@ class Arena {
         });
 
         this.participantB = new Participant({
-            name: participantBConfig.name || 'Model B',
+            name: participantBConfig.name || participantBConfig.modelName || 'Model B',
             modelName: participantBConfig.modelName,
             gatewayUrl: this.gatewayUrl,
             systemPrompt: participantBConfig.systemPrompt,
@@ -618,6 +629,7 @@ class Arena {
             version: 1,
             id: this.id,
             sessionId: this.sessionId,
+            backendChatId: this._backendChatId || '',
             exportedAt: new Date().toISOString(),
             topic: this.messages[0]?.content.replace('Topic: ', '').split('\n\n[')[0] || '', // Extract just the topic text
             participants: [this.participantA?.modelName, this.participantB?.modelName],
@@ -719,6 +731,30 @@ class Arena {
             content: m.content,
             isStreaming: false
         }));
+
+        // Restore backend chat ID mapping for embedding
+        if (data.backendChatId) {
+            this._backendChatId = data.backendChatId;
+        }
+
+        // Backfill empty speaker values for old sessions loaded from backend
+        // where speaker wasn't stored. Non-moderator messages alternate between
+        // participant A and B. Use stored participant names to fill gaps.
+        const nonModMsgs = this.messages.filter(m => m.speaker !== 'moderator');
+        const speakerNames = data.participantNames || data.participants || [];
+        const aName = speakerNames[0] || 'Model A';
+        const bName = speakerNames[1] || 'Model B';
+        const hasAnyMatch = nonModMsgs.some(m => m.speaker === aName || m.speaker === bName);
+        if (!hasAnyMatch) {
+            let aTurn = true;
+            for (const m of nonModMsgs) {
+                if (!m.speaker) {
+                    m.speaker = aTurn ? aName : bName;
+                }
+                if (m.speaker === aName) aTurn = false;
+                else if (m.speaker === bName) aTurn = true;
+            }
+        }
 
         // Calculate current turn (number of assistant messages)
         const currentTurn = this.messages.filter(m => m.speaker !== 'moderator').length;
