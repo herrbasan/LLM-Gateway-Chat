@@ -3,16 +3,10 @@
 // No localStorage, no IndexedDB fallback.
 // ============================================
 
-import { BackendClient } from '../../chat/js/api-client.js';
-
-let _client = null;
+import { backendClient } from '../../chat/js/api-client.js';
 
 function _getClient() {
-    if (!_client) {
-        const config = window.CHAT_CONFIG || {};
-        _client = new BackendClient(config.backendUrl || 'http://localhost:3500', config.backendApiKey || '');
-    }
-    return _client;
+    return backendClient;
 }
 
 async function _listArenas() {

@@ -1,10 +1,18 @@
 // ============================================
-// Migration Script: NeDB → nDB + nVDB
+// migrate-import-nedb — STEP 1 of 2
+// Import legacy NeDB backups into nDB (per-message documents)
 // ============================================
-// Run:
-//   node server/migrate.js                                    # Local only
-//   node server/migrate.js --remote <UNC_path>                # Local + remote
-//   node server/migrate.js --dry-run                          # Validate only
+// MIGRATION PIPELINE (run in order):
+//   1. migrate-import-nedb.js      ← this script
+//   2. migrate-pack-conversations.js
+//   3. embed.js --gateway
+//
+// Usage:
+//   node server/migrate-import-nedb.js                                    # Local only
+//   node server/migrate-import-nedb.js --remote <UNC_path>                # Local + remote
+//   node server/migrate-import-nedb.js --dry-run                          # Validate only
+//
+// Status: DATA ALREADY MIGRATED (2026-05-13). Only needed for disaster recovery re-import.
 // ============================================
 
 const fs = require('fs');
@@ -18,13 +26,13 @@ const { Database: nDB } = require('../lib/ndb/napi');
 // ============================================
 
 const DATA_DIR = path.join(__dirname, 'data');
-const NDB_PATH = path.join(DATA_DIR, 'chat_app');
+const NDB_PATH = path.join(DATA_DIR, 'chat_app', 'data.jsonl');
 const FILES_DIR = path.join(DATA_DIR, 'files');
 
 const MIGRATION_USER = {
     _type: 'user',
     id: 'user-migrated-default',
-    apiKey: 'migrated-' + crypto.randomUUID(),
+    apiKey: 'migrated-754e711f-15fe-4d9d-82a0-7efa446418dd',
     displayName: 'Legacy User',
     createdAt: new Date().toISOString(),
     isMigrated: true
@@ -446,15 +454,10 @@ async function migrate() {
     ensureDir(FILES_DIR);
 
     // Source paths
-    const localStoragePath = path.join(__dirname, 'data', 'storage.db');
-    const localFilesDir = path.join(__dirname, 'data', 'files');
-    let remoteStoragePath = null;
-    let remoteFilesDir = null;
-
-    if (opts.remotePath) {
-        remoteStoragePath = path.join(opts.remotePath, 'storage.db');
-        remoteFilesDir = path.join(opts.remotePath, 'files');
-    }
+    const localStoragePath = path.join('D:', 'Work', 'CHAT_BACKUP', '20260511_Coolkid', 'data', 'storage.db');
+    const localFilesDir = path.join('D:', 'Work', 'CHAT_BACKUP', '20260511_Coolkid', 'data', 'files');
+    let remoteStoragePath = path.join('D:', 'Work', 'CHAT_BACKUP', '20260511_Badkid', 'data', 'storage.db');
+    let remoteFilesDir = path.join('D:', 'Work', 'CHAT_BACKUP', '20260511_Badkid', 'data', 'files');
 
     // Validate sources
     if (!fs.existsSync(localStoragePath)) {

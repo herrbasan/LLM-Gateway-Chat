@@ -2,12 +2,12 @@
     "port": 3500,
     "logsDir": "server/logs",
     "logRetentionDays": 1,
-    "ndbPath": "server/data/chat_app",
+    "ndbPath": "server/data/chat_app/data.jsonl",
     "nvdbDir": "server/data/nvdb",
     "filesDir": "server/data/files",
     "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
     "embedDims": 2560,
-    "embedMaxTokens": 30000,
+    "embedMaxTokens": 25000,
     "embedTokRatio": 2.5,
     "embedBatchTokenLimit": 29000
 }

@@ -4,7 +4,7 @@
 
 // Reuse existing utilities (import only, no modifications)
 import { GatewayClient } from '../../chat/js/client-sdk.js';
-import { BackendClient } from '../../chat/js/api-client.js';
+import { backendClient } from '../../chat/js/api-client.js';
 import { renderMarkdown, parseThinking } from '../../chat/js/markdown.js';
 import { getPlainText } from '../../chat/js/tts-utils.js';
 import { arenaStorage } from './storage.js';
@@ -290,13 +290,11 @@ class Arena {
     }
 
     _getBackendClient() {
-        if (!this._backendClientCached) {
-            const config = window.CHAT_CONFIG || {};
-            if (config.enableBackend && config.backendUrl && config.backendApiKey) {
-                this._backendClientCached = new BackendClient(config.backendUrl, config.backendApiKey);
-            }
+        const config = window.CHAT_CONFIG || {};
+        if (config.enableBackend) {
+            return backendClient;
         }
-        return this._backendClientCached || null;
+        return null;
     }
 
     async _updateHistory(sessionData) {

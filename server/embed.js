@@ -43,7 +43,7 @@ const MODEL_HEADERS = {
     'X-Model-BatchSize': '32000'
 };
 
-const NDB_PATH = process.env.CHAT_NDB_PATH || cfg.ndbPath || 'server/data/chat_app';
+const NDB_PATH = process.env.CHAT_NDB_PATH || cfg.ndbPath || path.join(__dirname, 'data', 'chat_app', 'data.jsonl');
 const NVDB_DIR = process.env.CHAT_NVDB_DIR || cfg.nvdbDir || 'server/data/nvdb';
 const PROGRESS_FILE = path.join(path.dirname(NDB_PATH), 'embed-progress.json');
 const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims) || 2560;
@@ -128,7 +128,8 @@ async function fetchRetry(url, options, retries) {
     let lastErr;
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
-            const res = await fetch(url, { ...options, body: JSON.stringify(options.body) });
+            // Add a generous 30-minute timeout for massive 25k-token chunks
+            const res = await fetch(url, { ...options, signal: AbortSignal.timeout(30 * 60 * 1000), body: JSON.stringify(options.body) });
             if (!res.ok) {
                 const err = await res.text().catch(() => 'unknown');
                 throw new Error(`${res.status}: ${err.slice(0, 200)}`);
@@ -222,8 +223,18 @@ async function run() {
     let col;
     try {
         col = vdb.getCollection('embeddings');
-    } catch {
+    } catch (err) {
+        console.error('getCollection failed:', err);
         col = vdb.createCollection('embeddings', EMBEDDING_DIMS, { durability: 'buffered' });
+    }
+
+    const stats = col.stats || { memtableDocs: 0, totalSegmentDocs: 0 };
+    const vectorCount = stats.memtableDocs + stats.totalSegmentDocs;
+
+    // Check if vectors exist before doing full embed sync if not explicitly flagged to force.
+    if (vectorCount > 0 && !opts.resume && !opts.retryFailed && !opts.retruncate && !opts.dryRun) {
+        console.log('\nVectors already exist in collection. Aborting to prevent duplicates.');
+        process.exit(0);
     }
 
     const docs = db.iter();
@@ -299,25 +310,45 @@ async function run() {
     const batches = [];
     let currentBatch = [], currentTokens = 0;
 
-    for (const item of withText) {
-        if (item.tokEst > MAX_SINGLE_TEXT_TOKENS) {
-            item.text = middleTruncate(item.text, MAX_SINGLE_TEXT_TOKENS);
-            item.tokEst = Math.ceil(item.text.length / TOK_CHARS_RATIO);
-            logger.info('Truncated (middle-extract)', { msgId: item.msg.id.slice(-20), role: item.msg.toolName || item.msg.role, chars: item.text.length, estTok: item.tokEst }, 'Embed');
-        }
+    for (const originalItem of withText) {
+        let textToProcess = originalItem.text;
+        const maxChars = Math.floor(MAX_SINGLE_TEXT_TOKENS * TOK_CHARS_RATIO);
+        let splitIdx = 0;
+        let charCursor = 0;
 
-        if (currentBatch.length > 0 && currentTokens + item.tokEst > BATCH_TOKEN_LIMIT) {
-            batches.push(currentBatch);
-            currentBatch = [];
-            currentTokens = 0;
-        }
+        while (textToProcess.length > 0) {
+            let chunkText = textToProcess.slice(0, maxChars);
+            textToProcess = textToProcess.slice(maxChars);
+            
+            const chunkTokEst = Math.ceil(chunkText.length / TOK_CHARS_RATIO);
+            
+            const item = {
+                msg: originalItem.msg,
+                text: chunkText,
+                tokEst: chunkTokEst,
+                splitIdx: splitIdx++,
+                charOffset: charCursor,
+                isLastChunk: textToProcess.length === 0
+            };
+            charCursor += chunkText.length;
 
-        currentBatch.push(item);
-        currentTokens += item.tokEst;
+            if (item.splitIdx > 0) {
+                logger.info('Split huge message', { msgId: item.msg.id.slice(-20), splitIdx: item.splitIdx, chars: chunkText.length, estTok: chunkTokEst }, 'Embed');
+            }
+
+            if (currentBatch.length > 0 && currentTokens + item.tokEst > BATCH_TOKEN_LIMIT) {
+                batches.push(currentBatch);
+                currentBatch = [];
+                currentTokens = 0;
+            }
+
+            currentBatch.push(item);
+            currentTokens += item.tokEst;
+        }
     }
     if (currentBatch.length > 0) batches.push(currentBatch);
 
-    const totalTokEst = withText.reduce((s, t) => s + t.tokEst, 0);
+    const totalTokEst = batches.reduce((sum, batch) => sum + batch.reduce((s, b) => s + b.tokEst, 0), 0);
     logger.info('Batches', { count: batches.length, totalTokEst: (totalTokEst / 1000).toFixed(0) + 'k', limit: BATCH_TOKEN_LIMIT }, 'Embed');
 
     let embedded = 0;
@@ -360,25 +391,20 @@ async function run() {
 
             if (!opts.dryRun) {
                 for (let j = 0; j < batch.length; j++) {
-                    const m = batch[j].msg;
-                    col.insert(m.id, embeddings[j], JSON.stringify({
-                        chatId: m._sessionId, msgIdx: m.idx
+                    const b = batch[j];
+                    const m = b.msg;
+                    // Prevent ID collisions in nVDB for split messages
+                    const vectorId = b.splitIdx > 0 ? `${m.id}_${b.splitIdx}` : m.id;
+                    col.insert(vectorId, embeddings[j], JSON.stringify({
+                        chatId: m._sessionId, msgIdx: m.idx, chunk: b.splitIdx, charOffset: b.charOffset
                     }));
-                }
-                // Update embedStatus in conversation docs
-                const touchedConvs = new Set();
-                for (const b of batch) {
-                    touchedConvs.add(b.msg._sessionId);
-                    b.msg.embedStatus = 'embedded';
-                    b.msg.embedAttempts = 1;
-                }
-                for (const chatId of touchedConvs) {
-                    const conv = db.find('id', chatId).find(d => d._type === 'conversation');
-                    if (conv) db.update(conv._id, conv);
                 }
             }
 
-            for (const b of batch) progress[b.msg.id] = true;
+            for (const b of batch) {
+                // Only mark as fully complete if it is the final chunk
+                if (b.isLastChunk) progress[b.msg.id] = true;
+            }
             embedded += batch.length;
 
             col.flush();

@@ -58,10 +58,11 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 ├── server/                    # Node.js backend
 │   ├── server.js              # HTTP server (port 3500), REST API, search, embeddings
 │   ├── embed.js               # Bulk embedding pipeline
-│   ├── migrate.js             # NeDB → nDB migration
-│   ├── migrate-v2.js          # Per-message → conversation doc migration
-│   ├── heal-embed.js          # Backfill missing embeddings
+│   ├── migrate-import-nedb.js       # Import legacy NeDB backups → nDB (step 1 of 2)
+│   ├── migrate-pack-conversations.js # Repack per-message docs → conversation docs (step 2 of 2)
+│   ├── migrate-ndb-to-folder.js     # Flat .jsonl → folder-as-database (future, not yet needed)
 │   ├── config.json            # Server configuration
+│   ├── server.bat             # Windows convenience launcher
 │   ├── logs/                  # JSON Lines log files (gitignored)
 │   └── data/                  # nDB + nVDB database files (gitignored)
 ├── docs/                      # Documentation
@@ -222,14 +223,16 @@ Key variables:
 
 ### MCP Tool Execution (Frontend-Driven)
 
-Tool execution happens **entirely in the browser**:
+Tool execution happens **entirely in the browser** using the OpenAI-compatible `tool_calls` protocol:
 
 1. Frontend sends chat request with `tools` array and system prompt
-2. LLM responds with `__TOOL_CALL__({"name": "...", "args": {...}})` in text
-3. Frontend detects pattern, executes tool via `mcpClient.executeTool()`
-4. Result sent as new user message with `<tool_result>` XML
+2. Gateway streams `delta.tool_calls` events (OpenAI-compatible format: `[{id, type: 'function', function: {name, arguments}}]`)
+3. On `finish_reason: 'tool_calls'`, frontend aggregates all tool call deltas, executes each:
+   - **Local archive tools** (`chat_archive_*`) → direct REST calls to backend (`/api/search`, `/api/chats/:id`, `/api/arena`, `/api/references`)
+   - **MCP tools** → via `mcpClient.executeTool()` over SSE connections
+4. Results sent as `role: 'tool'` messages with `tool_call_id` matching the assistant's `tool_calls[].id`
 
-**Backend is NOT involved in tool execution** - it just forwards messages.
+**Backend is NOT involved in tool execution** — it only provides the archive REST API. Tool detection is fully native (no text parsing, no regex).
 
 ---
 

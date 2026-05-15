@@ -15,7 +15,7 @@ try {
 const PORT           = process.env.CHAT_PORT           || cfg.port              || 3500;
 const LOGS_DIR       = process.env.CHAT_LOGS_DIR       || cfg.logsDir           || 'server/logs';
 const LOG_RETENTION  = process.env.CHAT_LOG_RETENTION  || cfg.logRetentionDays  || 1;
-const NDB_PATH       = process.env.CHAT_NDB_PATH       || cfg.ndbPath           || 'server/data/chat_app';
+const NDB_PATH       = process.env.CHAT_NDB_PATH       || cfg.ndbPath           || 'server/data/chat_app/data.jsonl';
 const NVDB_DIR       = process.env.CHAT_NVDB_DIR       || cfg.nvdbDir           || 'server/data/nvdb';
 const FILES_DIR      = process.env.CHAT_FILES_DIR      || cfg.filesDir          || 'server/data/files';
 const EMBED_URL      = process.env.CHAT_EMBED_URL      || cfg.embedUrl          || 'http://192.168.0.100:3400/v1/embeddings';
@@ -76,6 +76,18 @@ console.timeEnd('nVDB.init');
 // ============================================
 // Startup reconciliation + maintenance
 // ============================================
+
+// Auto-compact the database to prevent append bloat
+setInterval(() => {
+  if (db) {
+    try {
+      db.compact();
+      logger.info('nDB compacted successfully', { sizeDocs: db.len() }, 'Server');
+    } catch (err) {
+      logger.error('nDB compact failed', err, {}, 'Server');
+    }
+  }
+}, 5 * 60 * 1000); // 5 minutes
 
 // One-time flush after startup
 setTimeout(() => {
@@ -143,6 +155,7 @@ setInterval(async () => {
     const item = pendingQueue.shift();
     await embedMessageAsync(item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
   }
+
   if (needsFlush > 0 && embeddingsCol) {
     try {
       const t0 = Date.now();
@@ -295,18 +308,8 @@ async function embedMessageAsync(msg, session, convNdbId, msgIdx) {
             }));
             needsFlush++;
 
-            // Update embed status on the message within the conversation doc
-            const conv = db.get(convNdbId);
-            if (conv && conv.messages && conv.messages[msgIdx]) {
-                conv.messages[msgIdx].embedStatus = 'embedded';
-                conv.messages[msgIdx].embedAttempts = attempt + 1;
-                conv.messages[msgIdx].embedError = null;
-                db.update(convNdbId, conv);
-            }
-
             L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: text.length, attempt: attempt + 1 }, 'Embed');
             return;
-
         } catch (err) {
             lastError = err;
 
