@@ -1,4 +1,4 @@
-﻿// ============================================
+// ============================================
 // LLM Gateway Chat - Main Controller
 // ============================================
 
@@ -591,7 +591,6 @@ function ensureVisionToggleUI() {
             useVisionAnalysis = e.target.checked;
             storage.setPref('mcp-vision-enabled', useVisionAnalysis).catch(() => {});
             updateVisionModeIndicator();
-            console.log('[Vision] MCP Vision toggle:', useVisionAnalysis ? 'ON (using MCP tools)' : 'OFF (direct to model)');
         });
     }
 }
@@ -622,7 +621,6 @@ function updateVisionModeIndicator() {
 // ============================================
 
 async function init() {
-    console.log('[Chat] Initializing...');
 
     // ---- Load chat history from IndexedDB ----
     await chatHistory.ready();
@@ -641,14 +639,11 @@ async function init() {
     
     // Get or create active conversation
     let activeId = await chatHistory.getActiveId();
-    console.log('[Chat Init] getActiveId() returned:', activeId, '| has in list:', activeId ? chatHistory.has(activeId) : 'N/A');
     if (!activeId || !chatHistory.has(activeId)) {
         activeId = await chatHistory.create();
-        console.log('[Chat Init] Created new chat with ID:', activeId);
     }
 
     currentChatId = activeId;
-    console.log('[Chat Init] Setting up conversation with ID:', currentChatId);
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
     await conversation.load();
 
@@ -662,7 +657,6 @@ async function init() {
     } else if (chatInfo) {
         // Old conversation without sessionId - generate and save one
         const newSessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-        console.log(`[Chat] Generated new session ID for old conversation: ${newSessionId}`);
         chatHistory.updateSessionId(currentChatId, newSessionId);
         client.setSessionId(newSessionId);
     }
@@ -706,7 +700,6 @@ async function init() {
         }
     });
 
-    console.log('[Chat] Ready');
 }
 
 async function applyDefaultConfig() {
@@ -973,13 +966,10 @@ async function loadModels() {
     try {
         const data = await client.getModels();
         models = data.data || [];
-        console.log('[Chat] Models loaded from gateway:', models.length, 'models');
         if (models.length > 0) {
-            console.log('[Chat] First model example:', JSON.stringify(models[0], null, 2));
         }
         populateModelSelect();
 
-        console.log('[Chat] Loaded models:', models.length);
     } catch (error) {
         console.error('[Chat] Failed to load models:', error);
         elements.modelSelect.innerHTML = '<option value="">Failed to load models</option>';
@@ -1060,7 +1050,6 @@ function populateModelSelect() {
         // Bind change event via NUI
         elements.modelSelect.addEventListener('nui-change', (e) => {
             currentModel = e.detail.values[0] || '';
-            console.log('[Chat] Selected model:', currentModel);
             updateOverallContext();
             updateVisionToggleVisibility();
         });
@@ -1108,7 +1097,6 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
     
     select.addEventListener('change', (e) => {
         currentModel = e.target.value;
-        console.log('[Chat] Selected model:', currentModel);
         updateOverallContext();
         updateVisionToggleVisibility();
     });
@@ -1127,7 +1115,6 @@ async function loadTtsVoices() {
         ttsVoices = data.voices || [];
         updateTtsVoiceSelect();
         showTtsStatus(null);
-        console.log('[TTS] Loaded voices:', ttsVoices.length);
     } catch (error) {
         console.warn('[TTS] Failed to load voices:', error.message);
         showTtsStatus('Failed to load voices. Check endpoint.');
@@ -1200,14 +1187,12 @@ function setupEventListeners() {
         const newMode = e.target.value;
         client.operationMode = newMode;
         storage.setPref('operation-mode', newMode).catch(() => {});
-        console.log(`[Chat] Operation mode changed to ${newMode}`);
     });
 
     // TTS endpoint - save and reload voices on change
     elements.ttsEndpoint?.querySelector('input')?.addEventListener('change', (e) => {
         ttsEndpoint = e.target.value || TTS_ENDPOINT;
         storage.setPref('tts-endpoint', ttsEndpoint).catch(() => {});
-        console.log('[TTS] Endpoint changed to:', ttsEndpoint);
         loadTtsVoices();
     });
 
@@ -1215,14 +1200,12 @@ function setupEventListeners() {
     elements.ttsVoiceSelect?.querySelector('select')?.addEventListener('change', (e) => {
         ttsVoice = e.target.value;
         storage.setPref('tts-voice', ttsVoice).catch(() => {});
-        console.log('[TTS] Voice changed to:', ttsVoice);
     });
 
     // TTS speed
     elements.ttsSpeed?.querySelector('input')?.addEventListener('change', (e) => {
         ttsSpeed = parseFloat(e.target.value) || 1.0;
         storage.setPref('tts-speed', ttsSpeed).catch(() => {});
-        console.log('[TTS] Speed changed to:', ttsSpeed);
     });
     
     // Send message / Toggle Stop
@@ -1643,7 +1626,6 @@ let autoVisionResults = [];
 async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
     // Verify vision tools are available
     if (!areVisionToolsAvailable()) {
-        console.log('[AutoVision] Vision tools not available, skipping auto session creation');
         return;
     }
     
@@ -1749,7 +1731,6 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
             }
             
             results.push(`[Image ${i + 1}${img.name ? ` (${img.name})` : ''}]:\n${analysisText.trim()}`);
-            console.log(`[AutoVision] Analysis complete for image ${i + 1}:`, analysisText.substring(0, 100));
             
         } catch (err) {
             console.error(`[AutoVision] Failed to analyze image ${i + 1}:`, err);
@@ -1769,7 +1750,6 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
         // Store analysis results for streamResponse to inject into assistant content
         const combinedAnalysis = results.join('\n\n');
         autoVisionResults = [{ exchangeId: userExchangeId, chatId: targetChatId, analysis: combinedAnalysis }];
-        console.log(`[AutoVision] Stored analysis for exchange ${userExchangeId}, ${combinedAnalysis.length} chars`);
     } else {
         visionStatusEl.querySelector('.tool-status').setAttribute('variant', 'danger');
         visionStatusEl.querySelector('.tool-status').innerHTML = 'No Results';
@@ -1806,11 +1786,8 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const shouldExcludeVisionTools = modelSupportsVision && !useVisionAnalysis;
     const excludedToolPrefixes = shouldExcludeVisionTools ? ['vision_'] : [];
     
-    console.log('[Vision] Model supports vision:', modelSupportsVision, '| MCP Vision toggle:', useVisionAnalysis, '| Excluding vision tools:', shouldExcludeVisionTools);
     
     const systemPrompt = getSystemPromptWithMetadata(excludedToolPrefixes);
-    console.log('[Vision] System prompt generated with excluded prefixes:', excludedToolPrefixes);
-    console.log('[Vision] System prompt preview (first 500 chars):', systemPrompt.substring(0, 500));
     // Store system prompt for debugging (included in JSON export)
     conversation.setSystemPrompt(exchangeId, systemPrompt);
 
@@ -1820,7 +1797,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     if (autoVisionEntry) {
         effectiveSystemPrompt += `\n\nThe user attached an image. MCP Vision analysis:\n${autoVisionEntry.analysis}`;
         autoVisionResults.splice(autoVisionResults.indexOf(autoVisionEntry), 1);
-        console.log('[AutoVision] Injected analysis into system prompt');
     }
 
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
@@ -1871,13 +1847,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         //   B) Auto-vision is doing the full analysis (images already analyzed by frontend)
         const hasAutoVisionAnalysis = autoVisionResults.some(r => r.exchangeId === exchangeId && r.chatId === chatId);
         const allMcpTools = mcpClient.getFormattedToolsForLLM();
-        console.log('[Vision] All MCP tools count:', allMcpTools.length);
         if (allMcpTools.length > 0) {
             // Check if auto-vision is handling analysis (frontend does create+analyze, LLM doesn't need vision tools)
             const modelSupportsVision = currentModelSupportsVision();
             const shouldFilterVisionTools = (modelSupportsVision && !useVisionAnalysis) || hasAutoVisionAnalysis;
             
-            console.log('[Vision] Filtering decision: modelSupportsVision=', modelSupportsVision, '| useVisionAnalysis=', useVisionAnalysis, '| hasAutoVisionAnalysis=', hasAutoVisionAnalysis, '| shouldFilter=', shouldFilterVisionTools);
             
             if (shouldFilterVisionTools) {
                 const filteredTools = allMcpTools.filter(tool => {
@@ -1887,12 +1861,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     return !isVision;
                 });
                 
-                console.log('[Vision] Filtered tools count:', filteredTools.length);
                 if (filteredTools.length > 0) {
                     requestBody.tools = filteredTools;
                 }
             } else {
-                console.log('[Vision] Including ALL tools');
                 requestBody.tools = allMcpTools;
             }
         }
@@ -2995,7 +2967,6 @@ function showCompactionIndicator(el, data) {
 
 function updateCompactionProgress(el, data) {
     // Could show progress bar here
-    console.log('[Chat] Compaction progress:', data);
 }
 
 function hideCompactionIndicator(el) {
@@ -3956,11 +3927,7 @@ function handleFileSelect(e) {
 function currentModelSupportsVision() {
     if (!currentModel) return false;
     const modelConfig = models.find(m => m.id === currentModel);
-    console.log('[Vision] Model config:', currentModel, '| full config:', modelConfig);
-    console.log('[Vision] capabilities object:', modelConfig?.capabilities);
-    console.log('[Vision] capabilities.vision:', modelConfig?.capabilities?.vision, '| type:', typeof modelConfig?.capabilities?.vision);
     const supportsVision = modelConfig?.capabilities?.vision === true;
-    console.log('[Vision] supportsVision:', supportsVision);
     return supportsVision;
 }
 
@@ -4309,10 +4276,8 @@ function initMCP() {
 function renderMCPServers() {
     if (!elements.mcpServersList) return;
     elements.mcpServersList.innerHTML = ''; // basic clear
-    console.log(`[MCP UI] Rendering ${mcpClient.servers.length} servers`);
 
     mcpClient.servers.forEach(server => {
-        console.log(`[MCP UI] Server ${server.name}: status=${server.status}, tools=${server.tools?.length || 0}`);
         const card = document.createElement('nui-card');
         card.className = "mcp-server-card";
         
