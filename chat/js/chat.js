@@ -1517,6 +1517,15 @@ async function sendMessage() {
     if (shouldUseMcpVision) {
         try {
             await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, currentChatId);
+            
+            // Remove image attachments from the exchange so they aren't forwarded
+            // to the Gateway. The MCP Vision analysis text is injected into the
+            // user message by streamResponse instead.
+            const ex = conversation.getExchange(currentExchangeId);
+            if (ex?.user?.attachments) {
+                ex.user.attachments = [];
+                conversation.save();
+            }
         } catch (err) {
             console.error('[Vision] MCP vision session creation failed:', err);
             nui.components.dialog.alert(
@@ -1804,6 +1813,16 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     console.log('[Vision] System prompt preview (first 500 chars):', systemPrompt.substring(0, 500));
     // Store system prompt for debugging (included in JSON export)
     conversation.setSystemPrompt(exchangeId, systemPrompt);
+
+    // Augment system prompt with MCP Vision analysis if available
+    let effectiveSystemPrompt = systemPrompt;
+    const autoVisionEntry = autoVisionResults.find(r => r.exchangeId === exchangeId && r.chatId === chatId);
+    if (autoVisionEntry) {
+        effectiveSystemPrompt += `\n\nThe user attached an image. MCP Vision analysis:\n${autoVisionEntry.analysis}`;
+        autoVisionResults.splice(autoVisionResults.indexOf(autoVisionEntry), 1);
+        console.log('[AutoVision] Injected analysis into system prompt');
+    }
+
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
@@ -1833,7 +1852,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     scrollToBottom();
     
     try {
-        const messages = await conversation.getMessagesForApi(systemPrompt);
+        const messages = await conversation.getMessagesForApi(effectiveSystemPrompt);
 
         const requestBody = {
             model: currentModel,
@@ -1850,11 +1869,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         // Filter vision tools from the list if:
         //   A) MCP Vision toggle is OFF AND model supports vision, OR
         //   B) Auto-vision is doing the full analysis (images already analyzed by frontend)
+        const hasAutoVisionAnalysis = autoVisionResults.some(r => r.exchangeId === exchangeId && r.chatId === chatId);
         const allMcpTools = mcpClient.getFormattedToolsForLLM();
         console.log('[Vision] All MCP tools count:', allMcpTools.length);
         if (allMcpTools.length > 0) {
             // Check if auto-vision is handling analysis (frontend does create+analyze, LLM doesn't need vision tools)
-            const hasAutoVisionAnalysis = autoVisionResults.some(r => r.exchangeId === exchangeId && r.chatId === chatId);
             const modelSupportsVision = currentModelSupportsVision();
             const shouldFilterVisionTools = (modelSupportsVision && !useVisionAnalysis) || hasAutoVisionAnalysis;
             
@@ -1885,7 +1904,8 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         }
 
         // Add image processing if images attached (skip for tool exchanges - they have no user message)
-        if (!isToolExchange && exchange && exchange.user?.attachments?.length > 0) {
+        // Also skip when MCP Vision already analyzed the images
+        if (!isToolExchange && exchange && exchange.user?.attachments?.length > 0 && !hasAutoVisionAnalysis) {
             requestBody.image_processing = {
                 resize: 'auto',
                 transcode: 'jpg',
@@ -1894,18 +1914,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         }
         
         let contentBuffer = '';
-        
-        // Inject auto-vision analysis into content buffer if available
-        // This avoids relying on the LLM to call vision_analyze - we do the full pipeline here
-        const autoVisionIndex = autoVisionResults.findIndex(r => r.exchangeId === exchangeId && r.chatId === chatId);
-        if (autoVisionIndex !== -1) {
-            const visionEntry = autoVisionResults[autoVisionIndex];
-            const analysisText = `📷 **MCP Vision Analysis:**\n${visionEntry.analysis}\n\n---\n\n`;
-            contentBuffer = analysisText;
-            conversation.updateAssistantResponse(exchangeId, analysisText);
-            autoVisionResults.splice(autoVisionIndex, 1); // Consume the entry
-            console.log('[AutoVision] Injected analysis into assistant content buffer');
-        }
         
         let reasoningBuffer = '';
         let pendingUpdate = false;
