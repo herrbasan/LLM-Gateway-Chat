@@ -8,7 +8,7 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 
 - **No Build Process**: Directly serve static HTML/JS/CSS files via the backend
 - **Zero Runtime Dependencies**: All vendor libraries are locally vendored
-- **WebSocket-First**: Real-time communication with gateway via JSON-RPC 2.0 over WebSocket
+- **Dual-Mode Transport**: SSE (default) or WebSocket via JSON-RPC 2.0 to gateway
 - **Frontend-Driven Architecture**: MCP tool execution happens entirely in the browser
 - **AI-First Maintainability**: Code is optimized for LLM parsing, not human readability dogmas
 - **Own Backend**: Node.js server on port 3500 serves static files + REST API + search
@@ -25,7 +25,7 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 | **Structured DB** | nDB (Rust-based JSON Lines document store) |
 | **Vector DB** | nVDB (Rust-based vector DB, exact search) |
 | **Embedding** | Gateway `/v1/embeddings` (Qwen3-Embedding-4B via OpenRouter, 2560d) |
-| **Communication** | WebSocket (JSON-RPC 2.0) to gateway + REST to backend |
+| **Communication** | SSE (default) or WebSocket (JSON-RPC 2.0) to gateway + REST to backend |
 | **Logging** | nLogger (JSON Lines structured logger) |
 | **Markdown** | markdown-it + DOMPurify + Prism.js |
 
@@ -46,9 +46,17 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 │       ├── conversation.js    # Conversation state management
 │       ├── chat-history.js    # Multi-conversation history + backend sync
 │       ├── mcp-client.js      # MCP tool client (SSE connections)
-│       ├── image-store.js     # IndexedDB image storage
+│       ├── file-store.js      # File storage (sends base64 to server, returns URLs)
+│       ├── image-store.js     # Re-exports fileStore as imageStore (backwards compat)
 │       ├── markdown.js        # Markdown rendering with syntax highlight
+│       ├── tts-utils.js       # Text-to-speech utilities
 │       └── config.js          # User configuration (gateway URL, backend toggle)
+├── chat-arena/                # Arena mode (LLM-to-LLM autonomous conversations)
+│   ├── index.html
+│   └── js/
+│       ├── arena.js           # Arena orchestrator + UI
+│       ├── config.js          # Arena defaults
+│       └── storage.js         # Arena backend-only storage
 ├── chat/vendor/               # Vendored dependencies + update scripts
 ├── nui_wc2/                   # NUI Web Components (Git submodule)
 ├── lib/                       # Shared libraries
@@ -68,9 +76,10 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 ├── docs/                      # Documentation
 │   ├── api_rest.md
 │   ├── api_websocket.md
+│   ├── bugs.md
 │   ├── dev_plan_refactor.md
-│   ├── features_backlog.md
-│   └── handover_*.md
+│   ├── dev_plan_user_settings.md
+│   └── features_backlog.md
 └── package.json               # Minimal metadata
 ```
 
@@ -128,9 +137,9 @@ npm start
 ### Communication Flow
 
 ```
-┌─────────────┐      WebSocket       ┌─────────────┐      HTTP      ┌─────────────┐
+┌─────────────┐  SSE (default) or   ┌─────────────┐      HTTP      ┌─────────────┐
 │   Chat UI   │ ◄──────────────────► │  LLM Gateway │ ◄───────────► │   LLM API   │
-│  (Browser)  │    (JSON-RPC 2.0)    │  (Backend)   │               │  (Provider) │
+│  (Browser)  │  (JSON-RPC 2.0 WS)  │  (Backend)   │               │  (Provider) │
 └──────┬──────┘                      └──────┬──────┘               └─────────────┘
        │                                    │
        │ REST (port 3500)                   │ /v1/embeddings
@@ -157,7 +166,7 @@ npm start
 | `conversation.js` | `Conversation` class - message history, versioning, API message formatting, backend sync |
 | `chat-history.js` | `ChatHistory` class - multi-conversation management, backend CRUD, localStorage fallback |
 | `mcp-client.js` | `MCPClient` class - SSE connections to MCP servers, tool registry, execution |
-| `image-store.js` | `ImageStore` class - IndexedDB storage for image attachments |
+| `image-store.js` | `ImageStore` class - re-exports fileStore for backward compatibility |
 | `markdown.js` | `renderMarkdown()` - markdown-it with Prism highlighting, DOMPurify sanitization |
 
 ---
@@ -217,7 +226,7 @@ Key variables:
 | Chat list metadata (fallback) | localStorage | `chat-history-index` |
 | User preferences | localStorage | `chat-user-*` |
 | MCP server config | localStorage | `mcp-servers`, `mcp-enabledTools` |
-| Image attachments | IndexedDB | `chat-images` store |
+| Image files | Server filesystem | `server/data/files/{exchangeId}/` |
 
 **Data model**: One conversation document per session. Messages are an inline array indexed by `idx`. nVDB stores vectors keyed by message ID with `{ chatId, msgIdx }` payload for back-reference.
 
@@ -347,8 +356,8 @@ conversation.updateAssistantResponse(exchangeId, deltaContent);
 // Complete exchange
 conversation.setAssistantComplete(exchangeId, usage, context);
 
-// Get formatted messages for API
-const messages = conversation.getMessagesForApi(systemPrompt);
+// Get formatted messages for API (async — resolves image URLs)
+const messages = await conversation.getMessagesForApi(systemPrompt);
 
 // Version control (regenerate)
 conversation.regenerateResponse(exchangeId);
@@ -397,9 +406,10 @@ const result = await mcpClient.executeTool(toolName, parameters, onProgress);
 
 ### Updating Vendor Libraries
 
-Run one of the update scripts when WebAdmin vendor files change:
+Run the update script from `chat/vendor/` when WebAdmin vendor files change:
 
 ```bash
+cd chat/vendor
 node update-vendor.js       # Cross-platform Node
 .\update-vendor.ps1         # Windows PowerShell
 update-vendor.bat           # Windows CMD

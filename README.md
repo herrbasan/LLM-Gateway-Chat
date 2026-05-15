@@ -82,12 +82,12 @@ Navigate to `http://localhost:3500/chat/`
 
 ## Key Features
 
-- **Direct Gateway Integration:** WebSocket streaming via JSON-RPC 2.0
+- **Direct Gateway Integration:** SSE streaming (default) or WebSocket via JSON-RPC 2.0
 - **Semantic Search:** Chat archive searchable via nVDB + Qwen3-Embedding-4B vectors
 - **Multiple Chat Sessions:** Multi-conversation management with nDB persistence
 - **MCP Archive Tools:** LLM can query conversation history via `chat_archive_search`, `chat_archive_find_similar`, etc.
 - **Arena Mode:** LLM-to-LLM autonomous conversations, recorded without human steering
-- **Vision Support:** Attach and process images via IndexedDB
+- **Vision Support:** Attach images — automatically analyzed via MCP Vision tools for non-vision models
 - **Markdown & Code:** Full markdown rendering with syntax highlighting
 - **Streaming & Thinking Blocks:** Real-time streaming with expandable reasoning blocks
 
@@ -95,8 +95,8 @@ Navigate to `http://localhost:3500/chat/`
 
 - **nDB**: Sessions, conversation documents (inline messages array), user metadata
 - **nVDB**: 2560-dim embedding vectors with `(chatId, msgIdx)` back-references
+- **Server filesystem**: Image attachments stored at `server/data/files/{exchangeId}/`
 - **localStorage**: Fallback for chat history and user preferences
-- **IndexedDB**: Image attachments
 
 ## Updating Vendor Libraries
 
@@ -124,7 +124,7 @@ The LLM Gateway must allow CORS from your standalone chat origin. Add to Gateway
 
 ```javascript
 // Allow standalone chat origin
-res.header('Access-Control-Allow-Origin', 'http://localhost:8080');
+res.header('Access-Control-Allow-Origin', 'http://localhost:3500');
 res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 res.header('Access-Control-Allow-Headers', 'Content-Type');
 ```
