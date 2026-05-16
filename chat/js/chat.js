@@ -730,7 +730,7 @@ async function init() {
 
     // Wait for NUI to be ready, then load models
     await waitForNUI();
-    setupPresets();
+    await setupPresets();
     await loadModels();
 
     // Restore conversation
@@ -761,7 +761,8 @@ async function applyDefaultConfig() {
     if (elements.temperature) {
         const tempInput = elements.temperature.querySelector('input');
         if (tempInput) {
-            tempInput.value = DEFAULT_TEMPERATURE;
+            const savedTemp = await storage.getPref('default-temperature');
+            tempInput.value = savedTemp !== null ? savedTemp : DEFAULT_TEMPERATURE;
         }
     }
 
@@ -769,7 +770,8 @@ async function applyDefaultConfig() {
     if (elements.maxTokens) {
         const maxTokensInput = elements.maxTokens.querySelector('input');
         if (maxTokensInput) {
-            maxTokensInput.value = DEFAULT_MAX_TOKENS;
+            const savedTokens = await storage.getPref('default-max-tokens');
+            maxTokensInput.value = savedTokens !== null ? savedTokens : DEFAULT_MAX_TOKENS;
         }
     }
 
@@ -843,9 +845,10 @@ const STORAGE_KEY = 'chat-system-presets';
 let systemPresets = [];
 let editingPresetId = null;
 
-function loadPresets() {
+async function loadPresets() {
     try {
-        systemPresets = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        const stored = await storage.getPref('system-presets');
+        systemPresets = stored ? JSON.parse(stored) : [];
     } catch { systemPresets = []; }
     if (systemPresets.length === 0) {
         systemPresets.push({
@@ -877,8 +880,8 @@ Natural and conversational — as if talking through something that matters with
     }
 }
 
-function savePresets() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(systemPresets));
+async function savePresets() {
+    await storage.setPref('system-presets', JSON.stringify(systemPresets));
 }
 
 function populatePresetSelect() {
@@ -996,8 +999,8 @@ async function newPreset() {
     renderPresetList();
 }
 
-function setupPresets() {
-    loadPresets();
+async function setupPresets() {
+    await loadPresets();
     populatePresetSelect();
 }
 
@@ -1022,7 +1025,7 @@ async function loadModels() {
         models = data.data || [];
         if (models.length > 0) {
         }
-        populateModelSelect();
+        await populateModelSelect();
 
     } catch (error) {
         console.error('[Chat] Failed to load models:', error);
@@ -1030,7 +1033,7 @@ async function loadModels() {
     }
 }
 
-function populateModelSelect() {
+async function populateModelSelect() {
     const chatModels = models.filter(m => m.type === 'chat' || !m.type);
     
     if (chatModels.length === 0) {
@@ -1052,13 +1055,14 @@ function populateModelSelect() {
         }
     }
 
-    if (!modelToSelect && DEFAULT_MODEL) {
-        // Use configured default if it exists
-        const defaultModelExists = chatModels.some(m => m.id === DEFAULT_MODEL);
-        if (defaultModelExists) {
+    if (!modelToSelect) {
+        const savedDefault = await storage.getPref('default-model');
+        if (savedDefault && chatModels.some(m => m.id === savedDefault)) {
+            modelToSelect = savedDefault;
+        } else if (DEFAULT_MODEL && chatModels.some(m => m.id === DEFAULT_MODEL)) {
             modelToSelect = DEFAULT_MODEL;
-        } else {
-            console.warn(`[Chat] Configured default model "${DEFAULT_MODEL}" not found, using first available`);
+        } else if (DEFAULT_MODEL) {
+            console.warn(`[Chat] Configured default model "${DEFAULT_MODEL}" not found`);
         }
     }
     
@@ -1104,6 +1108,7 @@ function populateModelSelect() {
         // Bind change event via NUI
         elements.modelSelect.addEventListener('nui-change', (e) => {
             currentModel = e.detail.values[0] || '';
+            storage.setPref('default-model', currentModel).catch(() => {});
             updateOverallContext();
             updateVisionToggleVisibility();
         });
@@ -1238,6 +1243,14 @@ function setupEventListeners() {
     }
 
     // Session metadata - save to storage on change
+    elements.temperature?.querySelector('input')?.addEventListener('change', (e) => {
+        storage.setPref('default-temperature', parseFloat(e.target.value) || DEFAULT_TEMPERATURE).catch(() => {});
+    });
+    
+    elements.maxTokens?.querySelector('input')?.addEventListener('change', (e) => {
+        storage.setPref('default-max-tokens', e.target.value ? parseInt(e.target.value) : null).catch(() => {});
+    });
+
     elements.userName?.querySelector('input')?.addEventListener('change', (e) => {
         storage.setPref('user-name', e.target.value).catch(() => {});
     });

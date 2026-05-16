@@ -439,6 +439,11 @@ function middleTruncateEmbedText(text) {
 }
 
 async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx) {
+    // Skip embedding for tool responses (prevents indexing massive JSON loads or duplicated session exports)
+    if (msg.role === 'tool') {
+        return;
+    }
+
     if (!instance.embeddingsCol || !embedAvailable) {
         if (msg.embedStatus === 'pending') {
             L().info('Embed skipped (nVDB unavailable)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
@@ -1205,6 +1210,8 @@ const routes = {
         const titleExcerpt = (body.content || '').split('\n')[0].substring(0, 40);
         session.title = titleExcerpt || 'New Chat';
       }
+      
+      db.update(session._id, session);
 
     L().info('Message added', { sessionId: params.id, role: body.role, idx, contentLen: (body.content || '').length }, 'Message');
     

@@ -2,7 +2,7 @@
 // Chat History Management - Multiple Conversations
 // ============================================
 
-import { storage, PREFIX_CONV } from './storage.js';
+import { storage } from './storage.js';
 import { backendClient } from './api-client.js';
 
 const CONFIG = window.CHAT_CONFIG || {};

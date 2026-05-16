@@ -1118,25 +1118,44 @@ class ArenaUI {
         });
 
         // TTS voice A
-        this.ttsVoiceASelect?.querySelector('select')?.addEventListener('change', (e) => {
+        this.ttsVoiceASelect?.querySelector('select')?.addEventListener('change', async (e) => {
             const voice = e.target.value;
-            localStorage.setItem('arena-tts-voice-a', voice);
+            await this._setPref('arena-tts-voice-a', voice);
             this._ttsVoiceA = voice;
         });
 
         // TTS voice B
-        this.ttsVoiceBSelect?.querySelector('select')?.addEventListener('change', (e) => {
+        this.ttsVoiceBSelect?.querySelector('select')?.addEventListener('change', async (e) => {
             const voice = e.target.value;
-            localStorage.setItem('arena-tts-voice-b', voice);
+            await this._setPref('arena-tts-voice-b', voice);
             this._ttsVoiceB = voice;
         });
 
         // TTS speed
-        this.ttsSpeed?.querySelector('input')?.addEventListener('change', (e) => {
+        this.ttsSpeed?.querySelector('input')?.addEventListener('change', async (e) => {
             const speed = parseFloat(e.target.value) || 1.0;
-            localStorage.setItem('arena-tts-speed', speed);
+            await this._setPref('arena-tts-speed', speed);
             this._ttsSpeed = speed;
         });
+    }
+
+    async _getPref(key, fallback = null) {
+        try {
+            const res = await backendClient.getUserSettings();
+            if (res && res.settings && res.settings[key] !== undefined) {
+                return res.settings[key];
+            }
+        } catch(e) {}
+        return fallback;
+    }
+
+    async _setPref(key, value) {
+        try {
+            const res = await backendClient.getUserSettings();
+            const setts = (res && res.settings) ? res.settings : {};
+            setts[key] = value;
+            await backendClient.updateUserSettings(setts);
+        } catch(e) {}
     }
 
     _waitForNUI() {
@@ -1347,10 +1366,10 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     async _initTts() {
         const config = window.ARENA_CONFIG || {};
 
-        this._ttsEndpoint = localStorage.getItem('arena-tts-endpoint') || config.ttsEndpoint || 'http://localhost:2244';
-        this._ttsVoiceA = localStorage.getItem('arena-tts-voice-a') || config.ttsVoiceA || '';
-        this._ttsVoiceB = localStorage.getItem('arena-tts-voice-b') || config.ttsVoiceB || '';
-        const storedSpeed = localStorage.getItem('arena-tts-speed');
+        this._ttsEndpoint = await this._getPref('arena-tts-endpoint', config.ttsEndpoint || 'http://localhost:2244');
+        this._ttsVoiceA = await this._getPref('arena-tts-voice-a', config.ttsVoiceA || '');
+        this._ttsVoiceB = await this._getPref('arena-tts-voice-b', config.ttsVoiceB || '');
+        const storedSpeed = await this._getPref('arena-tts-speed', null);
         this._ttsSpeed = storedSpeed !== null ? parseFloat(storedSpeed) : (config.ttsSpeed ?? 1.0);
         this._ttsVoices = [];
         this._ttsAudio = null;
@@ -1378,7 +1397,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             this._ttsVoices = data.voices || [];
-            localStorage.setItem('arena-tts-endpoint', endpoint);
+            await this._setPref('arena-tts-endpoint', endpoint);
             this._ttsEndpoint = endpoint;
             this._updateTtsVoiceSelects();
             this._showTtsStatus(null);
@@ -1410,10 +1429,10 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
                 if (select === this.ttsVoiceASelect) {
                     this._ttsVoiceA = first;
-                    localStorage.setItem('arena-tts-voice-a', first);
+                    this._setPref('arena-tts-voice-a', first);
                 } else {
                     this._ttsVoiceB = first;
-                    localStorage.setItem('arena-tts-voice-b', first);
+                    this._setPref('arena-tts-voice-b', first);
                 }
             }
         });
