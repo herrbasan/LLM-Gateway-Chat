@@ -234,9 +234,14 @@ Key variables:
 | Chat list metadata (fallback) | localStorage | `chat-history-index` |
 | User preferences | localStorage | `chat-user-*` |
 | MCP server config | localStorage | `mcp-servers`, `mcp-enabledTools` |
-| Image files | Server filesystem | `server/data/files/{exchangeId}/` |
+| Image files | nDB Buckets | `_files/images/{hash}.{ext}`, linked via `images:hash.ext` strings in DB |
 
 **Data model**: One conversation document per session. Messages are an inline array indexed by `idx`. nVDB stores vectors keyed by message ID with `{ chatId, msgIdx }` payload for back-reference.
+
+### Image Storage & Garbage Collection Architecture
+- **Zero JSON Bloat:** MCP tool responses returning large base64 images are intercepted by the frontend. The base64 is uploaded via `/api/buckets/images/...`, returning a lightweight URL string replacing the massive base64 blob in the JSON response sent to the Gateway.
+- **Native nDB Bucket Storage:** Images are securely stored in the native Rust `nDB` engine using `db.bucket('images')`. This eliminates orphaned physical sidecar files and ensures the database folder `_files/` directory is highly portable and cleanly backed up alongside the documents.
+- **Lifecycle Integration:** When a chat is deleted via the UI (`DELETE /api/chats/:id`), the backend extracts every image URL (both user-uploaded and MCP-generated), checks if any other active chats reference them, and calls `db.releaseFile(ref)`. Orphans are safely moved to the `.trash` directory natively by the Rust engine.
 
 ### MCP Tool Execution (Frontend-Driven)
 

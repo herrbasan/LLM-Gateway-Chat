@@ -358,9 +358,6 @@ const routes = {
           return json(res, { error: 'Invalid files payload' }, 400);
         }
         
-        const exPath = require('path').join(FILES_DIR, exchangeId);
-        await fs.promises.mkdir(exPath, { recursive: true });
-        
         const savedFiles = [];
         for (let i = 0; i < body.files.length; i++) {
           const file = body.files[i];
@@ -368,15 +365,14 @@ const routes = {
           const ext = extMap[file.type] || 'bin';
           const filename = `ex_${exchangeId}_${i}.${ext}`;
           
-          await fs.promises.writeFile(
-            require('path').join(exPath, filename), 
-            Buffer.from(file.data, 'base64')
-          );
+          const buffer = Buffer.from(file.data, 'base64');
+          const meta = db.storeFile('images', filename, buffer, file.type);
           
           savedFiles.push({
             name: file.name,
             type: file.type,
-            url: `/files/${exchangeId}/${filename}`
+            url: `/api/buckets/images/${meta._file.id}.${meta._file.ext}`,
+            _file: `images:${meta._file.id}.${meta._file.ext}`
           });
         }
         json(res, { success: true, files: savedFiles });
@@ -416,6 +412,7 @@ const routes = {
     },
 
     'DELETE /api/chat-files/:exchangeId': async (req, res, { exchangeId }) => {
+      // Legacy wrapper. Proper gc happens on chat deletion via releaseFile now.
       try {
         const exPath = require('path').join(FILES_DIR, exchangeId);
         if (fs.existsSync(exPath)) {
@@ -425,6 +422,36 @@ const routes = {
       } catch (err) {
         logger.error('Failed to delete files:', err.message);
         json(res, { error: 'Failed to delete files' }, 500);
+      }
+    },
+
+    'GET /api/buckets/:bucket/:filename': async (req, res, { bucket, filename }) => {
+      try {
+        const dotPos = filename.lastIndexOf('.');
+        if (dotPos === -1) throw new Error('invalid filename');
+        const id = filename.slice(0, dotPos);
+        const ext = filename.slice(dotPos + 1).toLowerCase();
+
+        const buffer = db.getFile(bucket, id, ext);
+        if (!buffer) {
+          json(res, { error: 'File not found' }, 404);
+          return;
+        }
+
+        const mime = {
+          'png': 'image/png',
+          'jpg': 'image/jpeg',
+          'jpeg': 'image/jpeg',
+          'gif': 'image/gif',
+          'webp': 'image/webp',
+          'svg': 'image/svg+xml'
+        }[ext] || 'application/octet-stream';
+        
+        res.writeHead(200, { 'Content-Type': mime });
+        res.end(buffer);
+      } catch (err) {
+        // Fallback for not found or errors
+        json(res, { error: 'File not found' }, 404);
       }
     },
 
@@ -511,7 +538,24 @@ const routes = {
     const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
     if (convs.length > 0) {
       const conv = convs[0];
-      json(res, { session, messages: conv.messages || [] });
+      const msgs = JSON.parse(JSON.stringify(conv.messages || [])); // clone to avoid mutating db memory
+      for (const m of msgs) {
+        if (m.attachments) {
+          for (const att of m.attachments) {
+            // Translate nURI compact strings to frontend URLs
+            const ref = att._file || (att.url && /^\w+:/.test(att.url) ? att.url : null);
+            if (ref) {
+              const [bucket, file] = ref.split(':');
+              att.url = `/api/buckets/${bucket}/${file}`;
+              att.blobUrl = att.url;
+              if (att.dataUrl && !att.dataUrl.startsWith('data:')) {
+                att.dataUrl = att.url; // legacy compat
+              }
+            }
+          }
+        }
+      }
+      json(res, { session, messages: msgs });
       return;
     }
     
@@ -642,12 +686,10 @@ const routes = {
     if (body.toolName) message.toolName = body.toolName;
     if (body.toolArgs) message.toolArgs = body.toolArgs;
     if (body.toolStatus) message.toolStatus = body.toolStatus;
-    
-    conv.messages.push(message);
-    conv.messageCount = conv.messages.length;
-    conv.updatedAt = new Date().toISOString();
-    db.update(conv._id, conv);
-    
+      if (body.toolImages) message.toolImages = body.toolImages;
+      
+      conv.messages.push(message);
+      conv.messageCount = conv.messages.length;
     session.messageCount = conv.messageCount;
     session.updatedAt = conv.updatedAt;
     db.update(session._id, session);
@@ -676,15 +718,52 @@ const routes = {
     // Soft delete session, conversation doc, and legacy messages
     db.delete(session._id);
     const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
-    for (const c of convs) db.delete(c._id);
-    const messages = db.find('sessionId', params.id);
-    for (const m of messages) {
-      if (m._type === 'message') db.delete(m._id);
-    }
     
-    json(res, { ok: true });
-  },
-  
+    // Extract file references for garbage collection
+    const fileRefsToRelease = [];
+    
+    for (const c of convs) {
+      if (c.messages) {
+        for (const m of c.messages) {
+          if (m.attachments) {
+            for (const att of m.attachments) {
+                if (att._file) {
+                  fileRefsToRelease.push(att._file);
+                } else {
+                  const url = att.url || att.dataUrl;
+                  if (url && url.startsWith('/api/buckets/')) {
+                    const parts = url.split('/');
+                    if (parts.length >= 5) {
+                      fileRefsToRelease.push(`${parts[3]}:${parts.pop().split('?')[0]}`);
+                    }
+                  } else if (url && /^\w+:\w+\.\w+$/.test(url)) {
+                    fileRefsToRelease.push(url);
+                  }
+                }
+              }
+            }
+          }
+        }
+        db.delete(c._id);
+      }
+      
+      const messages = db.find('sessionId', params.id);
+      for (const m of messages) {
+        if (m._type === 'message') db.delete(m._id);
+      }
+      
+      // Trigger bucket clean up using the safe Rust method
+      for (const ref of fileRefsToRelease) {
+        try {
+          db.releaseFile(ref);
+        } catch (e) {
+          logger.error('Failed to release file', e.message, { ref }, 'Storage');
+        }
+      }
+      
+      json(res, { success: true });
+    },
+    
   // Search (hybrid: nVDB semantic + text fallback)
   'POST /api/search': async (req, res) => {
     const user = requireAuth(req, res);
