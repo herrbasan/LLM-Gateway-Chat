@@ -27,7 +27,7 @@ export class Conversation {
     }
 
     _syncMessage(role, content, model = null, exchangeId = null, metadata = null, attachments = null) {
-        if (!_USE_BACKEND || !backendClient.apiKey || !this.sessionId) return;
+        if (!_USE_BACKEND || !backendClient.user || !this.sessionId) return;
         const body = { role, content, model };
         if (attachments) body.attachments = attachments;
         if (metadata) Object.assign(body, metadata);
@@ -172,7 +172,6 @@ export class Conversation {
     deleteExchange(id) {
         const index = this.exchanges.findIndex(e => e.id === id);
         if (index !== -1) {
-            imageStore.delete(id);
             this.exchanges.splice(index, 1);
             this.save();
         }
@@ -181,10 +180,6 @@ export class Conversation {
     truncateAfter(id) {
         const index = this.exchanges.findIndex(e => e.id === id);
         if (index !== -1) {
-            // Delete images for orphaned downstream exchanges
-            for (let i = index + 1; i < this.exchanges.length; i++) {
-                imageStore.delete(this.exchanges[i].id);
-            }
             // Splice array to remove exchanges *after* 'index' (dropping index+1 onward)
             // Splice arguments: start, deleteCount. 
             // Start at index + 1, delete until the end.
@@ -657,11 +652,7 @@ export class Conversation {
 
         // Extract conversation ID from storageKey (format: "chat-conversation-{id}")
         const conversationId = this.storageKey.replace('chat-conversation-', '');
-        try {
-            await storage.saveConversation(conversationId, exchangesToSave);
-        } catch (err) {
-            console.error('[Conversation] Failed to save:', err);
-        }
+        // Local storage cache has been removed
     }
 
     async load() {
@@ -669,7 +660,7 @@ export class Conversation {
             const conversationId = this.storageKey.replace('chat-conversation-', '');
             let loadedFromBackend = false;
 
-            if (_USE_BACKEND && backendClient.apiKey && this.sessionId) {
+            if (_USE_BACKEND && backendClient.user && this.sessionId) {
                 try {
                     const data = await backendClient.getSession(this.sessionId);
                     if (data && data.messages && data.messages.length > 0) {
@@ -677,36 +668,12 @@ export class Conversation {
                         loadedFromBackend = true;
                     }
                 } catch (err) {
-                    console.warn('[Conversation] Backend load failed, falling back to local:', err.message);
-                }
-            }
-
-            if (!loadedFromBackend) {
-                const data = await storage.loadConversation(conversationId);
-                if (data && data.length > 0) {
-                    this.exchanges = data;
+                    console.warn('[Conversation] Backend load failed:', err.message);
                 }
             }
 
             if (this.exchanges.length > 0) {
                 for (const ex of this.exchanges) {
-                    if (ex.user && ex.user.attachments?.some(att => att.hasImage)) {
-                        try {
-                            const images = await imageStore.load(ex.id);
-                            ex.user.attachments = ex.user.attachments.map((att, idx) => {
-                                const img = images[idx];
-                                if (!img) return att;
-                                return {
-                                    ...att,
-                                    blobUrl: img.blobUrl,
-                                    getDataUrl: img.getDataUrl
-                                };
-                            });
-                        } catch (err) {
-                            console.warn('[Conversation] Failed to load images for exchange', ex.id, err);
-                        }
-                    }
-
                     if (ex.assistant && Array.isArray(ex.assistant.versions) && ex.assistant.versions.length > 0) {
                         const uniqueVersions = [];
                         const seen = new Set();
@@ -810,10 +777,6 @@ export class Conversation {
     }
 
     async clear() {
-        // Clear server images for all exchanges
-        for (const ex of this.exchanges) {
-            await imageStore.delete(ex.id);
-        }
         this.exchanges = [];
         const conversationId = this.storageKey.replace('chat-conversation-', '');
         storage.deleteConversation(conversationId);

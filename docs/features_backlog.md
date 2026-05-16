@@ -37,3 +37,5 @@
 ## Network & Connection
 - [x] **Streaming Crash Self-Healing**: Properly intercept backend or API aborts (e.g., HTTP 400) mid-stream and auto-inject the raw system error into the completion array so the LLM is aware of the failure context.
 - [ ] **SSE Operation Mode**: Support Server-Sent Events (SSE) as an optional operation mode for chat messaging and streaming (pending backend support).
+## Technical Debt / Code Cleanup
+- [ ] **User Management Refactor**: The current user management approach (passing ackendClient.user via cookies, setting explicit folders in Node) is functioning and provides isolation, but is very clunky. Need to design and implement a more robust identity and session management system in the future.

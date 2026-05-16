@@ -34,6 +34,16 @@
 
             </div>
             <div slot="right">
+                <nui-button data-action="admin" id="btn-admin" title="User Management" style="display: none;">
+                    <button type="button" aria-label="User Management">
+                        <nui-icon name="settings"></nui-icon>
+                    </button>
+                </nui-button>
+                <nui-button data-action="logout" id="btn-logout" title="Log Out">
+                    <button type="button" aria-label="Log Out">
+                        <nui-icon name="logout"></nui-icon>
+                    </button>
+                </nui-button>
                 <nui-button data-action="toggle-theme" id="theme-toggle">
                     <button type="button" aria-label="Toggle light/dark theme">
                         <nui-icon name="brightness"></nui-icon>
@@ -253,6 +263,27 @@
             </nui-main>
         </nui-content>
     </nui-app>
+
+    <!-- Login Dialog -->
+    <nui-dialog id="login-dialog" mode="page" title="LLM Gateway Chat - Login">
+        <div style="padding: 1rem; max-width: 400px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; margin-top: 5vh;">
+            <p style="color: var(--text-color-dim); text-align: center; margin-top: 0;">Please log in to access your chats.</p>
+            <form id="login-form" style="display: flex; flex-direction: column; gap: 1rem;">
+                <nui-input>
+                    <label>Username</label>
+                    <input type="text" id="login-username" name="username" required autocomplete="username">
+                </nui-input>
+                <nui-input>
+                    <label>Password</label>
+                    <input type="password" id="login-password" name="password" required autocomplete="current-password">
+                </nui-input>
+                <div id="login-error" style="color: var(--color-error); font-size: 0.85rem; min-height: 1rem; text-align: center;"></div>
+                <nui-button variant="primary" style="margin-top: 0.5rem;">
+                    <button type="submit">Log In</button>
+                </nui-button>
+            </form>
+        </div>
+    </nui-dialog>
 
     <!-- Chat Options Dialog -->
     <nui-dialog id="chat-options-dialog" mode="page" title="Chat Options">

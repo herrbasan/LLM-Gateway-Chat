@@ -10,6 +10,7 @@ import { mcpClient } from './mcp-client.js';
 import { chatHistory } from './chat-history.js';
 import { storage } from './storage.js';
 import { getPlainText } from './tts-utils.js';
+import { backendClient } from './api-client.js';
 
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
@@ -622,8 +623,57 @@ function updateVisionModeIndicator() {
 
 async function init() {
 
-    // ---- Load chat history from IndexedDB ----
-    await chatHistory.ready();
+    // ---- Verify Session / Auth ----
+    if (CONFIG.enableBackend) {
+        backendClient.onAuthError(() => {
+            document.getElementById('login-dialog').showModal();
+        });
+
+        const loginForm = document.getElementById('login-form');
+        loginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const errorDiv = document.getElementById('login-error');
+            errorDiv.textContent = '';
+            
+            try {
+                // Delay 500ms for UX
+                document.querySelector('#login-dialog button[type="submit"]').disabled = true;
+                await new Promise(r => setTimeout(r, 500));
+                
+                await backendClient.login(username, password);
+                document.getElementById('login-dialog').close();
+                // Reload page to re-initialize cleanly
+                window.location.reload();
+            } catch (err) {
+                errorDiv.textContent = err.message || 'Login failed';
+            } finally {
+                document.querySelector('#login-dialog button[type="submit"]').disabled = false;
+            }
+        });
+
+        try {
+            const user = await backendClient.verifySession();
+            if (!user) {
+                document.getElementById('login-dialog').showModal();
+                return; // halt init until logged in and reloaded
+            }
+            if (user.rights?.admin) {
+                const btnAdmin = document.getElementById('btn-admin');
+                if (btnAdmin) btnAdmin.style.display = '';
+            }
+        } catch (e) {
+            console.warn('Backend probe failed or auth absent', e);
+        }
+    }
+
+    // ---- Load chat history ----
+    if (CONFIG.enableBackend === true && !!CONFIG.backendUrl) {
+        await chatHistory.refreshList();
+    } else {
+        await chatHistory.ready();
+    }
 
     // Restore theme (needs history loaded first for async prefs)
     const savedTheme = await storage.getPref('theme');
@@ -635,7 +685,11 @@ async function init() {
     }
 
     // Ensure chat history is loaded
-    await chatHistory.ready();
+    if (CONFIG.enableBackend === true && !!CONFIG.backendUrl) {
+        // already fresh from above
+    } else {
+        await chatHistory.ready();
+    }
     
     // Get or create active conversation
     let activeId = await chatHistory.getActiveId();
@@ -1124,8 +1178,6 @@ async function loadTtsVoices() {
 function updateTtsVoiceSelect() {
     const select = elements.ttsVoiceSelect;
     if (!select) return;
-    const innerSelect = select.querySelector('select');
-    if (!innerSelect) return;
 
     if (ttsVoices.length === 0) {
         const items = [{ value: '', label: 'No voices available', disabled: true }];
@@ -1139,13 +1191,15 @@ function updateTtsVoiceSelect() {
     }
 
     if (ttsVoice) {
-        innerSelect.value = ttsVoice;
-        innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        if (select.setValue) {
+            select.setValue(ttsVoice);
+        }
     } else if (ttsVoices.length > 0) {
         const firstVoice = ttsVoices[0].name || ttsVoices[0];
         ttsVoice = firstVoice;
-        innerSelect.value = firstVoice;
-        innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        if (select.setValue) {
+            select.setValue(firstVoice);
+        }
         storage.setPref('tts-voice', firstVoice).catch(() => {});
     }
 }
@@ -1166,6 +1220,23 @@ function showTtsStatus(message) {
 // ============================================
 
 function setupEventListeners() {
+    // Admin
+    const btnAdmin = document.getElementById('btn-admin');
+    if (btnAdmin) {
+        btnAdmin.addEventListener('click', showAdminUI);
+    }
+
+    // Logout
+    const btnLogout = document.getElementById('btn-logout');
+    if (btnLogout) {
+        btnLogout.addEventListener('click', async () => {
+            if (await nui.components.dialog.confirm('Logout', 'Are you sure you want to log out?')) {
+                await backendClient.logout();
+                window.location.reload();
+            }
+        });
+    }
+
     // Session metadata - save to storage on change
     elements.userName?.querySelector('input')?.addEventListener('change', (e) => {
         storage.setPref('user-name', e.target.value).catch(() => {});
@@ -1197,8 +1268,8 @@ function setupEventListeners() {
     });
 
     // TTS voice
-    elements.ttsVoiceSelect?.querySelector('select')?.addEventListener('change', (e) => {
-        ttsVoice = e.target.value;
+    elements.ttsVoiceSelect?.addEventListener('nui-change', (e) => {
+        ttsVoice = e.detail.values[0] || '';
         storage.setPref('tts-voice', ttsVoice).catch(() => {});
     });
 
@@ -4518,6 +4589,156 @@ function setupDialogEventListeners() {
 // ============================================
 // Start
 // ============================================
+
+// Admin UI
+async function showAdminUI() {
+    let users = await backendClient.adminGetUsers();
+
+    const renderTable = () => `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <h3 style="margin: 0;">Registered Users</h3>
+            <nui-button variant="primary" data-action="edit-user">
+                <button type="button">Add User</button>
+            </nui-button>
+        </div>
+        <table style="width: 100%; border-collapse: collapse; text-align: left; margin-bottom: 2rem;">
+            <thead>
+                <tr style="border-bottom: 1px solid var(--border-shade2);">
+                    <th style="padding: 0.5rem;">Username</th>
+                    <th style="padding: 0.5rem;">Display Name</th>
+                    <th style="padding: 0.5rem;">Rights</th>
+                    <th style="padding: 0.5rem; text-align: center;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${users.map(u => `
+                    <tr style="border-bottom: 1px solid var(--border-shade1);">
+                        <td style="padding: 0.5rem;">${u.username}</td>
+                        <td style="padding: 0.5rem;">${u.displayName}</td>
+                        <td style="padding: 0.5rem;">
+                            ${Object.keys(u.rights).filter(k => u.rights[k]).join(', ') || 'none'}
+                        </td>
+                        <td style="padding: 0.5rem; text-align: center;">
+                            <nui-button variant="outline" size="small" data-action="edit-user" data-id="${u.id}">
+                                <button type="button">Edit</button>
+                            </nui-button>
+                            <nui-button variant="danger" size="small" data-action="delete-user" data-id="${u.id}" ${u.id === backendClient.user?.userId ? 'disabled' : ''}>
+                                <button type="button">Delete</button>
+                            </nui-button>
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+
+    const html = `<div id="admin-users-container" style="padding: 1rem;">${renderTable()}</div>`;
+
+    const { dialog, main } = await nui.components.dialog.page('User Management', html, {
+        contentScroll: true,
+        buttons: [ { label: 'Close', type: 'secondary', value: 'close' } ]
+    });
+
+    const refreshTable = async () => {
+        users = await backendClient.adminGetUsers();
+        if (main.querySelector('#admin-users-container')) {
+            main.querySelector('#admin-users-container').innerHTML = renderTable();
+        }
+        attachListeners();
+    };
+
+    const attachListeners = () => {
+        main.querySelectorAll('[data-action="delete-user"]').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                const id = e.currentTarget.dataset.id;
+                if (!id) return;
+                const confirm = await nui.components.dialog.confirm('Delete User', 'Are you sure? This cannot be undone.');
+                if (confirm) {
+                    try {
+                        await backendClient.adminDeleteUser(id);
+                        nui.components.toast?.success?.('User deleted');
+                        await refreshTable();
+                    } catch (err) {
+                        nui.components.dialog.alert('Error', err.message);
+                    }
+                }
+            });
+        });
+
+        main.querySelectorAll('[data-action="edit-user"]').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                const id = e.currentTarget.dataset.id;
+                const isEdit = !!id;
+                const targetUser = isEdit ? users.find(u => u.id === id) : null;
+                
+                const formHtml = `
+                <div style="padding: 1rem;">
+                    <form id="admin-user-editor-${id || 'new'}" style="display: grid; gap: 1rem; max-width: 400px; margin: auto;">
+                        <nui-input><label>Username</label><input type="text" name="username" ${isEdit ? 'disabled' : 'required'} value="${isEdit ? targetUser.username : ''}"></nui-input>
+                        <nui-input><label>${isEdit ? 'New Password (blank to keep)' : 'Password'}</label><input type="password" name="password" ${!isEdit ? 'required' : ''}></nui-input>
+                        <nui-input><label>Display Name</label><input type="text" name="displayName" value="${isEdit ? targetUser.displayName : ''}"></nui-input>
+                        <nui-input><label>DB Path (e.g. server/data/my_db)</label><input type="text" name="dbPath" required value="${isEdit ? targetUser.dbPath : ''}"></nui-input>
+                        <div>
+                            <label>Rights:</label>
+                            <div style="display: flex; gap: 1rem; margin-top: 0.5rem;">
+                                <label><input type="checkbox" name="right_login" ${(!isEdit || targetUser.rights?.login) ? 'checked' : ''}> Login</label>
+                                <label><input type="checkbox" name="right_admin" ${(isEdit && targetUser.rights?.admin) ? 'checked' : ''}> Admin</label>
+                            </div>
+                        </div>
+                        <nui-button variant="primary" style="margin-top: 1rem;">
+                            <button type="submit">${isEdit ? 'Update User' : 'Create User'}</button>
+                        </nui-button>
+                    </form>
+                </div>
+                `;
+
+                const subDialog = await nui.components.dialog.page(isEdit ? 'Edit User' : 'Add User', formHtml, {
+                    contentScroll: true,
+                    buttons: [ { label: 'Cancel', type: 'secondary', value: 'cancel' } ]
+                });
+
+                const form = subDialog.main.querySelector('form');
+                form.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const fd = new FormData(form);
+                    const payload = {
+                        displayName: fd.get('displayName'),
+                        dbPath: fd.get('dbPath'),
+                        rights: {
+                            login: fd.get('right_login') === 'on',
+                            read: true,
+                            write: true,
+                            admin: fd.get('right_admin') === 'on'
+                        }
+                    };
+                    const pwd = fd.get('password');
+                    if (pwd) payload.password = pwd;
+
+                    try {
+                        if (isEdit) {
+                            await backendClient.adminUpdateUser(id, payload);
+                            nui.components.toast?.success?.('User updated');
+                        } else {
+                            payload.username = fd.get('username');
+                            await backendClient.adminCreateUser(payload);
+                            nui.components.toast?.success?.('User created');
+                        }
+                        
+                        // Close sub-dialog
+                        const cancelBtn = subDialog.dialog.querySelector('button[value="cancel"]');
+                        if (cancelBtn) cancelBtn.click();
+                        
+                        await refreshTable();
+                    } catch (err) {
+                        nui.components.dialog.alert('Error', err.message);
+                    }
+                });
+            });
+        });
+    };
+
+    attachListeners();
+}
 
 init();
 

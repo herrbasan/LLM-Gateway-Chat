@@ -2,44 +2,27 @@
 // Backend API Client — Chat Backend (port 3500)
 // ============================================
 
-const STORAGE_KEY_APIKEY = 'chat-backend-apikey';
-
 export class BackendClient {
-    constructor(baseUrl = '', apiKey = '') {
+    constructor(baseUrl = '') {
         this.baseUrl = baseUrl;
-        this._apiKey = apiKey;
         this._offline = false;
         this._offlineListeners = new Set();
-    }
-
-    get apiKey() {
-        return this._apiKey;
-    }
-
-    set apiKey(key) {
-        this._apiKey = key;
-        if (key) {
-            try { localStorage.setItem(STORAGE_KEY_APIKEY, key); } catch {}
-        } else {
-            try { localStorage.removeItem(STORAGE_KEY_APIKEY); } catch {}
-        }
+        this._authErrorListeners = new Set();
+        this.user = null;
     }
 
     get isOffline() {
         return this._offline;
     }
 
-    loadSavedApiKey() {
-        try {
-            const saved = localStorage.getItem(STORAGE_KEY_APIKEY);
-            if (saved) this._apiKey = saved;
-        } catch {}
-        return this._apiKey;
-    }
-
     onOfflineChange(fn) {
         this._offlineListeners.add(fn);
         return () => this._offlineListeners.delete(fn);
+    }
+
+    onAuthError(fn) {
+        this._authErrorListeners.add(fn);
+        return () => this._authErrorListeners.delete(fn);
     }
 
     _setOffline(value) {
@@ -50,15 +33,26 @@ export class BackendClient {
         }
     }
 
+    _triggerAuthError() {
+        this.user = null;
+        for (const fn of this._authErrorListeners) {
+            try { fn(); } catch {}
+        }
+    }
+
     // ============================================
     // HTTP Core
     // ============================================
 
     async _request(method, path, body = null) {
         const headers = { 'Content-Type': 'application/json' };
-        if (this._apiKey) headers['X-API-Key'] = this._apiKey;
 
-        const opts = { method, headers };
+        const opts = { 
+            method, 
+            headers,
+            credentials: 'include' // Send cookies
+        };
+        
         if (body !== null) opts.body = JSON.stringify(body);
 
         let res;
@@ -79,6 +73,10 @@ export class BackendClient {
 
         this._setOffline(false);
 
+        if (res.status === 401 || res.status === 403) {
+            this._triggerAuthError();
+        }
+
         let errorMsg;
         try {
             const errBody = await res.json();
@@ -89,7 +87,7 @@ export class BackendClient {
 
         const e = new Error(errorMsg);
         e.status = res.status;
-        if (res.status === 401) e.isAuthError = true;
+        if (res.status === 401 || res.status === 403) e.isAuthError = true;
         throw e;
     }
 
@@ -114,12 +112,63 @@ export class BackendClient {
     // Auth
     // ============================================
 
-    async createApiKey() {
-        const data = await this._request('POST', '/api/auth/key');
-        if (data.apiKey) {
-            this.apiKey = data.apiKey;
+    async verifySession() {
+        try {
+            const data = await this._request('GET', '/api/auth/session');
+            this.user = data;
+            return data;
+        } catch (e) {
+            if (e.isAuthError) return null;
+            throw e;
         }
+    }
+    
+    async login(username, password) {
+        const data = await this._request('POST', '/api/auth/login', { username, password });
+        this.user = data;
         return data;
+    }
+
+    async logout() {
+        await this._request('POST', '/api/auth/logout');
+        this.user = null;
+    }
+
+    // ============================================
+    // Admin (User Management)
+    // ============================================
+
+    async adminGetUsers() {
+        const data = await this._request('GET', '/api/admin/users');
+        return data.data || [];
+    }
+
+    async adminCreateUser(userObj) {
+        return this._request('POST', '/api/admin/users', userObj);
+    }
+
+    async adminUpdateUser(id, userObj) {
+        return this._request('PUT', `/api/admin/users/${id}`, userObj);
+    }
+
+    async adminDeleteUser(id) {
+        return this._request('DELETE', `/api/admin/users/${id}`);
+    }
+
+    async adminResetPassword(id, password) {
+        return this._request('POST', `/api/admin/users/${id}/reset-password`, { password });
+    }
+
+    // ============================================
+    // User Settings Operations
+    // ============================================
+
+    async getUserSettings() {
+        return this._request('GET', '/api/user/settings');
+    }
+
+    async updateUserSettings(settings) {
+        return this._request('PUT', '/api/user/settings', { settings });
     }
 
     // ============================================
@@ -210,7 +259,5 @@ export class BackendClient {
 
 const CONFIG = window.CHAT_CONFIG || {};
 export const backendClient = new BackendClient(
-    CONFIG.backendUrl || 'http://localhost:3500',
-    CONFIG.backendApiKey || ''
+    CONFIG.backendUrl || 'http://localhost:3500'
 );
-backendClient.loadSavedApiKey();

@@ -84,8 +84,7 @@ Navigate to `http://localhost:3500/chat/`
 
 - **Direct Gateway Integration:** SSE streaming (default) or WebSocket via JSON-RPC 2.0
 - **Semantic Search:** Chat archive searchable via nVDB + Qwen3-Embedding-4B vectors
-- **Multiple Chat Sessions:** Multi-conversation management with nDB persistence
-- **MCP Archive Tools:** LLM can query conversation history via `chat_archive_search`, `chat_archive_find_similar`, etc.
+- **Multiple Chat Sessions:** Multi-conversation management with nDB persistence  - **Multi-User Isolation:** Database segregation via cookie-based authentication, isolating `nDB` and `nVDB` per user.- **MCP Archive Tools:** LLM can query conversation history via `chat_archive_search`, `chat_archive_find_similar`, etc.
 - **Arena Mode:** LLM-to-LLM autonomous conversations, recorded without human steering
 - **Vision Support:** Attach images — automatically analyzed via MCP Vision tools for non-vision models
 - **Markdown & Code:** Full markdown rendering with syntax highlighting

@@ -2,12 +2,21 @@
     "port": 3500,
     "logsDir": "server/logs",
     "logRetentionDays": 1,
-    "ndbPath": "server/data/chat_app/data.jsonl",
-    "nvdbDir": "server/data/nvdb",
-    "filesDir": "server/data/files",
+    "usersDbPath": "server/data/users_db/data.jsonl",
+    "sessionTtlMinutes": 1440,
     "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
     "embedDims": 2560,
     "embedMaxTokens": 25000,
     "embedTokRatio": 2.5,
-    "embedBatchTokenLimit": 29000
+    "embedBatchTokenLimit": 29000,
+    "users": [
+        {
+            "id": "admin-seed-user",
+            "username": "chat_user",
+            "password": "chat2026",
+            "displayName": "Chat User",
+            "dbPath": "server/data/chat_user",
+            "rights": { "login": true, "read": true, "write": true, "admin": true }
+        }
+    ]
 }

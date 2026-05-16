@@ -1,6 +1,7 @@
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
@@ -15,9 +16,8 @@ try {
 const PORT           = process.env.CHAT_PORT           || cfg.port              || 3500;
 const LOGS_DIR       = process.env.CHAT_LOGS_DIR       || cfg.logsDir           || 'server/logs';
 const LOG_RETENTION  = process.env.CHAT_LOG_RETENTION  || cfg.logRetentionDays  || 1;
-const NDB_PATH       = process.env.CHAT_NDB_PATH       || cfg.ndbPath           || 'server/data/chat_app/data.jsonl';
-const NVDB_DIR       = process.env.CHAT_NVDB_DIR       || cfg.nvdbDir           || 'server/data/nvdb';
-const FILES_DIR      = process.env.CHAT_FILES_DIR      || cfg.filesDir          || 'server/data/files';
+const USERS_DB_PATH  = process.env.CHAT_USERS_DB       || cfg.usersDbPath       || 'server/data/users_db/data.jsonl';
+const SESSION_TTL    = (cfg.sessionTtlMinutes || 1440) * 60 * 1000;
 const EMBED_URL      = process.env.CHAT_EMBED_URL      || cfg.embedUrl          || 'http://192.168.0.100:3400/v1/embeddings';
 const EMBED_MODEL    = process.env.CHAT_EMBED_MODEL    || cfg.embedModel        || null;
 const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   || 2560;
@@ -32,178 +32,339 @@ let embedAvailable = true;
 let embedFailCount = 0;
 
 // ============================================
-// Database
+// Database & Routing
 // ============================================
 
-let db = null;
-let dbReady = false;
-let vdb, embeddingsCol;
-let needsFlush = 0;
-let pendingQueue = [];
+let usersDb = null;
 let logger = null;
+
+// Registry of loaded user databases (dbPath -> { db, vdb, embeddingsCol, ready, needsFlush, pendingQueue })
+const activeDbs = new Map();
 
 (async () => {
 console.time('nLogger.init');
 logger = await nLogger.init({ logsDir: path.resolve(LOGS_DIR), sessionPrefix: 'chat' });
 console.timeEnd('nLogger.init');
 
-// Start HTTP server immediately — nDB/nVDB load in background
-server.listen(PORT, () => {
-  logger.info('Chat Backend running', { port: PORT }, 'Server');
-  logger.info('Health endpoint', { url: `http://localhost:${PORT}/health` }, 'Server');
-});
-logger.info('Chat Backend starting, loading databases...', { port: PORT }, 'Server');
+logger.info('Chat Backend starting, loading users_db...', { port: PORT }, 'Server');
 
-// Load nDB (slow: ~45s for 229 docs with large message arrays)
-console.time('nDB.open');
-db = nDB.open(NDB_PATH);
-console.timeEnd('nDB.open');
-dbReady = true;
-logger.info('nDB opened', { path: NDB_PATH }, 'Server');
-const apiKey = db.find('_type', 'user')[0]?.apiKey || 'none';
-logger.info('API key', { key: apiKey.slice(0, 20) + '...' }, 'Server');
+// 1. Initialise users_db global registry
+const usersDbDir = path.dirname(path.resolve(USERS_DB_PATH));
+if (!fs.existsSync(usersDbDir)) fs.mkdirSync(usersDbDir, { recursive: true });
 
-console.time('nVDB.init');
-try {
-  vdb = new nVDB(NVDB_DIR);
-  embeddingsCol = vdb.getCollection('embeddings');
-  logger.info('nVDB embeddings collection ready', { dims: EMBEDDING_DIMS }, 'Server');
-} catch {
-  logger.warn('nVDB not initialized (run embed.js when Gateway is up)', {}, 'Server');
+usersDb = nDB.open(USERS_DB_PATH);
+logger.info('users_db opened', { path: USERS_DB_PATH }, 'Auth');
+
+// 2. User Seeding (Auth + Routing schema)
+const usersToSeed = [];
+
+// Source 1: SUPERADMIN env vars
+const superAdminUser = process.env.SUPERADMIN_USERNAME;
+const superAdminPass = process.env.SUPERADMIN_PASSWORD;
+const superAdminDbPath = process.env.SUPERADMIN_DBPATH || 'server/data/admin_data';
+if (superAdminUser && superAdminPass) {
+    usersToSeed.push({
+        id: 'user-superadmin',
+        username: superAdminUser,
+        password: superAdminPass,
+        displayName: 'Superadmin',
+        dbPath: superAdminDbPath,
+        rights: { login: true, read: true, write: true, admin: true }
+    });
 }
-console.timeEnd('nVDB.init');
+
+// Source 2: config.json
+for (const u of (cfg.users || [])) {
+    if (!u.dbPath) {
+        logger.error('User missing dbPath, skipping', { username: u.username }, 'Auth');
+        continue;
+    }
+    usersToSeed.push(u);
+}
+
+if (usersToSeed.length === 0) {
+    logger.error('FATAL: No valid users configured (need at least one with a dbPath via ENV or config.users)', {}, 'Auth');
+    console.error('FATAL: No valid users configured.');
+    process.exit(1);
+}
+
+for (const userDef of usersToSeed) {
+    const existing = usersDb.find('id', userDef.id).filter(d => d._type === 'user');
+    if (existing.length === 0) {
+        // Hash password with scryptSync and random salt
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = crypto.scryptSync(userDef.password, salt, 64).toString('hex');
+        usersDb.insert({
+            _type: 'user',
+            id: userDef.id,
+            username: userDef.username,
+            displayName: userDef.displayName || userDef.username,
+            dbPath: userDef.dbPath,
+            passwordHash: salt + ':' + hash,
+            rights: userDef.rights || { login: true },
+            userToken: null,
+            lastAccess: null,
+            createdAt: new Date().toISOString()
+        });
+        logger.info('User created', { id: userDef.id, username: userDef.username }, 'Auth');
+    } else {
+        const doc = existing[0];
+        let changed = false;
+        let changeReason = "";
+
+        const storedParts = doc.passwordHash.split(':');
+        const storedSalt = storedParts[0];
+        const storedHash = storedParts.slice(1).join(':');
+        const configHash = crypto.scryptSync(userDef.password, storedSalt, 64).toString('hex');
+
+        if (storedHash !== configHash) {
+            const newSalt = crypto.randomBytes(16).toString('hex');
+            doc.passwordHash = newSalt + ':' + crypto.scryptSync(userDef.password, newSalt, 64).toString('hex');
+            changed = true;
+            changeReason += "password_mismatch ";
+        }
+        if (userDef.displayName && doc.displayName !== userDef.displayName) {
+            doc.displayName = userDef.displayName;
+            changed = true;
+            changeReason += "display_name_mismatch ";
+        }
+        if (userDef.dbPath && doc.dbPath !== userDef.dbPath) {
+            doc.dbPath = userDef.dbPath;
+            changed = true;
+            changeReason += "dbPath_mismatch ";
+        }
+        const serializeShallow = (obj) => JSON.stringify(Object.keys(obj || {}).sort().reduce((acc, key) => { acc[key] = obj[key]; return acc; }, {}));
+        if (userDef.rights && serializeShallow(doc.rights) !== serializeShallow(userDef.rights)) {
+            doc.rights = userDef.rights;
+            changed = true;
+        }
+
+        if (changed) {
+            doc.userToken = null; // force re-login on config footprint change
+            usersDb.update(doc._id, doc);
+            logger.info('User updated', { id: userDef.id, username: userDef.username, reason: changeReason }, 'Auth');
+        }
+    }
+}
+usersDb.compact();
 
 // ============================================
-// Startup reconciliation + maintenance
+// Maintenance Loops (Global across mounted DBs)
 // ============================================
 
-// Auto-compact the database to prevent append bloat
+// Compaction for users_db and all mounted isolated DBs
 setInterval(() => {
-  if (db) {
+  if (usersDb) {
+    try { usersDb.compact(); } catch(e) {}
+  }
+  for (const [dbPath, instance] of activeDbs.entries()) {
     try {
-      db.compact();
-      logger.info('nDB compacted successfully', { sizeDocs: db.len() }, 'Server');
-    } catch (err) {
-      logger.error('nDB compact failed', err, {}, 'Server');
+      instance.db.compact();
+    } catch(err) {
+      logger.error('nDB compact failed', err, { dbPath }, 'Server');
     }
   }
-}, 5 * 60 * 1000); // 5 minutes
+}, 5 * 60 * 1000);
 
-// One-time flush after startup
-setTimeout(() => {
-  if (!embeddingsCol) return;
-  try {
-    embeddingsCol.flush();
-    logger.info('nVDB flushed after startup', { docs: embeddingsCol.stats?.totalSegmentDocs }, 'Index');
-  } catch (err) {
-    logger.error('nVDB flush failed', err, {}, 'Index');
-  }
-}, 10000);
-
-// Startup reconciliation: deferred 5s, check nVDB for missing vectors
-setTimeout(() => {
-  if (!embeddingsCol) return;
-  const sessions = {};
-  for (const s of db.find('_type', 'session')) sessions[s.id] = s;
-  const stale = [];
-  for (const c of db.find('_type', 'conversation')) {
-    if (!c.messages) continue;
-    for (let idx = 0; idx < c.messages.length; idx++) {
-      const m = c.messages[idx];
-      if (!m.id) continue;
-      if (!embeddingsCol.get(m.id)) {
-        stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-      }
-    }
-  }
-  if (stale.length === 0) return;
-  logger.info('Startup reconciliation', { count: stale.length }, 'Server');
-  (async () => {
-    for (let i = 0; i < stale.length; i++) {
-      const { msg, session, convNdbId, idx } = stale[i];
-      await embedMessageAsync(msg, session, convNdbId, idx).catch(() => {});
-      if (i % 10 === 9 && i + 1 < stale.length) {
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-    logger.info('Startup reconciliation complete', {}, 'Server');
-  })();
-}, 5000);
-
-// Maintenance: embed health check (every 60s)
+// Embeddings check & flush loop across all mounted isolated DBs
 setInterval(async () => {
-  if (!embedAvailable) {
-    try {
-      const reqBody = { input: ['health check'], dimensions: EMBEDDING_DIMS };
-      if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
-      const res = await fetch(EMBED_URL, {
-        method: 'POST', headers: EMBED_HEADERS,
-        body: JSON.stringify(reqBody)
-      });
-      if (res.ok) {
-        embedAvailable = true;
-        embedFailCount = 0;
-        logger.info('Embed endpoint recovered', {}, 'Embed');
-      }
-    } catch {}
-  }
-}, 60000);
-
-// Maintenance: drain pending queue + flush nVDB (every 5s)
-setInterval(async () => {
-  if (pendingQueue.length > 0 && embedAvailable && embeddingsCol) {
-    const item = pendingQueue.shift();
-    await embedMessageAsync(item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
-  }
-
-  if (needsFlush > 0 && embeddingsCol) {
-    try {
-      const t0 = Date.now();
-      embeddingsCol.flush();
-      logger.info('nVDB flushed', { docs: needsFlush, ms: Date.now() - t0 }, 'Embed');
-      needsFlush = 0;
-    } catch (err) {
-      logger.error('nVDB flush failed', err, {}, 'Embed');
+    // 1. Recover embedding health if down
+    if (!embedAvailable) {
+        try {
+            const reqBody = { input: ['health check'], dimensions: EMBEDDING_DIMS };
+            if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
+            const res = await fetch(EMBED_URL, {
+                method: 'POST', headers: EMBED_HEADERS,
+                body: JSON.stringify(reqBody)
+            });
+            if (res.ok) {
+                embedAvailable = true;
+                embedFailCount = 0;
+                logger.info('Embed endpoint recovered', {}, 'Embed');
+            }
+        } catch {}
     }
-  }
+
+    // 2. Iterate each mounted database instance for pending embeds and flushing
+    for (const [dbPath, instance] of activeDbs.entries()) {
+        if (!instance.embeddingsCol) continue;
+
+        if (instance.pendingQueue.length > 0 && embedAvailable) {
+            const item = instance.pendingQueue.shift();
+            // Process queue asynchronously (fire & forget)
+            embedMessageAsync(instance, item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
+        }
+
+        if (instance.needsFlush > 0) {
+            try {
+                const t0 = Date.now();
+                instance.embeddingsCol.flush();
+                logger.info('nVDB flushed', { dbPath, docs: instance.needsFlush, ms: Date.now() - t0 }, 'Embed');
+                instance.needsFlush = 0;
+            } catch (err) {
+                logger.error('nVDB flush failed', err, { dbPath }, 'Embed');
+            }
+        }
+    }
 }, 5000);
 
 })();
 
 // ============================================
-// Auth
+// Database Instantiation (Lazy Mounting Engine)
+// ============================================
+
+function getOrLoadUserDb(dbPath) {
+    if (activeDbs.has(dbPath)) {
+        return activeDbs.get(dbPath);
+    }
+    
+    // We arrive here and must block initially for nDB.open
+    logger.info('Mounting isolated user DB lazily', { dbPath }, 'Server');
+    
+    const absDbPath = path.resolve(dbPath);
+    if (!fs.existsSync(absDbPath)) fs.mkdirSync(absDbPath, { recursive: true });
+    
+    const ndbPath = path.join(absDbPath, 'data.jsonl');
+    const nvdbDir = path.join(absDbPath, 'nvdb');
+    if (!fs.existsSync(nvdbDir)) fs.mkdirSync(nvdbDir, { recursive: true });
+    
+    console.time(`nDB.open:${dbPath}`);
+    const db = nDB.open(ndbPath);
+    console.timeEnd(`nDB.open:${dbPath}`);
+    
+    let vdb, embeddingsCol;
+    try {
+        vdb = new nVDB(nvdbDir);
+        embeddingsCol = vdb.getCollection('embeddings');
+        logger.info('nVDB collection ready for user', { dbPath }, 'Server');
+    } catch {
+        logger.warn('nVDB failed init for user', { dbPath }, 'Server');
+    }
+    
+    const instance = {
+        dbPath,
+        db,
+        vdb,
+        embeddingsCol,
+        pendingQueue: [],
+        needsFlush: 0
+    };
+    
+    activeDbs.set(dbPath, instance);
+    
+    // Reconcile pending embeddings on mount after a tiny delay
+    if (embeddingsCol) {
+        setTimeout(() => {
+            try { embeddingsCol.flush(); } catch(e){}
+            
+            const sessions = {};
+            for (const s of db.find('_type', 'session')) sessions[s.id] = s;
+            const stale = [];
+            for (const c of db.find('_type', 'conversation')) {
+                if (!c.messages) continue;
+                for (let idx = 0; idx < c.messages.length; idx++) {
+                    const m = c.messages[idx];
+                    if (!m.id) continue;
+                    if (!embeddingsCol.get(m.id)) {
+                        stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+                    }
+                }
+            }
+            if (stale.length > 0) {
+                logger.info('Lazy reconciliation', { count: stale.length, dbPath }, 'Server');
+                (async () => {
+                    for (let i = 0; i < stale.length; i++) {
+                        const { msg, session, convNdbId, idx } = stale[i];
+                        await embedMessageAsync(instance, msg, session, convNdbId, idx).catch(() => {});
+                        if (i % 10 === 9 && i + 1 < stale.length) {
+                            await new Promise(r => setTimeout(r, 2000));
+                        }
+                    }
+                })();
+            }
+        }, 3000);
+    }
+    
+    return instance;
+}
+
+// ============================================
+// Auth & Routing
 // ============================================
 
 const L = () => logger || { info() {}, warn() {}, error() {}, debug() {} };
 
+function parseCookies(req) {
+    const list = {};
+    const rc = req.headers.cookie;
+    if (rc) {
+        rc.split(';').forEach((cookie) => {
+            const parts = cookie.split('=');
+            list[parts.shift().trim()] = decodeURI(parts.join('='));
+        });
+    }
+    return list;
+}
+
 function getAuthUser(req) {
-  const key = req.headers['x-api-key'];
-  if (!key) return null;
-  
-  const users = db.find('_type', 'user');
-  return users.find(u => u.apiKey === key) || null;
+    const cookies = parseCookies(req);
+    const token = cookies.userToken;
+    if (!token) return null;
+    
+    // Cookie-only auth. No X-API-Key fallback according to dev_plan
+    const user = usersDb.find('userToken', token).find(d => d._type === 'user');
+    if (!user) return null;
+
+    if (SESSION_TTL > 0 && user.lastAccess) {
+        if (Date.now() - new Date(user.lastAccess).getTime() > SESSION_TTL) {
+            user.userToken = null; // Expire Token
+            usersDb.update(user._id, user);
+            return null;
+        }
+        // Refresh lastAccess only if more than half the TTL has elapsed
+        if (Date.now() - new Date(user.lastAccess).getTime() > SESSION_TTL / 2) {
+            user.lastAccess = new Date().toISOString();
+            usersDb.update(user._id, user);
+        }
+    } else if (SESSION_TTL > 0) {
+        user.lastAccess = new Date().toISOString();
+        usersDb.update(user._id, user);
+    }
+    
+    return user;
 }
 
 function requireAuth(req, res) {
-  const user = getAuthUser(req);
-  if (!user) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Unauthorized' }));
-    return null;
-  }
-  return user;
+    const user = getAuthUser(req);
+    if (!user || user.rights?.login === false) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return null;
+    }
+    
+    const dbInstance = getOrLoadUserDb(user.dbPath);
+    return { user, dbInstance };
 }
 
 // ============================================
 // JSON Response Helper
 // ============================================
 
-function json(res, data, status = 200) {
-  res.writeHead(status, {
+function json(res, data, status = 200, req = null) {
+  const headers = {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, X-API-Key'
-  });
+  };
+  
+  if (req && req.headers.origin) {
+    headers['Access-Control-Allow-Origin'] = req.headers.origin;
+    headers['Access-Control-Allow-Credentials'] = 'true';
+  } else {
+    headers['Access-Control-Allow-Origin'] = '*';
+  }
+
+  res.writeHead(status, headers);
   res.end(JSON.stringify(data));
 }
 
@@ -277,10 +438,10 @@ function middleTruncateEmbedText(text) {
     };
 }
 
-async function embedMessageAsync(msg, session, convNdbId, msgIdx) {
-    if (!embeddingsCol || !embedAvailable) {
+async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx) {
+    if (!instance.embeddingsCol || !embedAvailable) {
         if (msg.embedStatus === 'pending') {
-            L().info('Embed skipped (nVDB unavailable)', { msgId: msg.id, role: msg.role }, 'Embed');
+            L().info('Embed skipped (nVDB unavailable)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
         }
         return;
     }
@@ -303,10 +464,10 @@ async function embedMessageAsync(msg, session, convNdbId, msgIdx) {
             }
 
             // Store reference to conversation doc — coordinates, not data
-            embeddingsCol.insert(msg.id, vector, JSON.stringify({
+            instance.embeddingsCol.insert(msg.id, vector, JSON.stringify({
                 chatId: session.id, msgIdx
             }));
-            needsFlush++;
+            instance.needsFlush++;
 
             L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: text.length, attempt: attempt + 1 }, 'Embed');
             return;
@@ -326,7 +487,7 @@ async function embedMessageAsync(msg, session, convNdbId, msgIdx) {
     }
 
     L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3 }, 'Embed');
-    pendingQueue.push({ msg, session, convNdbId, msgIdx });
+    instance.pendingQueue.push({ msg, session, convNdbId, msgIdx });
 }
 
 // ============================================
@@ -337,12 +498,9 @@ const routes = {
   
   // Health + server type detection
   'GET /health': async (req, res) => {
-    const embedAvailable = !!embeddingsCol;
     json(res, {
       status: 'ok',
-      version: '1.0.0',
-      embedAvailable,
-      nvdb: embeddingsCol?.stats?.totalSegmentDocs || 0
+      version: '1.0.0'
     });
   },
 
@@ -353,6 +511,10 @@ const routes = {
     
     'PUT /api/chat-files/:exchangeId': async (req, res, { exchangeId }) => {
       try {
+        const authResult = requireAuth(req, res);
+        if (!authResult) return;
+        const { dbInstance } = authResult;
+        
         const body = await readBody(req);
         if (!body || !body.files || !Array.isArray(body.files)) {
           return json(res, { error: 'Invalid files payload' }, 400);
@@ -366,7 +528,7 @@ const routes = {
           const filename = `ex_${exchangeId}_${i}.${ext}`;
           
           const buffer = Buffer.from(file.data, 'base64');
-          const meta = db.storeFile('images', filename, buffer, file.type);
+          const meta = dbInstance.db.storeFile('images', filename, buffer, file.type);
           
           savedFiles.push({
             name: file.name,
@@ -427,12 +589,16 @@ const routes = {
 
     'GET /api/buckets/:bucket/:filename': async (req, res, { bucket, filename }) => {
       try {
+        const authResult = requireAuth(req, res);
+        if (!authResult) return;
+        const { dbInstance } = authResult;
+
         const dotPos = filename.lastIndexOf('.');
         if (dotPos === -1) throw new Error('invalid filename');
         const id = filename.slice(0, dotPos);
         const ext = filename.slice(dotPos + 1).toLowerCase();
 
-        const buffer = db.getFile(bucket, id, ext);
+        const buffer = dbInstance.db.getFile(bucket, id, ext);
         if (!buffer) {
           json(res, { error: 'File not found' }, 404);
           return;
@@ -498,39 +664,370 @@ const routes = {
     json(res, { type: 'node-backend' });
   },
   
-  // Auth
-  'POST /api/auth/key': async (req, res) => {
-    const users = db.find('_type', 'user');
-    if (users.length > 0) {
-      // Return existing migration user key
-      json(res, { apiKey: users[0].apiKey, message: 'Using existing migration user' });
-    } else {
-      json(res, { error: 'No users found' }, 500);
+  // Auth endpoints (Phase 1)
+  'POST /api/auth/login': async (req, res) => {
+    const body = await readBody(req);
+    const { username, password } = body;
+    
+    if (!username || !password) {
+        return json(res, { error: 'Username and password required' }, 400);
     }
+    
+    const user = usersDb.find('username', username).find(d => d._type === 'user');
+    if (!user) {
+        // Delay to mitigate brute force
+        await new Promise(r => setTimeout(r, 2000));
+        return json(res, { error: 'Invalid credentials' }, 401);
+    }
+    
+    if (user.rights?.login === false) {
+        return json(res, { error: 'Login disabled for this account' }, 403);
+    }
+    
+    const storedParts = user.passwordHash.split(':');
+    const storedSalt = storedParts[0];
+    const storedHash = storedParts.slice(1).join(':');
+    const requestHash = crypto.scryptSync(password, storedSalt, 64).toString('hex');
+    
+    if (storedHash !== requestHash) {
+        await new Promise(r => setTimeout(r, 2000));
+        return json(res, { error: 'Invalid credentials' }, 401);
+    }
+    
+    // Login successful
+    const userToken = 'sess_' + crypto.randomUUID().replace(/-/g, '');
+    user.userToken = userToken;
+    user.lastAccess = new Date().toISOString();
+    usersDb.update(user._id, user);
+    
+    // Check if user requires initialization of settings in their chat db
+    const dbInstance = getOrLoadUserDb(user.dbPath);
+    let settings = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
+    if (!settings) {
+        dbInstance.db.insert({
+            _type: 'user_settings',
+            id: user.id,
+            displayName: user.displayName,
+            settings: {} // Phase 3 placeholder
+        });
+    }
+
+    res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Set-Cookie': `userToken=${userToken}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax`,
+        'Access-Control-Allow-Origin': req.headers.origin || '*',
+        'Access-Control-Allow-Credentials': 'true'
+    });
+    res.end(JSON.stringify({ 
+        success: true, 
+        userId: user.id, 
+        displayName: user.displayName, 
+        rights: user.rights 
+    }));
+  },
+
+  'POST /api/auth/logout': async (req, res) => {
+    const user = getAuthUser(req);
+    if (user) {
+        user.userToken = null;
+        usersDb.update(user._id, user);
+    }
+    
+    res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Set-Cookie': `userToken=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`,
+        'Access-Control-Allow-Origin': req.headers.origin || '*',
+        'Access-Control-Allow-Credentials': 'true'
+    });
+    res.end(JSON.stringify({ success: true }));
+  },
+
+  'GET /api/auth/session': async (req, res) => {
+    // Only check if cookie has valid token, do not bounce or redirect
+    const user = getAuthUser(req);
+    if (!user) {
+        return json(res, { error: 'Unauthorized' }, 401);
+    }
+    
+    // Provide CORS credentials capability
+    res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': req.headers.origin || '*',
+        'Access-Control-Allow-Credentials': 'true'
+    });
+    res.end(JSON.stringify({ 
+        userId: user.id, 
+        displayName: user.displayName, 
+        rights: user.rights 
+    }));
+  },
+
+  // Legacy key endpoint (removed or returning 410)
+  'POST /api/auth/key': async (req, res) => {
+    json(res, { error: 'Cookie authentication required. Update client.' }, 410);
+  },
+
+  // ============================================
+  // Admin Endpoints
+  // ============================================
+
+  'GET /api/admin/users': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    if (!authResult.user.rights?.admin) return json(res, { error: 'Forbidden' }, 403, req);
+
+    const users = usersDb.find('_type', 'user').map(u => ({
+        id: u.id,
+        username: u.username,
+        displayName: u.displayName,
+        dbPath: u.dbPath,
+        rights: u.rights,
+        lastAccess: u.lastAccess,
+        createdAt: u.createdAt
+    }));
+    json(res, { data: users }, 200, req);
+  },
+
+  'POST /api/admin/users': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    if (!authResult.user.rights?.admin) return json(res, { error: 'Forbidden' }, 403, req);
+
+    const body = await readBody(req);
+    const { username, password, displayName, dbPath, rights } = body;
+
+    if (!username || !password || !dbPath) {
+        return json(res, { error: 'Username, password, and dbPath are required' }, 400, req);
+    }
+    
+    // Validate bounds
+    if (typeof username !== 'string' || !/^[a-zA-Z0-9_\-]+$/.test(username)) {
+        return json(res, { error: 'Invalid username format' }, 400, req);
+    }
+
+    const existing = usersDb.find('username', username).filter(d => d._type === 'user');
+    if (existing.length > 0) {
+        return json(res, { error: 'Username already exists' }, 400, req);
+    }
+
+    const salt = require('crypto').randomBytes(16).toString('hex');
+    const hash = require('crypto').scryptSync(password, salt, 64).toString('hex');
+    const newUserId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
+
+    const newUser = {
+        _type: 'user',
+        id: newUserId,
+        username: username,
+        displayName: displayName || username,
+        dbPath: dbPath,
+        passwordHash: salt + ':' + hash,
+        rights: rights || { login: true, read: true, write: true },
+        userToken: null,
+        lastAccess: null,
+        createdAt: new Date().toISOString()
+    };
+
+    usersDb.insert(newUser);
+    usersDb.compact();
+
+    logger.info('User created via admin API', { adminId: authResult.user.id, newUserId, username }, 'Admin');
+
+    json(res, { 
+        success: true, 
+        user: {
+            id: newUser.id,
+            username: newUser.username,
+            displayName: newUser.displayName,
+            dbPath: newUser.dbPath,
+            rights: newUser.rights
+        }
+    }, 201, req);
+  },
+
+  'DELETE /api/admin/users/:id': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    if (!authResult.user.rights?.admin) return json(res, { error: 'Forbidden' }, 403, req);
+
+    const targetId = params.id;
+    if (targetId === authResult.user.id) {
+        return json(res, { error: 'Cannot delete yourself' }, 400, req);
+    }
+
+    const users = usersDb.find('id', targetId).filter(d => d._type === 'user');
+    if (users.length === 0) {
+        return json(res, { error: 'User not found' }, 404, req);
+    }
+
+    const userToDelete = users[0];
+    usersDb.delete(userToDelete._id);
+    usersDb.compact();
+
+    logger.info('User deleted via admin API', { adminId: authResult.user.id, targetId, username: userToDelete.username }, 'Admin');
+    json(res, { success: true }, 200, req);
+  },
+
+  'PUT /api/admin/users/:id': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    if (!authResult.user.rights?.admin) return json(res, { error: 'Forbidden' }, 403, req);
+
+    const body = await readBody(req);
+    if (!body) return json(res, { error: 'Invalid payload' }, 400, req);
+
+    const targetId = params.id;
+    const users = usersDb.find('id', targetId).filter(d => d._type === 'user');
+    if (users.length === 0) {
+        return json(res, { error: 'User not found' }, 404, req);
+    }
+
+    const targetUser = users[0];
+    let changed = false;
+
+    if (body.displayName !== undefined && targetUser.displayName !== body.displayName) {
+        targetUser.displayName = body.displayName;
+        changed = true;
+    }
+    if (body.dbPath !== undefined && targetUser.dbPath !== body.dbPath) {
+        targetUser.dbPath = body.dbPath;
+        changed = true;
+    }
+    if (body.rights) {
+        // Enforce rights to prevent disabling yourself from admin
+        if (targetId === authResult.user.id && !body.rights.admin) {
+            body.rights.admin = true;
+        }
+        targetUser.rights = body.rights;
+        changed = true;
+    }
+    if (body.password) {
+        const newSalt = crypto.randomBytes(16).toString('hex');
+        targetUser.passwordHash = newSalt + ':' + crypto.scryptSync(body.password, newSalt, 64).toString('hex');
+        changed = true;
+    }
+
+    if (changed) {
+        targetUser.userToken = null; // force re-login
+        usersDb.update(targetUser._id, targetUser);
+        usersDb.compact();
+        logger.info('User updated via admin API', { adminId: authResult.user.id, targetId, username: targetUser.username }, 'Admin');
+    }
+
+    json(res, { success: true }, 200, req);
+  },
+  'POST /api/admin/users/:id/reset-password': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    if (!authResult.user.rights?.admin) return json(res, { error: 'Forbidden' }, 403, req);
+
+    const body = await readBody(req);
+    if (!body || !body.password) return json(res, { error: 'Password required' }, 400, req);
+
+    const targetId = params.id;
+    const users = usersDb.find('id', targetId).filter(d => d._type === 'user');
+    if (users.length === 0) return json(res, { error: 'User not found' }, 404, req);
+
+    const userToUpdate = users[0];
+    const newSalt = crypto.randomBytes(16).toString('hex');
+    userToUpdate.passwordHash = newSalt + ':' + crypto.scryptSync(body.password, newSalt, 64).toString('hex');
+    userToUpdate.userToken = null; // force re-login
+    
+    usersDb.update(userToUpdate._id, userToUpdate);
+    usersDb.compact();
+
+    logger.info('User password reset via admin API', { adminId: authResult.user.id, targetId, username: userToUpdate.username }, 'Admin');
+    json(res, { success: true }, 200, req);
   },
   
+  // ============================================
+  // User Settings API
+  // ============================================
+
+  'GET /api/user/settings': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    let settingsDoc = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
+    if (!settingsDoc) {
+      settingsDoc = {
+        _type: 'user_settings',
+        id: user.id,
+        displayName: user.displayName,
+        settings: {
+            location: 'Germany',
+            language: 'English',
+            operationMode: 'sse',
+            defaultTemperature: 0.7,
+            defaultModel: '',
+            defaultMaxTokens: null,
+            systemPresets: [],
+            mcpServers: [],
+            visionEnabled: false,
+            ttsEndpoint: 'http://localhost:2244',
+            ttsVoice: '',
+            ttsSpeed: 1.0
+        }
+      };
+      dbInstance.db.insert(settingsDoc);
+    }
+    json(res, settingsDoc, 200, req);
+  },
+
+  'PUT /api/user/settings': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    const body = await readBody(req);
+    if (!body || !body.settings) return json(res, { error: 'Invalid settings payload' }, 400, req);
+
+    let settingsDoc = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
+    if (!settingsDoc) {
+      settingsDoc = {
+        _type: 'user_settings',
+        id: user.id,
+        displayName: user.displayName,
+        settings: body.settings
+      };
+      dbInstance.db.insert(settingsDoc);
+    } else {
+      settingsDoc.settings = body.settings;
+      dbInstance.db.update(settingsDoc._id, settingsDoc);
+    }
+    json(res, settingsDoc, 200, req);
+  },
+
+  // ============================================
+  // Chat API
+  // ============================================
+
   // List sessions
   'GET /api/chats': async (req, res) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
     
-    const sessions = db.find('_type', 'session')
-      .filter(s => s.userId === user.id)
+    // DB is isolated, no need to filter by userId, but harmless
+    const sessions = dbInstance.db.find('_type', 'session')
+      .filter(s => Array.isArray(s.messages) ? s.userId === user.id : true) // Ensure structure safety
       .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
     
-    json(res, { data: sessions });
+    json(res, { data: sessions }, 200, req);
   },
   
   // Get session with messages (from conversation doc)
   'GET /api/chats/:id': async (req, res, params) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
-    
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db } = dbInstance;
+
     const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session' && s.userId === user.id);
+    const session = sessions.find(s => s._type === 'session');
     
     if (!session) {
-      json(res, { error: 'Not found' }, 404);
+      json(res, { error: 'Not found' }, 404, req);
       return;
     }
     
@@ -555,7 +1052,7 @@ const routes = {
           }
         }
       }
-      json(res, { session, messages: msgs });
+      json(res, { session, messages: msgs }, 200, req);
       return;
     }
     
@@ -564,21 +1061,23 @@ const routes = {
       .filter(m => m._type === 'message')
       .sort((a, b) => a.turnIndex - b.turnIndex);
     
-    json(res, { session, messages });
+    json(res, { session, messages }, 200, req);
   },
   
   // Create session
   'POST /api/chats': async (req, res) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
-    
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db } = dbInstance;
+
     const body = await readBody(req);
     const id = 'chat_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
     
     const session = {
       _type: 'session',
       id,
-      userId: user.id,
+      userId: user.id, // Keep userId for semantic continuity, even though DB is isolated
       title: body.title || 'New Chat',
       mode: body.mode || 'direct',
       model: body.model || null,
@@ -591,7 +1090,7 @@ const routes = {
     };
     
     db.insert(session);
-    L().info('Session created', { id, title: body.title || 'New Chat', mode: body.mode || 'direct' }, 'Session');
+    L().info('Session created', { id, title: body.title || 'New Chat', mode: body.mode || 'direct', dbPath: user.dbPath }, 'Session');
     
     // Also create empty conversation document
     const conv = {
@@ -609,37 +1108,42 @@ const routes = {
     };
     db.insert(conv);
     
-    json(res, session, 201);
+    json(res, session, 201, req);
   },
   
   // Update session metadata (pinned, title, etc.)
   'PATCH /api/chats/:id': async (req, res, params) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db } = dbInstance;
+
     const body = await readBody(req);
     const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session' && s.userId === user.id);
-    if (!session) { json(res, { error: 'Not found' }, 404); return; }
+    const session = sessions.find(s => s._type === 'session');
+    if (!session) { json(res, { error: 'Not found' }, 404, req); return; }
     if (body.pinned !== undefined) session.pinned = !!body.pinned;
     if (body.title !== undefined) session.title = body.title;
     if (body.model !== undefined) session.model = body.model;
     if (body.systemPrompt !== undefined) session.systemPrompt = body.systemPrompt;
     session.updatedAt = new Date().toISOString();
     db.update(session._id, session);
-    json(res, session);
+    json(res, session, 200, req);
   },
   
   // Add message (appends to conversation doc)
   'POST /api/chats/:id/messages': async (req, res, params) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
-    
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db } = dbInstance;
+
     const body = await readBody(req);
     const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session' && s.userId === user.id);
+    const session = sessions.find(s => s._type === 'session');
     
     if (!session) {
-      json(res, { error: 'Not found' }, 404);
+      json(res, { error: 'Not found' }, 404, req);
       return;
     }
     
@@ -690,28 +1194,38 @@ const routes = {
       
       conv.messages.push(message);
       conv.messageCount = conv.messages.length;
-    session.messageCount = conv.messageCount;
-    session.updatedAt = conv.updatedAt;
-    db.update(session._id, session);
-    
+        conv.updatedAt = new Date().toISOString();
+        db.update(conv._id, conv);
+
+      session.messageCount = conv.messageCount;
+      session.updatedAt = conv.updatedAt;
+
+      // Automatically assign chat title if it's the first user message
+      if (body.role === 'user' && session.title === 'New Chat') {
+        const titleExcerpt = (body.content || '').split('\n')[0].substring(0, 40);
+        session.title = titleExcerpt || 'New Chat';
+      }
+
     L().info('Message added', { sessionId: params.id, role: body.role, idx, contentLen: (body.content || '').length }, 'Message');
     
-    // Async embed (fire-and-forget) — store chatId + idx reference
-    embedMessageAsync(message, session, conv._id, idx);
+    // Async embed (fire-and-forget)
+    embedMessageAsync(dbInstance, message, session, conv._id, idx);
     
-    json(res, message, 201);
+    json(res, message, 201, req);
   },
   
   // Delete session
   'DELETE /api/chats/:id': async (req, res, params) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
-    
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db } = dbInstance;
+
     const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session' && s.userId === user.id);
+    const session = sessions.find(s => s._type === 'session');
     
     if (!session) {
-      json(res, { error: 'Not found' }, 404);
+      json(res, { error: 'Not found' }, 404, req);
       return;
     }
     
@@ -723,8 +1237,11 @@ const routes = {
     const fileRefsToRelease = [];
     
     for (const c of convs) {
-      if (c.messages) {
-        for (const m of c.messages) {
+        if (c.messages) {
+          for (const m of c.messages) {
+            if (dbInstance.embeddingsCol && m.id) {
+              try { dbInstance.embeddingsCol.delete(m.id); dbInstance.needsFlush++; } catch(e) {}
+            }
           if (m.attachments) {
             for (const att of m.attachments) {
                 if (att._file) {
@@ -761,13 +1278,15 @@ const routes = {
         }
       }
       
-      json(res, { success: true });
+      json(res, { success: true }, 200, req);
     },
     
   // Search (hybrid: nVDB semantic + text fallback)
   'POST /api/search': async (req, res) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db, vdb, embeddingsCol } = dbInstance;
     
     const body = await readBody(req);
     const query = (body.query || '').trim();
@@ -781,7 +1300,7 @@ const routes = {
     L().info('Search request', { query: query.slice(0, 50), role: filterRole, type: searchType, mode: filterMode }, 'Search');
 
     if (!query) {
-      json(res, { results: [] });
+      json(res, { results: [] }, 200, req);
       return;
     }
 
@@ -894,26 +1413,32 @@ const routes = {
   
   // List arena sessions (public)
   'GET /api/arena': async (req, res) => {
-    const arenas = db.find('_type', 'session')
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    
+    const arenas = dbInstance.db.find('_type', 'session')
+      .filter(s => Array.isArray(s.messages) ? s.userId === user.id : true)
       .filter(s => s.mode === 'arena')
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     
-    json(res, { data: arenas });
+    json(res, { data: arenas }, 200, req);
   },
 
   // Find session references (lineage tracking)
   'POST /api/references': async (req, res) => {
-    const user = requireAuth(req, res);
-    if (!user) return;
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db } = dbInstance;
 
     const body = await readBody(req);
     const sid = (body.session_id || '').trim();
     const dir = body.direction || 'both';
-    if (!sid) { json(res, { error: 'Missing session_id' }, 400); return; }
+    if (!sid) { json(res, { error: 'Missing session_id' }, 400, req); return; }
 
     const arenaSessions = db.find('_type', 'session')
-      .filter(s => s.mode === 'arena' || s.mode === 'direct')
-      .filter(s => s.userId === user.id);
+      .filter(s => s.mode === 'arena' || s.mode === 'direct');
 
     const refPattern = /arena-\d+[-\w]*/g;
 
@@ -965,7 +1490,7 @@ const routes = {
       }
     }
 
-    json(res, { source: { id: sid }, direction: dir, referenced_by: inbound, references: outbound });
+    json(res, { source: { id: sid }, direction: dir, referenced_by: inbound, references: outbound }, 200, req);
   },
    
   // (file serving handled below via prefix check)
@@ -1004,11 +1529,6 @@ function serveFile(req, res, filepath) {
 // ============================================
 
 const server = http.createServer(async (req, res) => {
-  // Queue requests until databases are ready
-  if (!dbReady) {
-    json(res, { error: 'Starting up...', dbReady: false }, 503);
-    return;
-  }
   const startTime = Date.now();
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   let pathname = parsedUrl.pathname;
@@ -1150,4 +1670,14 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': mime });
       res.end(data);
     });
+});
+
+// Start HTTP server
+server.listen(PORT, () => {
+  if (logger) {
+      logger.info('Chat Backend running', { port: PORT }, 'Server');
+      logger.info('Health endpoint', { url: `http://localhost:${PORT}/health` }, 'Server');
+  } else {
+      console.log(`Chat Backend running on port ${PORT}`);
+  }
 });

@@ -14,8 +14,13 @@ export class ChatHistory {
         this._loadPromise = this._loadList();
     }
 
+    async refreshList() {
+        this._loadPromise = this._loadList();
+        await this._loadPromise;
+    }
+
     async _loadList() {
-        if (USE_BACKEND && backendClient.apiKey) {
+        if (USE_BACKEND && backendClient.user) {
             try {
                 const sessions = await backendClient.listSessions();
                 this.conversations = sessions
@@ -24,24 +29,16 @@ export class ChatHistory {
                     .map(s => this._backendToLocal(s));
                 return;
             } catch (err) {
-                console.warn('[ChatHistory] Backend load failed, falling back to local:', err.message);
+                console.warn('[ChatHistory] Backend load failed:', err.message);
+                this.conversations = [];
             }
-        }
-        try {
-            this.conversations = await storage.loadHistory();
-        } catch (error) {
-            console.error('[ChatHistory] Failed to load list:', error);
+        } else {
             this.conversations = [];
         }
     }
 
     async _saveList() {
-        try {
-            await storage.saveHistory(this.conversations);
-        } catch (error) {
-            console.error('[ChatHistory] Failed to save list:', error);
-        }
-        if (USE_BACKEND && backendClient.apiKey) {
+        if (USE_BACKEND && backendClient.user) {
             for (const conv of this.conversations) {
                 if (conv._dirty) {
                     backendClient.updateSession(conv.sessionId || conv.id, { 
@@ -94,7 +91,7 @@ export class ChatHistory {
         this.conversations.unshift(conversation);
         this._setActiveId(id);
 
-        if (USE_BACKEND && backendClient.apiKey) {
+        if (USE_BACKEND && backendClient.user) {
             try {
                 const serverSession = await backendClient.createSession({ title: 'New Chat' });
                 console.log('[ChatHistory] Backend session created:', serverSession.id, '(local was:', id, ')');
@@ -108,13 +105,10 @@ export class ChatHistory {
                 this._saveList();
                 return serverSession.id;
             } catch (err) {
-                console.warn('[ChatHistory] Backend create failed:', err.message, '(falling back to local:', id, ')');
+                console.warn('[ChatHistory] Backend create failed:', err.message);
             }
-        } else {
-            this._saveList();
-            this._saveConversationData(id, []);
-        }
-
+        } 
+        
         return id;
     }
 
@@ -134,25 +128,24 @@ export class ChatHistory {
         }
 
         this._saveList();
-        this._saveConversationData(id, exchanges);
         return true;
     }
 
     async load(id) {
         this._setActiveId(id);
 
-        if (USE_BACKEND && backendClient.apiKey) {
+        if (USE_BACKEND && backendClient.user) {
             try {
                 const data = await backendClient.getSession(id);
                 if (data && data.messages) {
                     return this._messagesToExchanges(data.messages);
                 }
             } catch (err) {
-                console.warn('[ChatHistory] Backend load failed, falling back to local:', err.message);
+                console.warn('[ChatHistory] Backend load failed:', err.message);
             }
         }
 
-        return await this._getConversationData(id);
+        return [];
     }
 
     delete(id) {
@@ -160,17 +153,12 @@ export class ChatHistory {
         if (index === -1) return false;
 
         this.conversations.splice(index, 1);
-        this._deleteConversationData(id);
 
-        if (USE_BACKEND && backendClient.apiKey) {
+        if (USE_BACKEND && backendClient.user) {
             backendClient.deleteSession(id).catch(err => {
                 console.warn('[ChatHistory] Backend delete failed:', err.message);
             });
-        } else {
-            this._saveList();
         }
-
-        storage.setActiveChatId(null).catch(() => {});
 
         return true;
     }
@@ -314,27 +302,6 @@ export class ChatHistory {
 
     _generateId() {
         return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-    }
-
-    _saveConversationData(id, exchanges) {
-        storage.saveConversation(id, exchanges).catch(err => {
-            console.error('[ChatHistory] Failed to save conversation data:', err);
-        });
-    }
-
-    async _getConversationData(id) {
-        try {
-            return await storage.loadConversation(id);
-        } catch (error) {
-            console.error('[ChatHistory] Failed to load conversation data:', error);
-            return [];
-        }
-    }
-
-    _deleteConversationData(id) {
-        storage.deleteConversation(id).catch(err => {
-            console.error('[ChatHistory] Failed to delete conversation data:', err);
-        });
     }
 
     async ready() {
