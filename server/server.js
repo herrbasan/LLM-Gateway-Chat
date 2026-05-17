@@ -7,6 +7,21 @@ const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
 
+// Load minimal .env natively
+try {
+    const envStr = fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf8');
+    for (const line of envStr.split('\n')) {
+        const match = line.match(/^\s*([\w_]+)\s*=\s*(.*)?\s*$/);
+        if (match) {
+            const key = match[1];
+            let val = match[2] || '';
+            val = val.replace(/\s*#.*$/, ''); // strip trailing comments
+            val = val.replace(/^(['"])(.*)\1$/, '$2').trim(); // strip quotes
+            if (!(key in process.env)) process.env[key] = val;
+        }
+    }
+} catch (e) { /* ignore missing .env */ }
+
 // Load config
 let cfg = {};
 try {
@@ -1656,6 +1671,27 @@ const server = http.createServer(async (req, res) => {
   }
   
   // Fallback: serve static frontend
+  
+  // Intercept JS config to inject environment variables dynamically
+  if (pathname === '/chat/js/config.js') {
+    res.writeHead(200, { 'Content-Type': 'application/javascript' });
+    const configObj = {
+      gatewayUrl: process.env.LLM_GATEWAY_URL || 'http://127.0.0.1:3400',
+      defaultModel: process.env.UI_DEFAULT_MODEL || '',
+      defaultTemperature: parseFloat(process.env.UI_DEFAULT_TEMP || 0.7),
+      defaultMaxTokens: process.env.UI_DEFAULT_TOKENS ? parseInt(process.env.UI_DEFAULT_TOKENS) : null,
+      operationMode: process.env.UI_OPERATION_MODE || 'sse',
+      ttsEndpoint: process.env.TTS_ENDPOINT || 'http://localhost:2244',
+      ttsVoice: process.env.TTS_VOICE || '',
+      ttsSpeed: parseFloat(process.env.TTS_SPEED || 1.0),
+      backendUrl: '',
+      enableBackend: true,
+      enableArchiveTools: true
+    };
+    res.end(`// Generated dynamically by server.js from .env\nwindow.CHAT_CONFIG = ${JSON.stringify(configObj, null, 4)};`);
+    return;
+  }
+
   let filePath = pathname === '/' ? '/chat/index.html' : pathname;
   let fullPath = path.join(__dirname, '..', filePath);
 
