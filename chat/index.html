@@ -286,7 +286,7 @@
     </nui-dialog>
 
     <!-- Chat Options Dialog -->
-    <nui-dialog id="chat-options-dialog" mode="page" title="Chat Options" data-buttons='[{"label": "Cancel", "type": "outline", "value": "cancel"}, {"label": "Save Changes", "type": "primary", "value": "save"}]'>
+    <template id="chat-options-template">
         <div style="padding: var(--nui-space); display: flex; flex-direction: column; gap: var(--nui-space);">
             
             <div class="sidebar-section">
@@ -343,7 +343,7 @@
                 </nui-button>
             </div>
         </div>
-    </nui-dialog>
+    </template>
 
     <!-- Summarize Dialog -->
     <nui-dialog id="summarize-dialog" mode="page" title="Conversation Summary">
@@ -364,7 +364,7 @@
     </nui-dialog>
 
     <!-- MCP Edit Dialog -->
-    <nui-dialog id="mcp-edit-dialog" mode="page" title="Edit Server" data-buttons='[{"label": "Cancel", "type": "outline", "value": "cancel"}, {"label": "Save Changes", "type": "primary", "value": "save"}]'>
+    <template id="mcp-edit-template">
         <div style="padding: 1rem; max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem;">
             <nui-input>
                 <label>Server URL</label>
@@ -372,13 +372,18 @@
             </nui-input>
 
             <div>
-                <h3 style="margin: 0 0 1rem 0; color: var(--text-color); font-size: 1.1rem;">Available Tools</h3>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                    <h3 style="margin: 0; color: var(--text-color); font-size: 1.1rem;">Available Tools</h3>
+                    <nui-button variant="transparent" id="mcp-edit-toggle-all">
+                        <button type="button">Toggle All</button>
+                    </nui-button>
+                </div>
                 <div id="mcp-edit-tools-container" style="display: flex; flex-direction: column;">
                     <!-- populated dynamically -->
                 </div>
             </div>
         </div>
-    </nui-dialog>
+    </template>
 
     <!-- Config - Edit chat/js/config.js to configure your Gateway -->
     <script src="js/config.js?v=2"></script>

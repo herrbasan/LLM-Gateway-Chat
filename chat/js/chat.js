@@ -3425,7 +3425,7 @@ async function startEditMode(exchangeId, role = 'user') {
     const { dialog, main, result } = await nui.components.dialog.page('Edit Message', contentHtml, {
         contentScroll: false, 
         buttons: [
-            { label: 'Cancel', type: 'secondary', value: 'cancel' },
+            { label: 'Cancel', type: 'outline', value: 'cancel' },
             { label: role === 'user' ? 'Save & Resubmit' : 'Save', type: 'primary', value: 'save' }
         ]
     });
@@ -4087,33 +4087,77 @@ function renderHistoryList() {
     });
 }
 
-function openChatOptions(chatId) {
-    currentOptionsChatId = chatId;
+async function openChatOptions(chatId) {
     const chatMeta = chatHistory.conversations.find(c => c.id === chatId);
     if (!chatMeta) return;
 
-    const dialog = document.getElementById('chat-options-dialog');
-    const titleInput = document.getElementById('chat-options-title-input');
-    const categoryInput = document.getElementById('chat-options-category-input');
-    const pinToggle = document.getElementById('chat-options-pin-toggle');
-    const createdDateSpan = document.getElementById('chat-options-created-date');
-    const updatedDateSpan = document.getElementById('chat-options-updated-date');
-    const msgCountSpan = document.getElementById('chat-options-msg-count');
+    const template = document.getElementById('chat-options-template');
+    if (!template) return;
     
-    titleInput.value = chatMeta.title || 'New Chat';
-    categoryInput.value = chatMeta.category || '';
-    pinToggle.checked = !!chatMeta.pinned;
+    const content = template.content.cloneNode(true);
     
-    createdDateSpan.textContent = new Date(chatMeta.timestamp).toLocaleString();
-    updatedDateSpan.textContent = new Date(chatMeta.updatedAt).toLocaleString();
+    // Bind initial values
+    const titleInput = content.getElementById('chat-options-title-input');
+    const categoryInput = content.getElementById('chat-options-category-input');
+    const pinToggle = content.getElementById('chat-options-pin-toggle');
+    const createdDateSpan = content.getElementById('chat-options-created-date');
+    const updatedDateSpan = content.getElementById('chat-options-updated-date');
+    const msgCountSpan = content.getElementById('chat-options-msg-count');
     
-    // Attempt async fetch of messages for length
-    msgCountSpan.textContent = 'Counting...';
-    storage.loadConversation(chatId).then(exchanges => {
-        if (!exchanges) {
-            msgCountSpan.textContent = '0';
-            return;
+    if (titleInput) titleInput.value = chatMeta.title || 'New Chat';
+    if (categoryInput) categoryInput.value = chatMeta.category || '';
+    if (pinToggle) pinToggle.checked = !!chatMeta.pinned;
+    if (createdDateSpan) createdDateSpan.textContent = new Date(chatMeta.timestamp).toLocaleString();
+    if (updatedDateSpan) updatedDateSpan.textContent = new Date(chatMeta.updatedAt).toLocaleString();
+    
+    // Bind buttons inline to use closure scope variables securely
+    content.getElementById('chat-options-clone-btn')?.addEventListener('click', async () => {
+        const exchanges = await storage.loadConversation(chatId);
+        if (!exchanges) return;
+        const newId = chatHistory._generateId();
+        const cloneMeta = { ...chatMeta, id: newId, title: `Copy of ${chatMeta.title || 'Chat'}`, timestamp: Date.now(), updatedAt: Date.now() };
+        chatHistory.conversations.unshift(cloneMeta);
+        chatHistory._saveList();
+        await storage.saveConversation(newId, exchanges);
+        renderHistoryList();
+        if (typeof dialog !== 'undefined' && dialog.close) dialog.close();
+        await switchChat(newId);
+        nui.components.toast?.success?.('Chat cloned successfully');
+    });
+
+    content.getElementById('chat-options-copy-json')?.addEventListener('click', (e) => {
+        exportChatAsJson(chatId, e.currentTarget);
+    });
+
+    content.getElementById('chat-options-save-json')?.addEventListener('click', () => {
+        exportChatAsJson(chatId, null, true);
+    });
+
+    content.getElementById('chat-options-save-md')?.addEventListener('click', () => {
+        exportChatAsMarkdown(chatId);
+    });
+
+    content.getElementById('chat-options-delete')?.addEventListener('click', async () => {
+        const confirm = await nui.components.dialog.confirm('Delete Conversation', 'Are you sure you want to delete this chat?\nThis action cannot be undone.');
+        if (confirm) {
+            if (typeof dialog !== 'undefined' && dialog.close) dialog.close();
+            deleteChat(chatId);
         }
+    });
+
+    // Create programmatic page dialog
+    const { dialog, main } = await nui.components.dialog.page('Edit Chat Options', content, {
+        contentScroll: true,
+        buttons: [
+            { value: 'cancel', label: 'Cancel', type: 'outline' },
+            { value: 'save', label: 'Save Changes', type: 'primary' }
+        ]
+    });
+    
+    // Async load message count
+    if (msgCountSpan) msgCountSpan.textContent = 'Counting...';
+    storage.loadConversation(chatId).then(exchanges => {
+        if (!exchanges || !msgCountSpan) return;
         let total = 0;
         exchanges.forEach(ex => {
             if (ex.user) total++;
@@ -4122,13 +4166,53 @@ function openChatOptions(chatId) {
         });
         msgCountSpan.textContent = total.toString();
     }).catch(() => {
-        msgCountSpan.textContent = 'Error';
+        if (msgCountSpan) msgCountSpan.textContent = 'Error';
     });
-    
-    dialog.showModal();
-}
 
-// ============================================
+    dialog.addEventListener('nui-dialog-close', (e) => {
+        console.log('nui-dialog-close event emitted:', e.detail);
+        const action = e.detail?.returnValue || e.detail?.value || e.detail?.id;
+        
+        if (action === 'cancel') {
+            // dialog is already closed
+        } else if (action === 'save') {
+           const newTitle = titleInput?.value.trim() || '';
+           const newCategory = categoryInput?.value.trim() || '';
+           const newPinned = pinToggle?.checked || false;
+           
+           let changed = false;
+           if (newTitle && chatMeta.title !== newTitle) {
+               chatMeta.title = newTitle;
+               changed = true;
+           }
+           if (chatMeta.category !== newCategory) {
+               chatMeta.category = newCategory;
+               changed = true;
+           }
+           if (chatMeta.pinned !== newPinned) {
+               chatMeta.pinned = newPinned;
+               changed = true;
+           }
+           
+           if (changed) {
+               chatMeta._dirty = true;
+               chatHistory._saveList();
+               renderHistoryList();
+               nui.components.toast?.success?.('Chat options saved');
+               if (currentChatId === chatId) {
+                 if (window.conversation) {
+                    window.conversation.title = chatMeta.title;
+                    window.conversation.category = chatMeta.category;
+                 }
+                 const titleEl = document.getElementById('current-chat-title');
+                 if (titleEl) {
+                    titleEl.textContent = chatMeta.title || 'New Chat';
+                 }
+               }
+           }
+        }
+    });
+}
 
 function updateSendButton() {
     const btn = elements.sendBtn?.querySelector('button');
@@ -4597,19 +4681,24 @@ function renderMCPServers() {
     });
 }
 
-function openMCPEditDialog(server) {
-    const dialog = document.getElementById('mcp-edit-dialog');
-    if (!dialog) return;
-
-    dialog.setAttribute('title', server.name);
-    dialog.setAttribute('data-mcp-server-id', server.id);
-    document.getElementById('mcp-edit-url').value = server.url;
+async function openMCPEditDialog(server) {
+    const template = document.getElementById('mcp-edit-template');
+    if (!template) return;
     
-    const toolsContainer = document.getElementById('mcp-edit-tools-container');
+    // We clone the template content
+    const content = template.content.cloneNode(true);
+    
+    // Get inner elements
+    const urlInput = content.getElementById('mcp-edit-url');
+    if (urlInput) urlInput.value = server.url;
+    
+    const toolsContainer = content.getElementById('mcp-edit-tools-container');
+    if (!toolsContainer) return;
+    
     toolsContainer.innerHTML = '';
 
     if (!server.tools || server.tools.length === 0) {
-        toolsContainer.innerHTML = `<p class="mcp-empty-tools">No tools available. Connect the server to load tools.</p>`;
+        toolsContainer.innerHTML = '<p class="mcp-empty-tools">No tools available. Connect the server to load tools.</p>';
     } else {
         server.tools.forEach(tool => {
             const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
@@ -4634,70 +4723,45 @@ function openMCPEditDialog(server) {
         });
     }
 
-    dialog.showModal();
+    const { dialog, main } = await nui.components.dialog.page(`Edit Server: ${server.name}`, content, {
+        contentScroll: true,
+        buttons: [
+            { label: 'Cancel', type: 'outline', value: 'cancel' },
+            { label: 'Save Changes', type: 'primary', value: 'save' }
+        ]
+    });
 
-    setTimeout(() => {
-        const btnContainer = dialog.querySelector('footer nui-button-container');
-        if (btnContainer && !btnContainer.querySelector('.mcp-toggle-all-btn')) {
-            const toggleAllBtn = document.createElement('nui-button');
-            toggleAllBtn.className = 'mcp-toggle-all-btn';
-            toggleAllBtn.setAttribute('variant', 'transparent');
-            toggleAllBtn.style.marginRight = 'auto'; // Explicitly set margin-right to pull left
-            toggleAllBtn.innerHTML = `<button type="button">Toggle All</button>`;
+    const toggleAllBtn = main.querySelector('#mcp-edit-toggle-all button');
+    if (toggleAllBtn) {
+        toggleAllBtn.addEventListener('click', () => {
+            const inputs = Array.from(main.querySelectorAll('#mcp-edit-tools-container input[type="checkbox"]'));
+            const allChecked = inputs.every(i => i.checked);
             
-            toggleAllBtn.addEventListener('click', (e) => {
-                e.preventDefault();
-                const inputs = Array.from(toolsContainer.querySelectorAll('input[type="checkbox"]'));
-                const allChecked = inputs.every(i => i.checked);
-                
-                inputs.forEach(input => {
-                    input.checked = !allChecked;
-                    const evt = new CustomEvent('change', { bubbles: true });
-                    input.dispatchEvent(evt);
-                });
+            inputs.forEach(input => {
+                input.checked = !allChecked;
+                const evt = new CustomEvent('change', { bubbles: true });
+                input.dispatchEvent(evt);
             });
-            btnContainer.insertBefore(toggleAllBtn, btnContainer.firstChild);
+        });
+    }
+
+    // Handle button clicks
+    dialog.addEventListener('nui-dialog-close', (e) => {
+        const action = e.detail?.returnValue;
+        if (action === 'save') {
+             const allCheckboxes = main.querySelectorAll('input[type="checkbox"]');
+             allCheckboxes.forEach(cb => {
+                 const toolName = cb.dataset.mcpTool;
+                 const isEnabled = cb.checked;
+                 mcpClient.setToolEnabled(server.id, toolName, isEnabled);
+             });
+             renderMCPServers();
+             nui.components.toast?.success?.('MCP Server capabilities updated');
         }
-    }, 50);
+    });
 }
 
 function setupDialogEventListeners() {
-    document.getElementById('chat-options-dialog')?.addEventListener('nui-dialog-close', (e) => {
-        if (e.detail?.value === 'save' && currentOptionsChatId) {
-            const titleInput = document.getElementById('chat-options-title-input');
-            const categoryInput = document.getElementById('chat-options-category-input');
-            const pinToggle = document.getElementById('chat-options-pin-toggle');
-            
-            const newTitle = titleInput.value.trim();
-            const newCategory = categoryInput.value.trim();
-            const newPinned = pinToggle.checked;
-            
-            const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
-            if (chatMeta) {
-                let changed = false;
-                if (newTitle && chatMeta.title !== newTitle) {
-                    chatMeta.title = newTitle;
-                    changed = true;
-                }
-                if (chatMeta.category !== newCategory) {
-                    chatMeta.category = newCategory;
-                    changed = true;
-                }
-                if (chatMeta.pinned !== newPinned) {
-                    chatMeta.pinned = newPinned;
-                    changed = true;
-                }
-                
-                if (changed) {
-                    chatMeta._dirty = true;
-                    chatHistory._saveList();
-                    renderHistoryList();
-                    nui.components.toast?.success?.('Chat options saved');
-                }
-            }
-        }
-    });
-
     document.getElementById('mcp-edit-dialog')?.addEventListener('nui-dialog-close', (e) => {
         if (e.detail?.value === 'save') {
            const serverId = e.target.getAttribute('data-mcp-server-id');
@@ -4822,7 +4886,7 @@ async function showAdminUI() {
 
     const { dialog, main } = await nui.components.dialog.page('User Management', html, {
         contentScroll: true,
-        buttons: [ { label: 'Close', type: 'secondary', value: 'close' } ]
+        buttons: [ { label: 'Close', type: 'outline', value: 'close' } ]
     });
 
     const refreshTable = async () => {
@@ -4896,7 +4960,7 @@ async function showAdminUI() {
 
                 const subDialog = await nui.components.dialog.page(isEdit ? 'Edit User' : 'Add User', formHtml, {
                     contentScroll: true,
-                    buttons: [ { label: 'Cancel', type: 'secondary', value: 'cancel' } ]
+                    buttons: [ { label: 'Cancel', type: 'outline', value: 'cancel' } ]
                 });
 
                 const form = subDialog.main.querySelector('form');
