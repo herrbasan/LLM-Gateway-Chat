@@ -4627,6 +4627,7 @@ function openMCPEditDialog(server) {
     if (!dialog) return;
 
     dialog.setAttribute('title', server.name);
+    dialog.setAttribute('data-mcp-server-id', server.id);
     document.getElementById('mcp-edit-url').value = server.url;
     
     const toolsContainer = document.getElementById('mcp-edit-tools-container');
@@ -4653,17 +4654,36 @@ function openMCPEditDialog(server) {
                 <span class="mcp-tool-desc">${tool.description || 'No description available.'}</span>
             `;
             toolEl.appendChild(textDiv);
-
-            nuiCheckbox.addEventListener('nui-change', (e) => {
-                mcpClient.setToolEnabled(server.id, tool.name, e.detail.checked);
-                renderMCPServers();
-            });
             
             toolsContainer.appendChild(toolEl);
         });
     }
 
     dialog.showModal();
+
+    setTimeout(() => {
+        const btnContainer = dialog.querySelector('footer nui-button-container');
+        if (btnContainer && !btnContainer.querySelector('.mcp-toggle-all-btn')) {
+            const toggleAllBtn = document.createElement('nui-button');
+            toggleAllBtn.className = 'mcp-toggle-all-btn';
+            toggleAllBtn.setAttribute('variant', 'transparent');
+            toggleAllBtn.style.marginRight = 'auto'; // Explicitly set margin-right to pull left
+            toggleAllBtn.innerHTML = `<button type="button">Toggle All</button>`;
+            
+            toggleAllBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                const inputs = Array.from(toolsContainer.querySelectorAll('input[type="checkbox"]'));
+                const allChecked = inputs.every(i => i.checked);
+                
+                inputs.forEach(input => {
+                    input.checked = !allChecked;
+                    const evt = new CustomEvent('change', { bubbles: true });
+                    input.dispatchEvent(evt);
+                });
+            });
+            btnContainer.insertBefore(toggleAllBtn, btnContainer.firstChild);
+        }
+    }, 50);
 }
 
 function setupDialogEventListeners() {
@@ -4700,6 +4720,23 @@ function setupDialogEventListeners() {
                     nui.components.toast?.success?.('Chat options saved');
                 }
             }
+        }
+    });
+
+    document.getElementById('mcp-edit-dialog')?.addEventListener('nui-dialog-close', (e) => {
+        if (e.detail?.value === 'save') {
+           const serverId = e.target.getAttribute('data-mcp-server-id');
+           if (serverId) {
+               const toolsContainer = document.getElementById('mcp-edit-tools-container');
+               const allCheckboxes = toolsContainer.querySelectorAll('input[type="checkbox"]');
+               allCheckboxes.forEach(cb => {
+                   const toolName = cb.dataset.mcpTool;
+                   const isEnabled = cb.checked;
+                   mcpClient.setToolEnabled(serverId, toolName, isEnabled);
+               });
+               renderMCPServers();
+               nui.components.toast?.success?.('MCP Server capabilities updated');
+           }
         }
     });
 

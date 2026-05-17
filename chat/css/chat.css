@@ -1598,3 +1598,9 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     flex-shrink: 0;
 }
 
+ 
+ / *   M C P   E d i t   d i a l o g   l a y o u t   * /  
+ # m c p - e d i t - d i a l o g   f o o t e r   n u i - b u t t o n - c o n t a i n e r   >   n u i - b u t t o n : f i r s t - c h i l d   {  
+         m a r g i n - r i g h t :   a u t o ;  
+ }  
+ 
