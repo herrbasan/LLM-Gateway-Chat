@@ -21,7 +21,7 @@ const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
 const TTS_ENDPOINT = CONFIG.ttsEndpoint || 'http://localhost:2244';
 const TTS_VOICE = CONFIG.ttsVoice || '';
 const TTS_SPEED = CONFIG.ttsSpeed ?? 1.0;
-const BACKEND_URL = CONFIG.backendUrl || 'http://localhost:3500';
+const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http://localhost:3500';
 const BACKEND_API_KEY = CONFIG.backendApiKey || '';
 const ENABLE_ARCHIVE_TOOLS = CONFIG.enableArchiveTools !== false;
 
@@ -762,7 +762,7 @@ async function init() {
     }
 
     // ---- Load chat history ----
-    if (CONFIG.enableBackend === true && !!CONFIG.backendUrl) {
+    if (CONFIG.enableBackend === true && typeof CONFIG.backendUrl === 'string') {
         await chatHistory.refreshList();
     } else {
         await chatHistory.ready();
@@ -778,7 +778,7 @@ async function init() {
     }
 
     // Ensure chat history is loaded
-    if (CONFIG.enableBackend === true && !!CONFIG.backendUrl) {
+    if (CONFIG.enableBackend === true && typeof CONFIG.backendUrl === 'string') {
         // already fresh from above
     } else {
         await chatHistory.ready();

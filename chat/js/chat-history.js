@@ -6,7 +6,7 @@ import { storage } from './storage.js';
 import { backendClient } from './api-client.js';
 
 const CONFIG = window.CHAT_CONFIG || {};
-const USE_BACKEND = CONFIG.enableBackend === true && !!CONFIG.backendUrl;
+const USE_BACKEND = CONFIG.enableBackend === true && typeof CONFIG.backendUrl === 'string';
 
 export class ChatHistory {
     constructor() {

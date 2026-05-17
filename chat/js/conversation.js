@@ -7,7 +7,7 @@ import { storage } from './storage.js';
 import { backendClient } from './api-client.js';
 
 const _CONFIG = window.CHAT_CONFIG || {};
-const _USE_BACKEND = _CONFIG.enableBackend === true && !!_CONFIG.backendUrl;
+const _USE_BACKEND = _CONFIG.enableBackend === true && typeof _CONFIG.backendUrl === 'string';
 
 export class Conversation {
     constructor(storageKey = 'chat-conversation', sessionId = null) {
