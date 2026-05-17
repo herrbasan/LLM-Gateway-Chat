@@ -259,5 +259,5 @@ export class BackendClient {
 
 const CONFIG = window.CHAT_CONFIG || {};
 export const backendClient = new BackendClient(
-    CONFIG.backendUrl || 'http://localhost:3500'
+    CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http://localhost:3500'
 );
