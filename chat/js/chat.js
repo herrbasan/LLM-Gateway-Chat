@@ -4774,40 +4774,48 @@ async function showAdminUI() {
 
     const renderTable = () => `
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-            <h3 style="margin: 0;">Registered Users</h3>
+            <h3 style="margin: 0; font-size: 1.1rem; color: var(--text-color);">Registered Users</h3>
             <nui-button variant="primary" data-action="edit-user">
                 <button type="button">Add User</button>
             </nui-button>
         </div>
-        <table style="width: 100%; border-collapse: collapse; text-align: left; margin-bottom: 2rem;">
-            <thead>
-                <tr style="border-bottom: 1px solid var(--border-shade2);">
-                    <th style="padding: 0.5rem;">Username</th>
-                    <th style="padding: 0.5rem;">Display Name</th>
-                    <th style="padding: 0.5rem;">Rights</th>
-                    <th style="padding: 0.5rem; text-align: center;">Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${users.map(u => `
-                    <tr style="border-bottom: 1px solid var(--border-shade1);">
-                        <td style="padding: 0.5rem;">${u.username}</td>
-                        <td style="padding: 0.5rem;">${u.displayName}</td>
-                        <td style="padding: 0.5rem;">
-                            ${Object.keys(u.rights).filter(k => u.rights[k]).join(', ') || 'none'}
-                        </td>
-                        <td style="padding: 0.5rem; text-align: center;">
-                            <nui-button variant="outline" size="small" data-action="edit-user" data-id="${u.id}">
-                                <button type="button">Edit</button>
-                            </nui-button>
-                            <nui-button variant="danger" size="small" data-action="delete-user" data-id="${u.id}" ${u.id === backendClient.user?.userId ? 'disabled' : ''}>
-                                <button type="button">Delete</button>
-                            </nui-button>
-                        </td>
+        <div style="border: 1px solid var(--border-shade1); border-radius: var(--border-radius1, 6px); overflow: hidden; margin-bottom: 2rem;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                <thead style="background: var(--color-shade1);">
+                    <tr style="border-bottom: 1px solid var(--border-shade2);">
+                        <th style="padding: 0.75rem 1rem; color: var(--text-color-dim); font-weight: normal; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em;">Username</th>
+                        <th style="padding: 0.75rem 1rem; color: var(--text-color-dim); font-weight: normal; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em;">Display Name</th>
+                        <th style="padding: 0.75rem 1rem; color: var(--text-color-dim); font-weight: normal; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em;">Rights</th>
+                        <th style="padding: 0.75rem 1rem; color: var(--text-color-dim); font-weight: normal; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; text-align: center;">Actions</th>
                     </tr>
-                `).join('')}
-            </tbody>
-        </table>
+                </thead>
+                <tbody>
+                    ${users.map((u, i) => `
+                        <tr style="border-bottom: ${i === users.length - 1 ? 'none' : '1px solid var(--border-shade1)'};">
+                            <td style="padding: 1rem;"><strong style="color: var(--text-color);">${u.username}</strong></td>
+                            <td style="padding: 1rem; color: var(--text-color-dim);">${u.displayName || '-'}</td>
+                            <td style="padding: 1rem;">
+                                <div style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
+                                    ${Object.keys(u.rights).filter(k => u.rights[k]).map(right => 
+                                        `<span style="background: var(--border-shade1); padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.8em; color: var(--text-color-dim);">${right}</span>`
+                                    ).join('') || '<span style="color: var(--text-color-dim); font-style: italic;">none</span>'}
+                                </div>
+                            </td>
+                            <td style="padding: 1rem;">
+                                <div style="display: flex; gap: 0.5rem; justify-content: center;">
+                                    <nui-button variant="outline" size="small" data-action="edit-user" data-id="${u.id}">
+                                        <button type="button">Edit</button>
+                                    </nui-button>
+                                    <nui-button variant="danger" size="small" data-action="delete-user" data-id="${u.id}" ${u.id === backendClient.user?.userId ? 'disabled' : ''}>
+                                        <button type="button">Delete</button>
+                                    </nui-button>
+                                </div>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
     `;
 
     const html = `<div id="admin-users-container" style="padding: 1rem;">${renderTable()}</div>`;
@@ -4852,17 +4860,33 @@ async function showAdminUI() {
                 const formHtml = `
                 <div style="padding: 1rem;">
                     <form id="admin-user-editor-${id || 'new'}" style="display: grid; gap: 1rem; max-width: 400px; margin: auto;">
-                        <nui-input><label>Username</label><input type="text" name="username" ${isEdit ? 'disabled' : 'required'} value="${isEdit ? targetUser.username : ''}"></nui-input>
-                        <nui-input><label>${isEdit ? 'New Password (blank to keep)' : 'Password'}</label><input type="password" name="password" ${!isEdit ? 'required' : ''}></nui-input>
-                        <nui-input><label>Display Name</label><input type="text" name="displayName" value="${isEdit ? targetUser.displayName : ''}"></nui-input>
-                        <nui-input><label>DB Path (e.g. server/data/my_db)</label><input type="text" name="dbPath" required value="${isEdit ? targetUser.dbPath : ''}"></nui-input>
-                        <div>
-                            <label>Rights:</label>
-                            <div style="display: flex; gap: 1rem; margin-top: 0.5rem;">
-                                <label><input type="checkbox" name="right_login" ${(!isEdit || targetUser.rights?.login) ? 'checked' : ''}> Login</label>
-                                <label><input type="checkbox" name="right_admin" ${(isEdit && targetUser.rights?.admin) ? 'checked' : ''}> Admin</label>
+                        <nui-input-group>
+                            <label>Username</label>
+                            <nui-input><input type="text" name="username" ${isEdit ? 'disabled' : 'required'} value="${isEdit ? targetUser.username : ''}"></nui-input>
+                        </nui-input-group>
+                        <nui-input-group>
+                            <label>${isEdit ? 'New Password (blank to keep)' : 'Password'}</label>
+                            <nui-input><input type="password" name="password" ${!isEdit ? 'required' : ''}></nui-input>
+                        </nui-input-group>
+                        <nui-input-group>
+                            <label>Display Name</label>
+                            <nui-input><input type="text" name="displayName" value="${isEdit ? targetUser.displayName : ''}"></nui-input>
+                        </nui-input-group>
+                        <nui-input-group>
+                            <label>DB Path (e.g. server/data/my_db)</label>
+                            <nui-input><input type="text" name="dbPath" required value="${isEdit ? targetUser.dbPath : ''}"></nui-input>
+                        </nui-input-group>
+                        <nui-input-group>
+                            <label>Rights</label>
+                            <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
+                                <nui-checkbox>
+                                    <input type="checkbox" name="right_login" ${(!isEdit || targetUser.rights?.login) ? 'checked' : ''}> Login
+                                </nui-checkbox>
+                                <nui-checkbox>
+                                    <input type="checkbox" name="right_admin" ${(isEdit && targetUser.rights?.admin) ? 'checked' : ''}> Admin
+                                </nui-checkbox>
                             </div>
-                        </div>
+                        </nui-input-group>
                         <nui-button variant="primary" style="margin-top: 1rem;">
                             <button type="submit">${isEdit ? 'Update User' : 'Create User'}</button>
                         </nui-button>
