@@ -1,12 +1,16 @@
 [submodule "lib/nui_wc2"]
 	path = lib/nui_wc2
 	url = https://github.com/herrbasan/nui_wc2.git
+        branch = main
 [submodule "lib/ndb"]
-	path = lib/ndb
-	url = https://github.com/herrbasan/nDB.git
+        path = lib/ndb
+        url = https://github.com/herrbasan/nDB.git
+        branch = main
 [submodule "lib/nvdb"]
-	path = lib/nvdb
-	url = https://github.com/herrbasan/nVDB.git
+        path = lib/nvdb
+        url = https://github.com/herrbasan/nVDB.git
+        branch = master
 [submodule "lib/nlogger"]
-	path = lib/nlogger
-	url = https://github.com/herrbasan/nLogger.git
+        path = lib/nlogger
+        url = https://github.com/herrbasan/nLogger.git
+        branch = main
