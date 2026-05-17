@@ -17,7 +17,7 @@ button, input, textarea, select, a {
 /* Root theme variables - ensure NUI compatibility */
 :root {
     --sidebar-width: 24rem;
-    --chat-bubble-radius: 0.75rem;
+    --chat-bubble-radius: 0.4rem;
 }
 
 /* Layout */
@@ -783,17 +783,37 @@ nui-app:not(.nui-ready) { display: none; }
     gap: 0.5rem;
 }
 
+.chat-history-empty {
+    padding: 1rem;
+    color: var(--color-shade5);
+    font-size: 0.875rem;
+}
+
+.chat-history-category-header {
+    padding: 0.5rem 1rem 0.25rem 1rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: bold;
+    color: var(--text-color-dim);
+}
+
 .chat-history-item {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.5rem 0.75rem;
+    position: relative;
+    height: 5rem;
     background: var(--color-shade1);
     border: thin solid var(--border-shade2);
-    border-radius: 0.25rem;
+    border-left: solid 0.3rem var(--color-shade3);
+    box-shadow: 0 0 0.25rem rgba(0,0,0,0.05);
     cursor: pointer;
     font-size: 0.875rem;
     transition: all 0.2s;
+    margin-bottom: 0.5rem;
+    color: var(--text-color-dim);
+    overflow: hidden;
 }
 
 .chat-history-item:hover {
@@ -801,22 +821,15 @@ nui-app:not(.nui-ready) { display: none; }
 }
 
 .chat-history-item.active {
-    border-color: var(--color-highlight);
+    border-left: solid 0.3rem var(--color-highlight);
     background: var(--color-base);
+    color: var(--text-color);
     font-weight: 500;
 }
 
 /* Streaming indicator: pulsing green dot */
-.chat-history-item.streaming::before {
-    content: '';
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    background: #22c55e;
-    border-radius: 50%;
-    margin-right: 6px;
-    animation: streaming-pulse 1.2s ease-in-out infinite;
-    flex-shrink: 0;
+.chat-history-item.streaming {
+    border-left: solid 0.3rem var(--palette-success);
 }
 
 @keyframes streaming-pulse {
@@ -826,10 +839,31 @@ nui-app:not(.nui-ready) { display: none; }
 
 .chat-history-item-title-container {
     display: flex;
-    align-items: flex-start;
-    gap: 0.25rem;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.1rem;
+    align-items: stretch;
     flex: 1;
     min-width: 0; /* allows squishing */
+    padding-left: 1rem;
+    padding-right: 0.5rem;
+    pointer-events: none;
+}
+
+.chat-history-item-top-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+
+.chat-history-item-meta {
+    display: flex;
+    gap: 0.5rem;
+    font-size: 0.7rem;
+    color: var(--text-color);
+    opacity: 0.5;
+    margin-top: 0.1rem;
+    pointer-events: none;
 }
 
 .chat-history-item-pin {
@@ -847,6 +881,7 @@ nui-app:not(.nui-ready) { display: none; }
     overflow: hidden;
     text-overflow: ellipsis;
     margin-right: 0.5rem;
+    line-height: 1.3rem;
     word-break: break-word; /* prevent long unbroken strings stretching the box */
 }
 
@@ -854,7 +889,28 @@ nui-app:not(.nui-ready) { display: none; }
     display: flex;
     gap: 0.25rem;
     align-items: center;
-    flex-shrink: 0; /* prevents edit button from being pushed out */
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    padding-left: 2rem;
+    padding-right: 1rem;
+    background: linear-gradient(90deg, transparent 0%, var(--color-shade2) 30%, var(--color-shade2) 100%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+
+.chat-history-item:hover .chat-history-item-actions {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* Also show edit button persistently on active items */
+.chat-history-item.active .chat-history-item-actions {
+    opacity: 1;
+    pointer-events: auto;
+    background: linear-gradient(90deg, transparent 0%, var(--color-base) 30%, var(--color-base) 100%);
 }
 
 
@@ -863,12 +919,21 @@ nui-app:not(.nui-ready) { display: none; }
 
 
 
+/* Chat Options Dialog Tuning */
+#chat-options-dialog dialog {
+    width: 100%;
+    height: fit-content;
+    max-width: 500px;
+    max-height: 80vh;
+}
+
 /* Utility classes replaced from inline styles */
 .sidebar-layout { display: flex; flex-direction: column; height: 100%; padding: var(--nui-space);overflow-y: auto; box-sizing: border-box; }
 .sidebar-action-area { 
     flex-shrink: 0; 
     display: flex;
     gap: 0.5rem;
+    margin-bottom: 1rem;
 }
 .sidebar-action-area nui-button:first-child, .sidebar-action-area nui-button:first-child button { 
     flex: 1;

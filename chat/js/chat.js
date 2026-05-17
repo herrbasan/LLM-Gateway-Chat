@@ -3983,9 +3983,7 @@ function renderHistoryList() {
 
     if (allChats.length === 0) {
         const emptyMsg = document.createElement('div');
-        emptyMsg.style.padding = '1rem';
-        emptyMsg.style.color = 'var(--color-shade5)';
-        emptyMsg.style.fontSize = '0.875rem';
+        emptyMsg.className = 'chat-history-empty';
         emptyMsg.textContent = 'No previous chats.';
         elements.chatHistoryList.appendChild(emptyMsg);
         return;
@@ -4011,12 +4009,7 @@ function renderHistoryList() {
         // Add a subtle header for the category (unless it's the only one and it's Uncategorized)
         if (categories.length > 1 || cat !== 'Uncategorized') {
             const header = document.createElement('div');
-            header.style.padding = '0.5rem 1rem 0.25rem 1rem';
-            header.style.fontSize = '0.75rem';
-            header.style.textTransform = 'uppercase';
-            header.style.letterSpacing = '0.05em';
-            header.style.fontWeight = 'bold';
-            header.style.color = 'var(--text-color-dim)';
+            header.className = 'chat-history-category-header';
             header.textContent = cat;
             categoryGroup.appendChild(header);
         }
@@ -4028,13 +4021,15 @@ function renderHistoryList() {
 
             const titleDiv = document.createElement('div');
             titleDiv.className = 'chat-history-item-title-container';
-            titleDiv.style.pointerEvents = 'none';
+
+            const topRow = document.createElement('div');
+            topRow.className = 'chat-history-item-top-row';
 
             if (chat.pinned) {
                 const pinIcon = document.createElement('nui-icon');
                 pinIcon.setAttribute('name', 'star_rate');
                 pinIcon.className = 'chat-history-item-pin';
-                titleDiv.appendChild(pinIcon);
+                topRow.appendChild(pinIcon);
             }
 
             const titleSpan = document.createElement('span');
@@ -4042,7 +4037,22 @@ function renderHistoryList() {
             titleSpan.textContent = chat.title || 'New Chat';
             titleSpan.title = chat.summary ? `${chat.title}\n\n${chat.summary}` : chat.title;
             
-            titleDiv.appendChild(titleSpan);
+            topRow.appendChild(titleSpan);
+            titleDiv.appendChild(topRow);
+
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'chat-history-item-meta';
+            
+            const dateSpan = document.createElement('span');
+            const dateObj = new Date(chat.updatedAt || chat.createdAt || Date.now());
+            dateSpan.textContent = dateObj.toLocaleDateString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+            
+            const countSpan = document.createElement('span');
+            countSpan.textContent = `${chat.messageCount || 0} msgs`;
+            
+            metaDiv.appendChild(dateSpan);
+            metaDiv.appendChild(countSpan);
+            titleDiv.appendChild(metaDiv);
             
             const actionsDiv = document.createElement('div');
             actionsDiv.className = 'chat-history-item-actions';
@@ -4061,7 +4071,19 @@ function renderHistoryList() {
             item.appendChild(titleDiv);
             item.appendChild(actionsDiv);
             
-            item.addEventListener('click', () => switchChat(chat.id));
+            item.addEventListener('click', (e) => {
+                if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(chat.id).then(() => {
+                        nui.components.toast?.success?.(`Copied ID: ${chat.id}`);
+                    }).catch(err => {
+                        console.error('Failed to copy text: ', err);
+                    });
+                    return;
+                }
+                switchChat(chat.id);
+            });
             categoryGroup.appendChild(item);
         });
 
@@ -4076,12 +4098,14 @@ function openChatOptions(chatId) {
 
     const dialog = document.getElementById('chat-options-dialog');
     const titleInput = document.getElementById('chat-options-title-input');
+    const categoryInput = document.getElementById('chat-options-category-input');
     const pinToggle = document.getElementById('chat-options-pin-toggle');
     const createdDateSpan = document.getElementById('chat-options-created-date');
     const updatedDateSpan = document.getElementById('chat-options-updated-date');
     const msgCountSpan = document.getElementById('chat-options-msg-count');
     
     titleInput.value = chatMeta.title || 'New Chat';
+    categoryInput.value = chatMeta.category || '';
     pinToggle.checked = !!chatMeta.pinned;
     
     createdDateSpan.textContent = new Date(chatMeta.timestamp).toLocaleString();
@@ -4643,34 +4667,39 @@ function openMCPEditDialog(server) {
 }
 
 function setupDialogEventListeners() {
-    document.getElementById('chat-options-rename-btn')?.addEventListener('click', () => {
-        if (!currentOptionsChatId) return;
-        const titleInput = document.getElementById('chat-options-title-input');
-        const newTitle = titleInput.value.trim();
-        if (newTitle) {
+    document.getElementById('chat-options-dialog')?.addEventListener('nui-dialog-close', (e) => {
+        if (e.detail?.value === 'save' && currentOptionsChatId) {
+            const titleInput = document.getElementById('chat-options-title-input');
+            const categoryInput = document.getElementById('chat-options-category-input');
+            const pinToggle = document.getElementById('chat-options-pin-toggle');
+            
+            const newTitle = titleInput.value.trim();
+            const newCategory = categoryInput.value.trim();
+            const newPinned = pinToggle.checked;
+            
             const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
             if (chatMeta) {
-                chatMeta.title = newTitle;
-                chatMeta._dirty = true;
-                chatHistory._saveList();
-                renderHistoryList();
-                const renameBtn = document.getElementById('chat-options-rename-btn');
-                renameBtn.setLoading(true);
-                setTimeout(() => {
-                    renameBtn.setLoading(false);
-                }, 1500);
+                let changed = false;
+                if (newTitle && chatMeta.title !== newTitle) {
+                    chatMeta.title = newTitle;
+                    changed = true;
+                }
+                if (chatMeta.category !== newCategory) {
+                    chatMeta.category = newCategory;
+                    changed = true;
+                }
+                if (chatMeta.pinned !== newPinned) {
+                    chatMeta.pinned = newPinned;
+                    changed = true;
+                }
+                
+                if (changed) {
+                    chatMeta._dirty = true;
+                    chatHistory._saveList();
+                    renderHistoryList();
+                    nui.components.toast?.success?.('Chat options saved');
+                }
             }
-        }
-    });
-
-    document.getElementById('chat-options-pin-toggle')?.addEventListener('change', (e) => {
-        if (!currentOptionsChatId) return;
-        const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
-        if (chatMeta) {
-            chatMeta.pinned = e.target.checked;
-            chatMeta._dirty = true;
-            chatHistory._saveList();
-            renderHistoryList();
         }
     });
 

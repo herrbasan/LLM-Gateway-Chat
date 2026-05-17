@@ -36,7 +36,7 @@
             <div slot="right">
                 <nui-button data-action="admin" id="btn-admin" title="User Management" style="display: none;">
                     <button type="button" aria-label="User Management">
-                        <nui-icon name="settings"></nui-icon>
+                        <nui-icon name="security"></nui-icon>
                     </button>
                 </nui-button>
                 <nui-button data-action="logout" id="btn-logout" title="Log Out">
@@ -68,7 +68,6 @@
                     </nui-button>
                 </div>
 
-                <h3>History</h3>
                 <div class="chat-history-list" id="chat-history-list">
                     <!-- Chat history items injected here -->
                 </div>
@@ -286,8 +285,8 @@
     </nui-dialog>
 
     <!-- Chat Options Dialog -->
-    <nui-dialog id="chat-options-dialog" mode="page" title="Chat Options">
-        <div style="padding: var(--nui-space); max-width: 500px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--nui-space);">
+    <nui-dialog id="chat-options-dialog" mode="page" title="Chat Options" data-buttons='[{"label": "Cancel", "type": "outline", "value": "cancel"}, {"label": "Save Changes", "type": "primary", "value": "save"}]'>
+        <div style="padding: var(--nui-space); display: flex; flex-direction: column; gap: var(--nui-space);">
             
             <div class="sidebar-section">
                 <label>Chat Info & Statistics</label>
@@ -299,14 +298,14 @@
             </div>
 
             <div class="sidebar-section">
-                <label>Chat Title & Status</label>
-                <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;">
-                    <nui-input style="flex: 1;">
-                        <input type="text" id="chat-options-title-input">
+                <label>Chat Title & Metadata</label>
+                <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.5rem;">
+                    <nui-input>
+                        <input type="text" id="chat-options-title-input" placeholder="Chat Title">
                     </nui-input>
-                    <nui-button id="chat-options-rename-btn" variant="primary">
-                        <button type="button">Rename</button>
-                    </nui-button>
+                    <nui-input>
+                        <input type="text" id="chat-options-category-input" placeholder="Category">
+                    </nui-input>
                 </div>
                 <nui-checkbox title="Pin this chat to the top of the history list">
                     <input type="checkbox" id="chat-options-pin-toggle"> Pin to Top
@@ -317,16 +316,16 @@
                 <label>Actions & Export</label>
                 <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
                     <nui-button id="chat-options-clone-btn" title="Create a copy of this conversation">
-                        <button type="button"><nui-icon name="file_copy"></nui-icon> Clone Chat</button>
+                        <button type="button"><nui-icon name="content_copy"></nui-icon> Clone Chat</button>
                     </nui-button>
                     <nui-button id="chat-options-copy-json" title="Copy conversation JSON to clipboard">
-                        <button type="button"><nui-icon name="data_object"></nui-icon> Copy JSON</button>
+                        <button type="button"><nui-icon name="content_copy"></nui-icon> Copy JSON</button>
                     </nui-button>
                     <nui-button id="chat-options-save-json" title="Export to file (with images)">
                         <button type="button"><nui-icon name="download"></nui-icon> Save JSON</button>
                     </nui-button>
                     <nui-button id="chat-options-save-md" title="Export Markdown">
-                        <button type="button"><nui-icon name="save"></nui-icon> Save Markdown</button>
+                        <button type="button"><nui-icon name="download"></nui-icon> Save Markdown</button>
                     </nui-button>
                 </div>
             </div>
