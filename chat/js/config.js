@@ -28,7 +28,8 @@ window.CHAT_CONFIG = {
     // timestampInstruction: 'Do not include timestamps in your responses.',
 
     // Chat Backend (port 3500) — archive search, session management
-    backendUrl: 'http://localhost:3500',
+    // Set to empty string '' to dynamically use the same host/port the app was loaded from
+    backendUrl: '',
     backendApiKey: 'migrated-754e711f-15fe-4d9d-82a0-7efa446418dd',
 
     // Enable backend persistence
