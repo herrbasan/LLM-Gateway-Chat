@@ -12,7 +12,6 @@ class MCPClient {
         this.availableTools = []; // Cached flattened list of active tools mapped for the LLM
         this.toolRegistry = new Map(); // internal global lookup map: llmName -> { serverId, originalName, definition }
         this.enabledTools = new Map(); // Map<serverId, Map<toolName, boolean>>
-        this.onLog = null; // Callback for UI logger
         this.pendingRequests = new Map(); // requestId -> { resolve, reject, server } for SSE responses
         this._configLoaded = false;
     }
@@ -63,12 +62,9 @@ class MCPClient {
     }
 
     logTraffic(direction, payload) {
-        if (this.onLog) {
-            const time = new Date().toISOString().split('T')[1].split('.')[0];
-            const prefix = direction === 'IN' ? '<<' : '>>';
-            const text = `[${time}] ${prefix} ${JSON.stringify(payload, null, 2)}\n`;
-            this.onLog(text);
-        }
+        const time = new Date().toISOString().split('T')[1].split('.')[0];
+        const prefix = direction === 'IN' ? '<<' : '>>';
+        console.log(`[MCP] [${time}] ${prefix} ${JSON.stringify(payload)}`);
     }
 
     addServer(url, name) {

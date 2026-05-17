@@ -441,10 +441,6 @@ const elements = {
     mcpServerName: document.getElementById('mcp-server-name'),
     mcpServerUrl: document.getElementById('mcp-server-url'),
     mcpAddBtn: document.getElementById('mcp-add-btn'),
-    mcpLogsBtn: document.getElementById('mcp-logs-btn'),
-    mcpLogsDialog: document.getElementById('mcp-logs-dialog'),
-    mcpLogsClearBtn: document.getElementById('mcp-logs-clear-btn'),
-    mcpLogsTextarea: document.getElementById('mcp-logs-textarea'),
     mcpServersList: document.getElementById('mcp-servers-list'),
 
     // TTS Elements
@@ -4505,27 +4501,6 @@ function initMCP() {
         }
     });
 
-    // 4. Debug Logs
-    if (elements.mcpLogsBtn) {
-        elements.mcpLogsBtn.addEventListener('click', () => {
-            elements.mcpLogsDialog.showModal();
-        });
-    }
-    if (elements.mcpLogsClearBtn) {
-        elements.mcpLogsClearBtn.addEventListener('click', () => {
-            if(elements.mcpLogsTextarea) {
-                elements.mcpLogsTextarea.value = '';
-            }
-        });
-    }
-
-    mcpClient.onLog = (logMsg) => {
-        if (elements.mcpLogsTextarea) {
-            elements.mcpLogsTextarea.value += logMsg;
-            // auto-scroll
-            elements.mcpLogsTextarea.scrollTop = elements.mcpLogsTextarea.scrollHeight;
-        }
-    };
 }
 
 function renderMCPServers() {
