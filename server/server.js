@@ -1201,8 +1201,12 @@ const routes = {
       
       conv.messages.push(message);
       conv.messageCount = conv.messages.length;
-        conv.updatedAt = new Date().toISOString();
-        db.update(conv._id, conv);
+      conv.updatedAt = new Date().toISOString();
+      
+      // Atomic delta patching for massive conversation object
+      db.arrayPush(conv._id, 'messages', message);
+      db.set(conv._id, 'messageCount', conv.messageCount);
+      db.set(conv._id, 'updatedAt', conv.updatedAt);
 
       session.messageCount = conv.messageCount;
       session.updatedAt = conv.updatedAt;
@@ -1211,11 +1215,13 @@ const routes = {
       if (body.role === 'user' && session.title === 'New Chat') {
         const titleExcerpt = (body.content || '').split('\n')[0].substring(0, 40);
         session.title = titleExcerpt || 'New Chat';
+        db.set(session._id, 'title', session.title);
       }
       
-      db.update(session._id, session);
+      db.set(session._id, 'messageCount', session.messageCount);
+      db.set(session._id, 'updatedAt', session.updatedAt);
 
-    L().info('Message added', { sessionId: params.id, role: body.role, idx, contentLen: (body.content || '').length }, 'Message');
+      L().info('Message added', { sessionId: params.id, role: body.role, idx, contentLen: (body.content || '').length }, 'Message');
     
     // Async embed (fire-and-forget)
     embedMessageAsync(dbInstance, message, session, conv._id, idx);
