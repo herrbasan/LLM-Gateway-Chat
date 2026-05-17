@@ -1059,7 +1059,7 @@ function renderPresetList() {
 function selectPresetForEditing(preset) {
     editingPresetId = preset.id;
     renderPresetList();
-    const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+    const nameInput = document.getElementById('preset-name-input');
     if (nameInput) nameInput.value = preset.name || '';
     setPresetEditor(preset.content || '');
 }
@@ -1077,7 +1077,7 @@ async function deletePreset(id) {
 
 async function saveCurrentPreset() {
     if (!editingPresetId) return;
-    const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+    const nameInput = document.getElementById('preset-name-input');
     const content = getPresetEditorValue();
     const name = nameInput?.value?.trim() || 'Untitled';
     const preset = systemPresets.find(p => p.id === editingPresetId);
@@ -1503,7 +1503,7 @@ function setupEventListeners() {
     if (elements.managePresetsBtn) {
         elements.managePresetsBtn.addEventListener('click', () => {
             editingPresetId = null;
-        const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+        const nameInput = document.getElementById('preset-name-input');
         if (nameInput) nameInput.value = '';
         setPresetEditor('');
         renderPresetList();
@@ -1517,7 +1517,7 @@ function setupEventListeners() {
         };
         systemPresets.push(draft);
         editingPresetId = draft.id;
-        const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+        const nameInput = document.getElementById('preset-name-input');
         if (nameInput) nameInput.value = draft.name;
         setPresetEditor('');
             renderPresetList();
@@ -1532,7 +1532,7 @@ function setupEventListeners() {
         };
         systemPresets.push(draft);
         editingPresetId = draft.id;
-        const nameInput = document.getElementById('preset-name-input')?.querySelector('input');
+        const nameInput = document.getElementById('preset-name-input');
         if (nameInput) nameInput.value = draft.name;
         const editor = document.getElementById('preset-editor');
         if (editor) editor.setValue('');

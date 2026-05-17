@@ -98,43 +98,43 @@
                             </nui-select>
                         </div>
                         
-                        <div class="sidebar-section">
-                            <label>Temperature</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="temperature-input">Temperature</label>
                             <nui-input id="temperature">
-                                <input type="number" min="0" max="2" step="0.1" value="0.7">
+                                <input type="number" min="0" max="2" step="0.1" value="0.7" id="temperature-input">
                             </nui-input>
-                        </div>
+                        </nui-input-group>
                         
-                        <div class="sidebar-section">
-                            <label>Max Tokens</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="max-tokens-input">Max Tokens</label>
                             <nui-input id="max-tokens">
-                                <input type="number" min="1" placeholder="Max Context">
+                                <input type="number" min="1" placeholder="Max Context" id="max-tokens-input">
                             </nui-input>
-                        </div>
+                        </nui-input-group>
                     </div>
                     
                     <!-- User Tab -->
                     <div>
-                        <div class="sidebar-section">
-                            <label>Your Name</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="user-name-input">Your Name</label>
                             <nui-input id="user-name">
-                                <input type="text" placeholder="How the AI should address you">
+                                <input type="text" placeholder="How the AI should address you" id="user-name-input">
                             </nui-input>
-                        </div>
+                        </nui-input-group>
                         
-                        <div class="sidebar-section">
-                            <label>Location</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="user-location-input">Location</label>
                             <nui-input id="user-location">
-                                <input type="text" placeholder="e.g., Germany, USA, Japan">
+                                <input type="text" placeholder="e.g., Germany, USA, Japan" id="user-location-input">
                             </nui-input>
-                        </div>
+                        </nui-input-group>
                         
-                        <div class="sidebar-section">
-                            <label>Language Preference</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="user-language-input">Language Preference</label>
                             <nui-input id="user-language">
-                                <input type="text" placeholder="e.g., English, German, Japanese">
+                                <input type="text" placeholder="e.g., English, German, Japanese" id="user-language-input">
                             </nui-input>
-                        </div>
+                        </nui-input-group>
                     </div>
                     
                     <!-- System Tab -->
@@ -166,10 +166,10 @@
                     
                     <!-- MCP Tab -->
                     <div>
-                        <div class="sidebar-section">
-                            <label>Add MCP Server</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="mcp-server-name-input">Add MCP Server</label>
                             <nui-input id="mcp-server-name">
-                                <input type="text" placeholder="Server Name (e.g. Local Files)">
+                                <input type="text" placeholder="Server Name (e.g. Local Files)" id="mcp-server-name-input">
                             </nui-input>
                             <nui-input id="mcp-server-url" style="margin-top: 0.5rem;">
                                 <input type="url" placeholder="SSE URL (e.g. http://localhost:8080/sse)">
@@ -194,12 +194,12 @@
                     
                     <!-- TTS Tab -->
                     <div>
-                        <div class="sidebar-section">
-                            <label>Endpoint URL</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="tts-endpoint-input">Endpoint URL</label>
                             <nui-input id="tts-endpoint">
-                                <input type="url" placeholder="http://localhost:2244">
+                                <input type="url" placeholder="http://localhost:2244" id="tts-endpoint-input">
                             </nui-input>
-                        </div>
+                        </nui-input-group>
                         
                         <div class="sidebar-section">
                             <label>Voice</label>
@@ -210,12 +210,12 @@
                             </nui-select>
                         </div>
                         
-                        <div class="sidebar-section">
-                            <label>Speed</label>
+                        <nui-input-group class="sidebar-section">
+                            <label for="tts-speed-input">Speed</label>
                             <nui-input id="tts-speed">
-                                <input type="number" min="0.1" max="2.0" step="0.1" value="1.0">
+                                <input type="number" min="0.1" max="2.0" step="0.1" value="1.0" id="tts-speed-input">
                             </nui-input>
-                        </div>
+                        </nui-input-group>
                         
                         <div id="tts-status" class="tts-status" style="display: none;">
                             <!-- Status messages -->
@@ -268,14 +268,18 @@
         <div style="padding: 1rem; max-width: 400px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; margin-top: 5vh;">
             <p style="color: var(--text-color-dim); text-align: center; margin-top: 0;">Please log in to access your chats.</p>
             <form id="login-form" style="display: flex; flex-direction: column; gap: 1rem;">
-                <nui-input>
-                    <label>Username</label>
-                    <input type="text" id="login-username" name="username" required autocomplete="username">
-                </nui-input>
-                <nui-input>
-                    <label>Password</label>
-                    <input type="password" id="login-password" name="password" required autocomplete="current-password">
-                </nui-input>
+                <nui-input-group>
+                    <label for="login-username">Username</label>
+                    <nui-input>
+                        <input type="text" id="login-username" name="username" required autocomplete="username">
+                    </nui-input>
+                </nui-input-group>
+                <nui-input-group>
+                    <label for="login-password">Password</label>
+                    <nui-input>
+                        <input type="password" id="login-password" name="password" required autocomplete="current-password">
+                    </nui-input>
+                </nui-input-group>
                 <div id="login-error" style="color: var(--color-error); font-size: 0.85rem; min-height: 1rem; text-align: center;"></div>
                 <nui-button variant="primary" style="margin-top: 0.5rem;">
                     <button type="submit">Log In</button>
@@ -298,14 +302,19 @@
             </div>
 
             <div class="sidebar-section">
-                <label>Chat Title & Metadata</label>
-                <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.5rem;">
-                    <nui-input>
-                        <input type="text" id="chat-options-title-input" placeholder="Chat Title">
-                    </nui-input>
-                    <nui-input>
-                        <input type="text" id="chat-options-category-input" placeholder="Category">
-                    </nui-input>
+                  <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.5rem;">
+                      <nui-input-group>
+                          <label for="chat-options-title-input">Chat Title</label>
+                          <nui-input>
+                              <input type="text" id="chat-options-title-input" placeholder="Enter title...">
+                          </nui-input>
+                      </nui-input-group>
+                      <nui-input-group>
+                          <label for="chat-options-category-input">Category</label>
+                          <nui-input>
+                              <input type="text" id="chat-options-category-input" placeholder="Enter category...">
+                          </nui-input>
+                      </nui-input-group>
                 </div>
                 <nui-checkbox title="Pin this chat to the top of the history list">
                     <input type="checkbox" id="chat-options-pin-toggle"> Pin to Top
@@ -440,9 +449,12 @@
             </div>
             <div class="presets-editor">
                 <div class="presets-editor-top">
-                    <nui-input id="preset-name-input" style="flex:1;">
-                        <input type="text" placeholder="Preset name...">
-                    </nui-input>
+                    <nui-input-group style="flex:1;">
+                        <label for="preset-name-input" style="display: none;">Preset Name</label>
+                        <nui-input id="preset-name-wrapper">
+                            <input type="text" id="preset-name-input" placeholder="Preset name...">
+                        </nui-input>
+                    </nui-input-group>
                     <nui-button id="preset-save">
                         <button type="button"><nui-icon name="save"></nui-icon>Save Preset</button>
                     </nui-button>
