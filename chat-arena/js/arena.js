@@ -1837,9 +1837,39 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
             historyList.innerHTML = '';
 
+            const groupedHistory = {};
             for (const entry of history) {
-                const item = document.createElement('div');
-                item.className = 'arena-history-item';
+                const cat = entry.category ? entry.category.trim() : 'Uncategorized';
+                if (!groupedHistory[cat]) groupedHistory[cat] = [];
+                groupedHistory[cat].push(entry);
+            }
+
+            const categories = Object.keys(groupedHistory).sort((a, b) => {
+                if (a === 'Uncategorized') return 1;
+                if (b === 'Uncategorized') return -1;
+                return a.localeCompare(b);
+            });
+
+            for (const cat of categories) {
+                const categoryGroup = document.createElement('div');
+                categoryGroup.className = 'arena-history-category';
+                categoryGroup.style.marginBottom = '0.5rem';
+
+                if (categories.length > 1 || cat !== 'Uncategorized') {
+                    const header = document.createElement('div');
+                    header.style.padding = '0.5rem 1rem 0.25rem 1rem';
+                    header.style.fontSize = '0.75rem';
+                    header.style.textTransform = 'uppercase';
+                    header.style.letterSpacing = '0.05em';
+                    header.style.fontWeight = 'bold';
+                    header.style.color = 'var(--text-color-dim)';
+                    header.textContent = cat;
+                    categoryGroup.appendChild(header);
+                }
+
+                for (const entry of groupedHistory[cat]) {
+                    const item = document.createElement('div');
+                    item.className = 'arena-history-item';
                 item.title = `${entry.participants?.[0] || '?'} vs ${entry.participants?.[1] || '?'}`;
 
                 const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : '';
@@ -1910,7 +1940,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 item.appendChild(actionsDiv);
 
                 item.addEventListener('click', () => this._loadArena(entry.id));
-                historyList.appendChild(item);
+                categoryGroup.appendChild(item);
+                }
+                historyList.appendChild(categoryGroup);
             }
         } catch (err) {
             console.error('Failed to load history:', err);

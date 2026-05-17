@@ -1131,6 +1131,8 @@ const routes = {
     if (body.title !== undefined) session.title = body.title;
     if (body.model !== undefined) session.model = body.model;
     if (body.systemPrompt !== undefined) session.systemPrompt = body.systemPrompt;
+    if (body.category !== undefined) session.category = body.category;
+    if (body.summary !== undefined) session.summary = body.summary;
     session.updatedAt = new Date().toISOString();
     db.update(session._id, session);
     json(res, session, 200, req);
@@ -1311,9 +1313,9 @@ const routes = {
       return;
     }
 
-    // Load user's conversation docs + build message index
-    const convs = db.find('_type', 'conversation').filter(c => c.userId === user.id);
-    const userSessions = db.find('_type', 'session').filter(s => s.userId === user.id);
+    // DB is isolated per user, so we don't strictly filter by userId to allow legacy migrated data
+    const convs = db.find('_type', 'conversation');
+    const userSessions = db.find('_type', 'session');
     const convById = new Map();
     const msgIndex = []; // flat list of { chatId, idx, msg, session }
 

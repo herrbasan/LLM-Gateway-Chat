@@ -25,7 +25,9 @@ export const arenaStorage = {
             messageCount: s.messageCount || 0,
             updatedAt: s.updatedAt || s.createdAt,
             createdAt: s.createdAt,
-            topic: s.title || s.arenaConfig?.topic || ''
+            topic: s.title || s.arenaConfig?.topic || '',
+            category: s.category || '',
+            summary: s.summary || ''
         }));
     },
 

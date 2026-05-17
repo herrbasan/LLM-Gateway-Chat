@@ -45,7 +45,9 @@ export class ChatHistory {
                         pinned: !!conv.pinned,
                         title: conv.title,
                         model: conv.model,
-                        systemPrompt: conv.systemPrompt
+                        systemPrompt: conv.systemPrompt,
+                        category: conv.category,
+                        summary: conv.summary
                     }).catch(() => {});
                     conv._dirty = false;
                 }
@@ -65,6 +67,8 @@ export class ChatHistory {
             messageCount: session.messageCount || 0,
             model: session.model || '',
             systemPrompt: session.systemPrompt || '',
+            category: session.category || '',
+            summary: session.summary || '',
             mode: session.mode || 'direct',
             pinned: session.pinned || false
         };
@@ -85,7 +89,9 @@ export class ChatHistory {
             updatedAt: Date.now(),
             messageCount: 0,
             model: '',
-            systemPrompt: ''
+            systemPrompt: '',
+            category: '',
+            summary: ''
         };
 
         this.conversations.unshift(conversation);

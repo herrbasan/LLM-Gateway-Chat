@@ -30,6 +30,23 @@ const ARCHIVE_TOOLS = [
     {
         type: 'function',
         function: {
+            name: 'chat_archive_update_metadata',
+            description: 'Update the metadata for a specific session/chat. Use this to assign categories (folders), write summaries, or update titles for better organization.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    session_id: { type: 'string', description: 'The session ID to update' },
+                    title: { type: 'string', description: 'Optional new title for the chat' },
+                    summary: { type: 'string', description: 'Optional new summary of the chat' },
+                    category: { type: 'string', description: 'Optional category (acts as a folder for grouping)' }
+                },
+                required: ['session_id']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
             name: 'chat_archive_search',
             description: 'Search the conversation archive. Use semantic mode for themes/ideas, keyword mode for specific terms, hybrid for both. Returns messages ranked by relevance.',
             parameters: {
@@ -60,6 +77,22 @@ const ARCHIVE_TOOLS = [
                     limit: { type: 'number', description: 'Max messages to return (default 100)' }
                 },
                 required: ['session_id']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_archive_list_chats',
+            description: 'List all direct (normal) chat sessions with metadata. Use to browse past conversations.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    limit: { type: 'number', description: 'Max results (default 20)' },
+                    offset: { type: 'number', description: 'Pagination offset (default 0)' },
+                    date_from: { type: 'string', description: 'ISO date string — filter sessions created after this date' },
+                    date_to: { type: 'string', description: 'ISO date string — filter sessions created before this date' }
+                }
             }
         }
     },
@@ -119,6 +152,29 @@ async function executeLocalTool(toolName, args) {
     };
 
     switch (toolName) {
+        case 'chat_archive_update_metadata': {
+            console.log('[Archive Update Metadata] Args:', JSON.stringify(args));
+            const reqBody = {};
+            if (args.title) reqBody.title = args.title;
+            if (args.summary) reqBody.summary = args.summary;
+            if (args.category) reqBody.category = args.category;
+            
+            const res = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify(reqBody)
+            });
+            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            
+            // Reload the sidebar silently to reflect changes if it's not the active chat trying to overwrite something we'd override local state for
+            chatHistory.refreshList().then(() => renderHistoryList());
+            
+            return {
+                type: 'text',
+                text: JSON.stringify({ success: true, updatedFields: Object.keys(reqBody) })
+            };
+        }
+
         case 'chat_archive_search': {
             console.log('[Archive Search] Args:', JSON.stringify(args));
             const res = await fetch(`${BACKEND_URL}/api/search`, {
@@ -171,6 +227,8 @@ async function executeLocalTool(toolName, args) {
                             title: data.session?.title,
                             mode: data.session?.mode,
                             model: data.session?.model,
+                            category: data.session?.category,
+                            summary: data.session?.summary,
                             arenaConfig: data.session?.arenaConfig,
                             messageCount: data.messages?.length
                         },
@@ -186,6 +244,36 @@ async function executeLocalTool(toolName, args) {
             };
         }
 
+        case 'chat_archive_list_chats': {
+            const res = await fetch(`${BACKEND_URL}/api/chats`, { method: 'GET', headers });
+            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            const data = await res.json();
+            // Filter strictly for direct/normal chats (exclude arena)
+            let results = data.data.filter(s => s.mode !== 'arena');
+            if (args.date_from) results = results.filter(a => a.createdAt >= args.date_from);
+            if (args.date_to) results = results.filter(a => a.createdAt <= args.date_to);
+            const limit = args.limit || 20;
+            const offset = args.offset || 0;
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        total: results.length,
+                        offset,
+                        limit,
+                        results: results.slice(offset, offset + limit).map(a => ({
+                            id: a.id, title: a.title,
+                            model: a.model || 'unknown',
+                            messages: a.messageCount,
+                            created: a.createdAt,
+                            category: a.category,
+                            summary: a.summary
+                        }))
+                    }, null, 2)
+                }]
+            };
+        }
+
         case 'chat_archive_list_arena': {
             const res = await fetch(`${BACKEND_URL}/api/arena`, { method: 'GET', headers });
             if (!res.ok) throw new Error(`Backend ${res.status}`);
@@ -193,15 +281,24 @@ async function executeLocalTool(toolName, args) {
             let results = data.data;
             if (args.date_from) results = results.filter(a => a.createdAt >= args.date_from);
             if (args.date_to) results = results.filter(a => a.createdAt <= args.date_to);
+            const limit = args.limit || 20;
+            const offset = args.offset || 0;
             return {
                 content: [{
                     type: 'text',
-                    text: JSON.stringify(results.slice(0, args.limit || 20).map(a => ({
-                        id: a.id, title: a.title,
-                        models: a.arenaConfig ? `${a.arenaConfig.modelA} vs ${a.arenaConfig.modelB}` : 'unknown',
-                        messages: a.messageCount,
-                        created: a.createdAt
-                    })), null, 2)
+                    text: JSON.stringify({
+                        total: results.length,
+                        offset,
+                        limit,
+                        results: results.slice(offset, offset + limit).map(a => ({
+                            id: a.id, title: a.title,
+                            models: a.arenaConfig ? `${a.arenaConfig.modelA} vs ${a.arenaConfig.modelB}` : 'unknown',
+                            messages: a.messageCount,
+                            created: a.createdAt,
+                            category: a.category,
+                            summary: a.summary
+                        }))
+                    }, null, 2)
                 }]
             };
         }
@@ -1516,7 +1613,7 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
 
     // Archive tool context: let the LLM know it can search past conversations
     if (ENABLE_ARCHIVE_TOOLS) {
-        prompt = prompt + '\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other).';
+        prompt = prompt + '\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.';
     }
 
     return prompt;
@@ -3894,54 +3991,81 @@ function renderHistoryList() {
         return;
     }
 
-    allChats.forEach(chat => {
-        const item = document.createElement('div');
-        item.className = 'chat-history-item' + (chat.id === currentChatId ? ' active' : '');
-        item.dataset.chatId = chat.id;
+    const groupedChats = {};
+    for (const chat of allChats) {
+        const cat = chat.category ? chat.category.trim() : 'Uncategorized';
+        if (!groupedChats[cat]) groupedChats[cat] = [];
+        groupedChats[cat].push(chat);
+    }
 
-        const titleDiv = document.createElement('div');
-        titleDiv.style.display = 'flex';
-        titleDiv.style.alignItems = 'center';
-        titleDiv.style.gap = '0.25rem';
-        titleDiv.style.pointerEvents = 'none';
+    const categories = Object.keys(groupedChats).sort((a, b) => {
+        if (a === 'Uncategorized') return 1;
+        if (b === 'Uncategorized') return -1;
+        return a.localeCompare(b);
+    });
 
-        if (chat.pinned) {
-            const pinIcon = document.createElement('nui-icon');
-            pinIcon.setAttribute('name', 'star_rate');
-            pinIcon.style.fontSize = '0.875rem';
-            pinIcon.style.color = 'var(--text-color-dim)';
-            titleDiv.appendChild(pinIcon);
+    categories.forEach(cat => {
+        const categoryGroup = document.createElement('div');
+        categoryGroup.className = 'chat-history-category';
+        
+        // Add a subtle header for the category (unless it's the only one and it's Uncategorized)
+        if (categories.length > 1 || cat !== 'Uncategorized') {
+            const header = document.createElement('div');
+            header.style.padding = '0.5rem 1rem 0.25rem 1rem';
+            header.style.fontSize = '0.75rem';
+            header.style.textTransform = 'uppercase';
+            header.style.letterSpacing = '0.05em';
+            header.style.fontWeight = 'bold';
+            header.style.color = 'var(--text-color-dim)';
+            header.textContent = cat;
+            categoryGroup.appendChild(header);
         }
 
-        const titleSpan = document.createElement('span');
-        titleSpan.className = 'chat-history-item-title';
-        titleSpan.textContent = chat.title || 'New Chat';
-        titleSpan.title = chat.title;
-        titleSpan.style.flex = '1';
-        titleSpan.style.overflow = 'hidden';
-        titleSpan.style.textOverflow = 'ellipsis';
-        
-        titleDiv.appendChild(titleSpan);
-        
-        const actionsDiv = document.createElement('div');
-        actionsDiv.className = 'chat-history-item-actions';
-        
-        const optionsBtn = document.createElement('nui-button');
-        optionsBtn.className = 'chat-history-item-action';
-        optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
-        optionsBtn.title = 'Chat Options';
-        optionsBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            openChatOptions(chat.id);
-        });
-        
-        actionsDiv.appendChild(optionsBtn);
+        groupedChats[cat].forEach(chat => {
+            const item = document.createElement('div');
+            item.className = 'chat-history-item' + (chat.id === currentChatId ? ' active' : '');
+            item.dataset.chatId = chat.id;
 
-        item.appendChild(titleDiv);
-        item.appendChild(actionsDiv);
-        
-        item.addEventListener('click', () => switchChat(chat.id));
-        elements.chatHistoryList.appendChild(item);
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'chat-history-item-title-container';
+            titleDiv.style.pointerEvents = 'none';
+
+            if (chat.pinned) {
+                const pinIcon = document.createElement('nui-icon');
+                pinIcon.setAttribute('name', 'star_rate');
+                pinIcon.className = 'chat-history-item-pin';
+                titleDiv.appendChild(pinIcon);
+            }
+
+            const titleSpan = document.createElement('span');
+            titleSpan.className = 'chat-history-item-title';
+            titleSpan.textContent = chat.title || 'New Chat';
+            titleSpan.title = chat.summary ? `${chat.title}\n\n${chat.summary}` : chat.title;
+            
+            titleDiv.appendChild(titleSpan);
+            
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'chat-history-item-actions';
+            
+            const optionsBtn = document.createElement('nui-button');
+            optionsBtn.className = 'chat-history-item-action';
+            optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+            optionsBtn.title = 'Chat Options';
+            optionsBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openChatOptions(chat.id);
+            });
+            
+            actionsDiv.appendChild(optionsBtn);
+
+            item.appendChild(titleDiv);
+            item.appendChild(actionsDiv);
+            
+            item.addEventListener('click', () => switchChat(chat.id));
+            categoryGroup.appendChild(item);
+        });
+
+        elements.chatHistoryList.appendChild(categoryGroup);
     });
 }
 
