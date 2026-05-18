@@ -22,6 +22,11 @@ The default sorting of chats are currently by "last updated", which is correct. 
 
 Status: Pending
 
+## Operation mode setting doesn't save
+the "operation mode" select does not save the setting to the database. On reload it always defaults to "SSE Rest"
+
+Status: Resolved — Changed event listener from `change` on inner `<select>` to `nui-change` on `<nui-select>` component. Fixed setting initial value on reload to use `.setValue(opMode)`.
+
 ## Feature - Allow different sortings
 
 This could possibly something we allow to configure in the config pane. Or we add a sort select (using the nui-select component) to the top of the chat list, allowing users to choose how they want their chats sorted (by created time or last updated time or name of the chat).
@@ -32,18 +37,19 @@ Status: Backlog
 
 When I try to use the MCP Vision tool to analyze an image, it does not return any results. This might be related to the issue with image attachments not being displayed properly, or there might be a problem with the MCP Vision integration.
 
-Status: Resolved — `autoCreateVisionSessions()` now does the full pipeline (create session + analyze image) inline, injects analysis text into assistant response. Vision tools filtered from LLM's tools array to prevent hallucination/redundant calls. No tool exchanges injected into conversation history.
+Status: Re-opened — It is not working consistently. It might depend on the model adapter acting on the LLM Gateway. Note that it's not entirely done yet.
+(Previously marked resolved via `autoCreateVisionSessions()` pipeline, but the fix is intermittent.)
 
-## Question: What happens when a conversation containing images is deleted?
-
-When I delete a conversation that contains images, I want to know if the images are also deleted from the server or if they remain stored. This is important for understanding how data is managed and ensuring that there are no orphaned files taking up space.
-
-**Answer:** Images ARE cleaned up on UI deletion. `deleteChat()` iterates exchanges and calls `imageStore.delete(ex.id)` → `DELETE /api/chat-files/:exchangeId` → server `rm -rf server/data/files/{exchangeId}/`. No orphaned files from normal UI deletion.
-
-The nDB evolution plan describes a future Rust-level feature where link-type schema fields trigger cascading file deletion and TTL-based trash sweeps, but that's not implemented yet. Currently only the UI-triggered deletion path cleans up files — direct nDB manipulation would leave orphans.
 
 ## Arena chats are not automatically embedded
 
 Arena sessions are not picked up by the automatic embedding pipeline. They only get embedded if manually triggered via the arena UI or a separate reindex. This means arena content is missing from semantic search results.
 
 Status: Resolved — Arena `_saveToStorage()` used `this.id` (arena-* format) for `backend.sendMessage()`, but the backend creates sessions with `chat_*` IDs. The 404 responses meant messages were never stored → no embedding. Fix: ensure a backend session mapping (`this._backendChatId`) is created on first sync, and use that ID for all message POSTs.
+## Embedding pipeline inactive during chat
+
+Automatic embedding does not seem to trigger when having a conversation in the chat. Monitoring the GPU usage on the embedding backend shows no activity.
+
+Status: Resolved — 
+1. Server failed to create the `embeddings` collection inside nVDB internally during mount because the native binding threw a "collection not found" error when attempting to fetch it. Wrapped `getCollection` in a check against `listCollections()` to conditionally invoke `createCollection('embeddings', 2560)`.
+2. The `embedUrl` setting inside `server/config.json` was pointing to `http://localhost:3400/v1/embeddings` instead of the required `http://192.168.0.100:3400/v1/embeddings`. After 3 automated retries on `localhost`, the endpoint threw `ECONNREFUSED` internally and permanently disabled the global `embedAvailable` flag for the active backend session, meaning background jobs were silently dropped. Updated the configuration to point to the correct IP.

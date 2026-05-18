@@ -261,8 +261,10 @@
     </nui-app>
 
     <!-- Login Dialog -->
-    <nui-dialog id="login-dialog" mode="page" title="LLM Gateway Chat - Login">
-        <div style="padding: 1rem; max-width: 400px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; margin-top: 5vh;">
+    <nui-dialog id="login-dialog">
+        <dialog>
+            <div style="padding: 1rem; max-width: 400px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; margin-top: 5vh;">
+                <h2 style="margin: 0;">LLM Gateway Chat - Login</h2>
             <p style="color: var(--text-color-dim); text-align: center; margin-top: 0;">Please log in to access your chats.</p>
             <form id="login-form" style="display: flex; flex-direction: column; gap: 1rem;">
                 <nui-input-group>
@@ -287,7 +289,7 @@
 
     <!-- Chat Options Dialog -->
     <template id="chat-options-template">
-        <div style="padding: var(--nui-space); display: flex; flex-direction: column; gap: var(--nui-space);">
+        <div data-chat-id="" style="padding: var(--nui-space); display: flex; flex-direction: column; gap: var(--nui-space);">
             
             <div class="sidebar-section">
                 <label>Chat Info & Statistics</label>
@@ -321,60 +323,65 @@
             <div class="sidebar-section">
                 <label>Actions & Export</label>
                 <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
-                    <nui-button id="chat-options-clone-btn" title="Create a copy of this conversation">
-                        <button type="button"><nui-icon name="content_copy"></nui-icon> Clone Chat</button>
+                    <nui-button title="Create a copy of this conversation">
+                        <button type="button" data-action="chat-options:clone"><nui-icon name="content_copy"></nui-icon> Clone Chat</button>
                     </nui-button>
-                    <nui-button id="chat-options-copy-json" title="Copy conversation JSON to clipboard">
-                        <button type="button"><nui-icon name="content_copy"></nui-icon> Copy JSON</button>
+                    <nui-button title="Copy conversation JSON to clipboard">
+                        <button type="button" data-action="chat-options:copy-json"><nui-icon name="content_copy"></nui-icon> Copy JSON</button>
                     </nui-button>
-                    <nui-button id="chat-options-save-json" title="Export to file (with images)">
-                        <button type="button"><nui-icon name="download"></nui-icon> Save JSON</button>
+                    <nui-button title="Export to file (with images)">
+                        <button type="button" data-action="chat-options:save-json"><nui-icon name="download"></nui-icon> Save JSON</button>
                     </nui-button>
-                    <nui-button id="chat-options-save-md" title="Export Markdown">
-                        <button type="button"><nui-icon name="download"></nui-icon> Save Markdown</button>
+                    <nui-button title="Export Markdown">
+                        <button type="button" data-action="chat-options:save-md"><nui-icon name="download"></nui-icon> Save Markdown</button>
                     </nui-button>
                 </div>
             </div>
 
-            <div class="sidebar-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+            <div class="sidebar-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-shade1);">
                 <label style="color: var(--color-danger);">Danger Zone</label>
-                <nui-button id="chat-options-delete" variant="danger">
-                    <button type="button"><nui-icon name="delete"></nui-icon> Delete Conversation</button>
+                <nui-button variant="danger">
+                    <button type="button" data-action="chat-options:delete"><nui-icon name="delete"></nui-icon> Delete Conversation</button>
                 </nui-button>
             </div>
         </div>
     </template>
 
     <!-- Summarize Dialog -->
-    <nui-dialog id="summarize-dialog" mode="page" title="Conversation Summary">
-        <div style="padding: 1rem; max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem;">
-            <div id="summarize-status" style="color: var(--text-color-dim); font-style: italic;">Generating summary...</div>
-            <nui-textarea style="flex: 1; display: flex; flex-direction: column; min-height: 15rem;">
-                <textarea id="summarize-output" readonly style="flex: 1; font-family: inherit; font-size: 0.9rem; line-height: 1.6; resize: none; background: var(--color-shade1); color: var(--text-color);"></textarea>
-            </nui-textarea>
-            <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
-                <nui-button id="summarize-copy-btn">
-                    <button type="button">Copy</button>
-                </nui-button>
-                <nui-button onclick="document.getElementById('summarize-dialog').close()">
-                    <button type="button">Close</button>
-                </nui-button>
+    <nui-dialog id="summarize-dialog">
+        <dialog>
+            <div style="padding: 1rem; max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem;">
+                <h2 style="margin: 0;">Conversation Summary</h2>
+                <div id="summarize-status" style="color: var(--text-color-dim); font-style: italic;">Generating summary...</div>
+                <nui-textarea style="flex: 1; display: flex; flex-direction: column; min-height: 15rem;">
+                    <textarea id="summarize-output" readonly style="flex: 1; font-family: inherit; font-size: 0.9rem; line-height: 1.6; resize: none; background: var(--color-shade1); color: var(--text-color);"></textarea>
+                </nui-textarea>
+                <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+                    <nui-button id="summarize-copy-btn">
+                        <button type="button">Copy</button>
+                    </nui-button>
+                    <nui-button>
+                        <button type="button" data-action="dialog-close@#summarize-dialog">Close</button>
+                    </nui-button>
+                </div>
             </div>
-        </div>
+        </dialog>
     </nui-dialog>
 
     <!-- MCP Edit Dialog -->
     <template id="mcp-edit-template">
         <div style="padding: 1rem; max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem;">
-            <nui-input>
+            <nui-input-group>
                 <label>Server URL</label>
-                <input type="text" id="mcp-edit-url" readonly style="color: var(--color-shade5);">
-            </nui-input>
+                <nui-input>
+                    <input type="text" id="mcp-edit-url" readonly style="color: var(--color-shade5);">
+                </nui-input>
+            </nui-input-group>
 
             <div>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                     <h3 style="margin: 0; color: var(--text-color); font-size: 1.1rem;">Available Tools</h3>
-                    <nui-button variant="transparent" id="mcp-edit-toggle-all">
+                    <nui-button variant="ghost" id="mcp-edit-toggle-all">
                         <button type="button">Toggle All</button>
                     </nui-button>
                 </div>

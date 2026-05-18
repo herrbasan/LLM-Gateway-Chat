@@ -4,7 +4,7 @@
     "logRetentionDays": 1,
     "usersDbPath": "server/data/users_db/data.jsonl",
     "sessionTtlMinutes": 1440,
-    "embedUrl": "http://localhost:3400/v1/embeddings",
+    "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
     "embedDims": 2560,
     "embedMaxTokens": 25000,
     "embedTokRatio": 2.5,

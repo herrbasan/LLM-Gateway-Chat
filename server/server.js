@@ -26,7 +26,7 @@ try {
 let cfg = {};
 try {
     cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
-} catch { /* use defaults below */ }
+} catch (err) { /* use defaults below */ }
 
 const PORT           = process.env.CHAT_PORT           || cfg.port              || 3500;
 const LOGS_DIR       = process.env.CHAT_LOGS_DIR       || cfg.logsDir           || 'server/logs';
@@ -197,7 +197,7 @@ setInterval(async () => {
                 embedFailCount = 0;
                 logger.info('Embed endpoint recovered', {}, 'Embed');
             }
-        } catch {}
+        } catch (err) {}
     }
 
     // 2. Iterate each mounted database instance for pending embeds and flushing
@@ -251,10 +251,16 @@ function getOrLoadUserDb(dbPath) {
     let vdb, embeddingsCol;
     try {
         vdb = new nVDB(nvdbDir);
-        embeddingsCol = vdb.getCollection('embeddings');
+        const collections = vdb.listCollections();
+        if (collections.includes('embeddings')) {
+            embeddingsCol = vdb.getCollection('embeddings');
+        } else {
+            logger.info('Creating nVDB embeddings collection', { dbPath, dims: EMBEDDING_DIMS }, 'Server');
+            embeddingsCol = vdb.createCollection('embeddings', EMBEDDING_DIMS);
+        }
         logger.info('nVDB collection ready for user', { dbPath }, 'Server');
-    } catch {
-        logger.warn('nVDB failed init for user', { dbPath }, 'Server');
+    } catch (err) {
+        logger.warn('nVDB failed init for user', { dbPath, error: err.message, stack: err.stack }, 'Server');
     }
     
     const instance = {
@@ -390,7 +396,7 @@ function readBody(req) {
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {});
-      } catch {
+      } catch (err) {
         reject(new Error('Invalid JSON'));
       }
     });
@@ -1629,7 +1635,7 @@ const server = http.createServer(async (req, res) => {
       } else {
         json(res, { error: 'File not found' }, 404);
       }
-    } catch {
+    } catch (err) {
       json(res, { error: 'File not found' }, 404);
     }
     return;
@@ -1697,7 +1703,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     await fs.promises.stat(fullPath);
-  } catch {
+  } catch (err) {
     filePath = '/chat' + pathname;
     fullPath = path.join(__dirname, '..', filePath);
   }
