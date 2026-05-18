@@ -381,7 +381,6 @@ const LOCAL_TOOL_NAMES = new Set(ARCHIVE_TOOLS.map(t => t.function.name));
 // State
 let currentChatId = null;
 let conversation = null;
-let currentOptionsChatId = null;
 
 // Multi-conversation: per-chat DOM containers (hidden containers for background chats)
 const chatContainers = new Map(); // chatId -> HTMLDivElement
@@ -679,13 +678,16 @@ function ensureVisionToggleUI() {
         if (checkbox) {
             checkbox.checked = useVisionAnalysis;
         }
-        
+
         // Add event listener
         checkbox?.addEventListener('change', (e) => {
             useVisionAnalysis = e.target.checked;
             storage.setPref('mcp-vision-enabled', useVisionAnalysis).catch(() => {});
             updateVisionModeIndicator();
         });
+
+        // Ensure indicator is updated on creation
+        updateVisionModeIndicator();
     }
 }
 
@@ -881,6 +883,14 @@ async function applyDefaultConfig() {
     
     // Restore MCP vision toggle preference (default: OFF)
     useVisionAnalysis = savedMcpVision !== null ? savedMcpVision : false;
+
+    // Sync checkbox state with restored preference and update indicator
+    const visionToggle = document.getElementById('vision-toggle-container');
+    const checkbox = visionToggle?.querySelector('input');
+    if (checkbox) {
+        checkbox.checked = useVisionAnalysis;
+    }
+    updateVisionModeIndicator();
 
     // Operation mode preference
     const savedOperationMode = await storage.getPref('operation-mode');
@@ -1163,7 +1173,10 @@ async function populateModelSelect() {
     if (!modelToSelect) {
         modelToSelect = chatModels[0].id;
     }
-    
+
+    // Model selection affects vision toggle indicator
+    updateVisionModeIndicator();
+
     // Build items array for NUI setItems API
     const items = [{ value: '', label: 'Select model...' }];
     
@@ -1676,11 +1689,19 @@ async function sendMessage() {
     // This happens AFTER user message is rendered, BEFORE LLM responds
     if (shouldUseMcpVision) {
         try {
-            await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, currentChatId);
-            
-            // Remove image attachments from the exchange so they aren't forwarded
-            // to the Gateway. The MCP Vision analysis text is injected into the
-            // user message by streamResponse instead.
+            const visionResult = await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, currentChatId);
+
+            if (visionResult && visionResult.analysis) {
+                // Append analysis directly to user message — becomes natural
+                // conversation history, no tool_calls backfill, no thinking_signature issues
+                const ex = conversation.getExchange(currentExchangeId);
+                if (ex?.user?.content) {
+                    ex.user.content += `\n\n[Auto-vision: ${visionResult.sessionId}]\n${visionResult.analysis}`;
+                    conversation.save();
+                }
+            }
+
+            // Remove image attachments so raw base64 isn't sent to Gateway
             const ex = conversation.getExchange(currentExchangeId);
             if (ex?.user?.attachments) {
                 ex.user.attachments = [];
@@ -1796,9 +1817,8 @@ async function analyzeImagesWithVision(images) {
 // Auto Vision Session Creation
 // ============================================
 
-// Module-level storage for auto-vision analysis results
-// These are injected into the assistant's response as a preamble before streaming begins
-let autoVisionResults = [];
+// Auto-vision analysis is appended directly to the user message content.
+// No tool exchange — avoids dummy assistant messages that break DeepSeek thinking_signature.
 
 async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
     // Verify vision tools are available
@@ -1831,6 +1851,7 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
     container?.appendChild(visionStatusEl);
     scrollToBottom();
     
+    let lastSessionId = null;
     for (let i = 0; i < images.length; i++) {
         const img = images[i];
         
@@ -1878,6 +1899,7 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
                 results.push(`[Image ${i + 1}${img.name ? ` (${img.name})` : ''}]: Vision session could not be created.`);
                 continue;
             }
+            lastSessionId = sessionId;
             
             // Update status
             if (notifEl) {
@@ -1923,10 +1945,16 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
         if (notifEl) {
             notifEl.style.display = 'none';
         }
-        
-        // Store analysis results for streamResponse to inject into assistant content
+
+        // Return analysis so caller can append it to the user message directly.
+        // No tool exchange — avoids dummy assistant messages that break
+        // DeepSeek thinking_signature propagation.
         const combinedAnalysis = results.join('\n\n');
-        autoVisionResults = [{ exchangeId: userExchangeId, chatId: targetChatId, analysis: combinedAnalysis }];
+        return {
+            analysis: combinedAnalysis,
+            sessionId: lastSessionId,
+            images: images.length
+        };
     } else {
         visionStatusEl.querySelector('.tool-status').setAttribute('variant', 'danger');
         visionStatusEl.querySelector('.tool-status').innerHTML = 'No Results';
@@ -1968,13 +1996,8 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     // Store system prompt for debugging (included in JSON export)
     conversation.setSystemPrompt(exchangeId, systemPrompt);
 
-    // Augment system prompt with MCP Vision analysis if available
-    let effectiveSystemPrompt = systemPrompt;
-    const autoVisionEntry = autoVisionResults.find(r => r.exchangeId === exchangeId && r.chatId === chatId);
-    if (autoVisionEntry) {
-        effectiveSystemPrompt += `\n\nThe user attached an image. MCP Vision analysis:\n${autoVisionEntry.analysis}`;
-        autoVisionResults.splice(autoVisionResults.indexOf(autoVisionEntry), 1);
-    }
+    // Auto-vision analysis is appended directly to the user message content in sendMessage().
+    // No transient injection needed here.
 
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
@@ -2005,7 +2028,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     scrollToBottom();
     
     try {
-        const messages = await conversation.getMessagesForApi(effectiveSystemPrompt);
+        const messages = await conversation.getMessagesForApi(systemPrompt);
 
         const requestBody = {
             model: currentModel,
@@ -2018,26 +2041,29 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
             requestBody.max_tokens = maxTokens;
         }
 
+        // Check if auto-vision already ran for this exchange chain
+        // by looking for the [Auto-vision: ...] marker in user messages
+        const hasAutoVisionAnalysis = conversation.exchanges.some(ex =>
+            ex.user?.content?.includes('[Auto-vision:')
+        );
+
         // PHASE-3: Pass tools array so LLM knows what it can request
         // Filter vision tools from the list if:
-        //   A) MCP Vision toggle is OFF AND model supports vision, OR
-        //   B) Auto-vision is doing the full analysis (images already analyzed by frontend)
-        const hasAutoVisionAnalysis = autoVisionResults.some(r => r.exchangeId === exchangeId && r.chatId === chatId);
+        //   A) MCP Vision toggle is OFF AND model supports vision (direct mode), OR
+        //   B) Auto-vision already analyzed images (analysis appended to user message)
         const allMcpTools = mcpClient.getFormattedToolsForLLM();
         if (allMcpTools.length > 0) {
-            // Check if auto-vision is handling analysis (frontend does create+analyze, LLM doesn't need vision tools)
             const modelSupportsVision = currentModelSupportsVision();
             const shouldFilterVisionTools = (modelSupportsVision && !useVisionAnalysis) || hasAutoVisionAnalysis;
-            
-            
+
             if (shouldFilterVisionTools) {
                 const filteredTools = allMcpTools.filter(tool => {
                     const toolName = tool.function?.name?.toLowerCase() || '';
-                    const isVision = toolName.includes('vision_');
-                    if (isVision) console.log('[Vision] Filtering OUT tool:', tool.function?.name);
-                    return !isVision;
+                    // Block all vision tools — in direct mode the model has images directly;
+                    // in auto-vision mode the frontend already did the analysis
+                    return !toolName.includes('vision_');
                 });
-                
+
                 if (filteredTools.length > 0) {
                     requestBody.tools = filteredTools;
                 }
@@ -2052,13 +2078,12 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
             requestBody.tools.push(...ARCHIVE_TOOLS);
         }
 
-        // Add image processing if images attached (skip for tool exchanges - they have no user message)
-        // Also skip when MCP Vision already analyzed the images
+        // Add image processing hints for the Gateway (resize/transcode before sending to provider)
         if (!isToolExchange && exchange && exchange.user?.attachments?.length > 0 && !hasAutoVisionAnalysis) {
             requestBody.image_processing = {
                 resize: 'auto',
                 transcode: 'jpg',
-                quality: 70  // Lower quality for smaller payload
+                quality: 70
             };
         }
         
@@ -3422,13 +3447,14 @@ async function startEditMode(exchangeId, role = 'user') {
         </div>
     `;
 
-    const { dialog, main, result } = await nui.components.dialog.page('Edit Message', contentHtml, {
+    const { dialog, main } = await nui.components.dialog.page('Edit Message', '', {
         contentScroll: false, 
         buttons: [
             { label: 'Cancel', type: 'outline', value: 'cancel' },
             { label: role === 'user' ? 'Save & Resubmit' : 'Save', type: 'primary', value: 'save' }
         ]
     });
+    main.innerHTML = contentHtml;
 
     // Initialize content using standard NUI method on connected nodes
     const applyContent = () => {
@@ -3448,15 +3474,13 @@ async function startEditMode(exchangeId, role = 'user') {
         }, 100);
     }
 
-    const action = await result;
+    dialog.addEventListener('nui-dialog-close', (e) => {
+        const action = e.detail?.returnValue;
+        if (action !== 'save') return;
 
-    if (action === 'save') {
         let newContent = main.querySelector('nui-rich-text')?.getMarkdown().trim() || '';
         
-        // Ensure if there was original thinking we retain it unedited in the saved state, 
-        // to not alter the local rendering of the history if they don't want to change the thinking.
-        // Wait, the user said "Therefore the edit window should only edit the message, not the thinking portion." 
-        // This implies we simply prepend the old thinking block if it existed before saving.
+        // Ensure if there was original thinking we retain it unedited in the saved state
         if (parsed.thinking) {
             newContent = `<think>\n${parsed.thinking}\n</think>\n\n${newContent}`.trim();
         }
@@ -3464,7 +3488,7 @@ async function startEditMode(exchangeId, role = 'user') {
         if (newContent && newContent !== currentContent) {
             commitEdit(exchangeId, role, newContent);
         }
-    }
+    });
 }
 
 function commitEdit(exchangeId, role, newContent) {
@@ -3510,10 +3534,19 @@ function commitEdit(exchangeId, role, newContent) {
 
 async function startNewChat() {
     // Note: we do NOT abort background streams when starting a new chat.
-    // Each chat's stream continues in its hidden container.
+    // Each chat's stream continues in its hidden containers.
 
     const newChatId = await chatHistory.create();
     currentChatId = newChatId;
+
+    // Reset model selection for the new chat — user must explicitly choose
+    currentModel = '';
+    if (elements.modelSelect.setValue) {
+        elements.modelSelect.setValue('');
+    } else {
+        const select = elements.modelSelect?.querySelector('select');
+        if (select) select.value = '';
+    }
 
     // Cache the new conversation
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
@@ -3630,10 +3663,12 @@ async function switchChat(targetChatId) {
 }
 
 async function deleteChat(chatId, e) {
-    e.stopPropagation(); // prevent row click
+    if (e) {
+        e.stopPropagation(); // prevent row click
+    }
 
     // Skip confirmation on shift-click
-    const skipConfirm = e.shiftKey;
+    const skipConfirm = e?.shiftKey;
 
     if (!skipConfirm && !await nui.components.dialog.confirm('Delete Chat', 'Are you sure you want to delete this chat?')) {
         return;
@@ -3738,26 +3773,29 @@ async function exportChatAsJson(chatId, btn) {
         };
 
         const formattedJson = JSON.stringify(exportData, null, 2);
-        navigator.clipboard.writeText(formattedJson).then(() => {
-            if (btn) {
-                const originalHtml = btn.innerHTML;
-                btn.innerHTML = '<nui-icon name="check"></nui-icon>';
-                setTimeout(() => {
-                    btn.innerHTML = originalHtml;
-                }, 2000);
-            }
-        }).catch(err => {
+        try {
+            await navigator.clipboard.writeText(formattedJson);
+            nui.components.toast?.success?.('JSON copied to clipboard');
+        } catch (err) {
             console.error('Failed to copy JSON to clipboard', err);
-        });
+            nui.components.toast?.error?.('Failed to copy JSON to clipboard');
+        }
     } catch (e) {
         console.error('Failed to parse chat data', e);
     }
 }
 
 async function exportChatToFile(chatId) {
+    console.log('[DEBUG] exportChatToFile called with chatId:', chatId);
     // Full export including images - for backup/restore
-    const exchanges = await storage.loadConversation(chatId);
-    if (!exchanges || exchanges.length === 0) return;
+    // Prefer in-memory conversation (current session), fall back to storage
+    const conv = activeConversations.get(chatId);
+    const exchanges = conv ? conv.getAll() : await storage.loadConversation(chatId);
+    console.log('[DEBUG] exportChatToFile exchanges:', exchanges?.length, 'from memory:', !!conv);
+    if (!exchanges || exchanges.length === 0) {
+        console.warn('[DEBUG] exportChatToFile: no exchanges found, aborting');
+        return;
+    }
 
     try {
         const exportData = {
@@ -3796,13 +3834,18 @@ async function exportChatToFile(chatId) {
         const url = URL.createObjectURL(blob);
         const chatInfo = exportData.chatInfo;
         const title = chatInfo?.title ? chatInfo.title.replace(/[^a-z0-9]/gi, '_').toLowerCase() : 'chat';
-        
+        const filename = `chat_export_${title}_${Date.now()}.json`;
+
         const a = document.createElement('a');
         a.href = url;
-        a.download = `chat_export_${title}_${Date.now()}.json`;
+        a.download = filename;
+        a.style.display = 'none';
+        document.body.appendChild(a);
         a.click();
+        document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        
+        console.log('[DEBUG] exportChatToFile download triggered:', filename);
+
     } catch (e) {
         console.error('Failed to export chat to file', e);
         nui.components.dialog.alert('Export Failed', 'Could not export chat session.');
@@ -3893,8 +3936,14 @@ async function handleChatImport(e) {
 }
 
 async function exportChatAsMarkdown(chatId) {
-    const exchanges = await storage.loadConversation(chatId);
-    if (!exchanges || exchanges.length === 0) return;
+    // Prefer in-memory conversation (current session), fall back to storage
+    const conv = activeConversations.get(chatId);
+    const exchanges = conv ? conv.getAll() : await storage.loadConversation(chatId);
+    console.log('[DEBUG] exportChatAsMarkdown exchanges:', exchanges?.length, 'from memory:', !!conv);
+    if (!exchanges || exchanges.length === 0) {
+        console.warn('[DEBUG] exportChatAsMarkdown: no exchanges found, aborting');
+        return;
+    }
 
     try {
         let md = "";
@@ -3915,14 +3964,18 @@ async function exportChatAsMarkdown(chatId) {
 
         const blob = new Blob([md], { type: 'text/markdown' });
         const url = URL.createObjectURL(blob);
-        
         const title = chatInfo && chatInfo.title ? chatInfo.title.replace(/[^a-z0-9]/gi, '_').toLowerCase() : 'chat';
-        
+        const filename = `chat_${title}_${chatId}.md`;
+
         const a = document.createElement('a');
         a.href = url;
-        a.download = `chat_${title}_${chatId}.md`;
+        a.download = filename;
+        a.style.display = 'none';
+        document.body.appendChild(a);
         a.click();
+        document.body.removeChild(a);
         URL.revokeObjectURL(url);
+        console.log('[DEBUG] exportChatAsMarkdown download triggered:', filename);
     } catch (e) {
         console.error("Failed to export markdown", e);
     }
@@ -4095,7 +4148,11 @@ async function openChatOptions(chatId) {
     if (!template) return;
     
     const content = template.content.cloneNode(true);
-    
+
+    // Stamp chatId onto the wrapper so the centralized nui-action handler can find it
+    const wrapper = content.firstElementChild;
+    if (wrapper) wrapper.dataset.chatId = chatId;
+
     // Bind initial values
     const titleInput = content.getElementById('chat-options-title-input');
     const categoryInput = content.getElementById('chat-options-category-input');
@@ -4103,57 +4160,26 @@ async function openChatOptions(chatId) {
     const createdDateSpan = content.getElementById('chat-options-created-date');
     const updatedDateSpan = content.getElementById('chat-options-updated-date');
     const msgCountSpan = content.getElementById('chat-options-msg-count');
-    
+
     if (titleInput) titleInput.value = chatMeta.title || 'New Chat';
     if (categoryInput) categoryInput.value = chatMeta.category || '';
     if (pinToggle) pinToggle.checked = !!chatMeta.pinned;
     if (createdDateSpan) createdDateSpan.textContent = new Date(chatMeta.timestamp).toLocaleString();
     if (updatedDateSpan) updatedDateSpan.textContent = new Date(chatMeta.updatedAt).toLocaleString();
-    
-    // Bind buttons inline to use closure scope variables securely
-    content.getElementById('chat-options-clone-btn')?.addEventListener('click', async () => {
-        const exchanges = await storage.loadConversation(chatId);
-        if (!exchanges) return;
-        const newId = chatHistory._generateId();
-        const cloneMeta = { ...chatMeta, id: newId, title: `Copy of ${chatMeta.title || 'Chat'}`, timestamp: Date.now(), updatedAt: Date.now() };
-        chatHistory.conversations.unshift(cloneMeta);
-        chatHistory._saveList();
-        await storage.saveConversation(newId, exchanges);
-        renderHistoryList();
-        if (typeof dialog !== 'undefined' && dialog.close) dialog.close();
-        await switchChat(newId);
-        nui.components.toast?.success?.('Chat cloned successfully');
-    });
 
-    content.getElementById('chat-options-copy-json')?.addEventListener('click', (e) => {
-        exportChatAsJson(chatId, e.currentTarget);
-    });
-
-    content.getElementById('chat-options-save-json')?.addEventListener('click', () => {
-        exportChatAsJson(chatId, null, true);
-    });
-
-    content.getElementById('chat-options-save-md')?.addEventListener('click', () => {
-        exportChatAsMarkdown(chatId);
-    });
-
-    content.getElementById('chat-options-delete')?.addEventListener('click', async () => {
-        const confirm = await nui.components.dialog.confirm('Delete Conversation', 'Are you sure you want to delete this chat?\nThis action cannot be undone.');
-        if (confirm) {
-            if (typeof dialog !== 'undefined' && dialog.close) dialog.close();
-            deleteChat(chatId);
-        }
-    });
+    // Button actions are handled centrally via data-action="chat-options:*" — see handleChatOptionsAction()
 
     // Create programmatic page dialog
-    const { dialog, main } = await nui.components.dialog.page('Edit Chat Options', content, {
+    const { dialog, main } = await nui.components.dialog.page('Edit Chat Options', '', {
         contentScroll: true,
         buttons: [
             { value: 'cancel', label: 'Cancel', type: 'outline' },
             { value: 'save', label: 'Save Changes', type: 'primary' }
         ]
     });
-    
+    main.appendChild(content);
+    main._dialog = dialog;  // expose for action handler (close on clone/delete)
+
     // Async load message count
     if (msgCountSpan) msgCountSpan.textContent = 'Counting...';
     storage.loadConversation(chatId).then(exchanges => {
@@ -4723,13 +4749,14 @@ async function openMCPEditDialog(server) {
         });
     }
 
-    const { dialog, main } = await nui.components.dialog.page(`Edit Server: ${server.name}`, content, {
+    const { dialog, main } = await nui.components.dialog.page(`Edit Server: ${server.name}`, '', {
         contentScroll: true,
         buttons: [
             { label: 'Cancel', type: 'outline', value: 'cancel' },
             { label: 'Save Changes', type: 'primary', value: 'save' }
         ]
     });
+    main.appendChild(content);
 
     const toggleAllBtn = main.querySelector('#mcp-edit-toggle-all button');
     if (toggleAllBtn) {
@@ -4762,70 +4789,83 @@ async function openMCPEditDialog(server) {
 }
 
 function setupDialogEventListeners() {
-    document.getElementById('mcp-edit-dialog')?.addEventListener('nui-dialog-close', (e) => {
-        if (e.detail?.value === 'save') {
-           const serverId = e.target.getAttribute('data-mcp-server-id');
-           if (serverId) {
-               const toolsContainer = document.getElementById('mcp-edit-tools-container');
-               const allCheckboxes = toolsContainer.querySelectorAll('input[type="checkbox"]');
-               allCheckboxes.forEach(cb => {
-                   const toolName = cb.dataset.mcpTool;
-                   const isEnabled = cb.checked;
-                   mcpClient.setToolEnabled(serverId, toolName, isEnabled);
-               });
-               renderMCPServers();
-               nui.components.toast?.success?.('MCP Server capabilities updated');
-           }
-        }
-    });
+    // Dialog event listeners are bound inline in openChatOptions(), openMCPEditDialog(), etc.
+    // No static DOM elements to bind here — all dialogs are created programmatically via nui.components.dialog.page()
+}
 
-    document.getElementById('chat-options-clone-btn')?.addEventListener('click', async () => {
-        if (!currentOptionsChatId) return;
-        const chatMeta = chatHistory.conversations.find(c => c.id === currentOptionsChatId);
-        const exchanges = await storage.loadConversation(currentOptionsChatId);
-        if (!chatMeta || !exchanges) return;
+// ============================================
+// Centralized data-action handler for chat-options buttons
+// Buttons use data-action="chat-options:<action>" on inner <button> elements.
+// The chatId is carried via data-chat-id on the wrapper div.
+// ============================================
 
-        const newId = chatHistory._generateId();
-        const cloneMeta = {
-            ...chatMeta,
-            id: newId,
-            title: `Copy of ${chatMeta.title || 'Chat'}`,
-            timestamp: Date.now(),
-            updatedAt: Date.now()
-        };
-        
-        chatHistory.conversations.unshift(cloneMeta);
-        chatHistory._saveList();
-        
-        // Rewrite exchange IDs slightly or retain them (retaining is fine since they are scoped per chat ID)
-        await storage.saveConversation(newId, exchanges);
-        
-        renderHistoryList();
-        document.getElementById('chat-options-dialog')?.close();
-        await switchChat(newId);
-        nui.components.toast?.success?.('Chat cloned successfully');
-    });
+document.addEventListener('nui-action', (e) => {
+    const { name, param } = e.detail;
+    if (name !== 'chat-options') return;
 
-    document.getElementById('chat-options-copy-json')?.addEventListener('click', (e) => {
-        if (!currentOptionsChatId) return;
-        exportChatAsJson(currentOptionsChatId, e.currentTarget);
-    });
+    const wrapper = e.target.closest('[data-chat-id]');
+    const chatId = wrapper?.dataset.chatId;
+    if (!chatId) {
+        console.warn('[chat-options] nui-action fired but no data-chat-id found on parent');
+        return;
+    }
 
-    document.getElementById('chat-options-save-json')?.addEventListener('click', () => {
-        if (!currentOptionsChatId) return;
-        exportChatToFile(currentOptionsChatId);
-    });
+    console.log('[chat-options] action:', param, 'chatId:', chatId);
 
-    document.getElementById('chat-options-save-md')?.addEventListener('click', () => {
-        if (!currentOptionsChatId) return;
-        exportChatAsMarkdown(currentOptionsChatId);
-    });
+    switch (param) {
+        case 'copy-json':
+            exportChatAsJson(chatId, e.target);
+            break;
+        case 'save-json':
+            exportChatToFile(chatId);
+            break;
+        case 'save-md':
+            exportChatAsMarkdown(chatId);
+            break;
+        case 'clone':
+            handleChatOptionsClone(chatId, wrapper);
+            break;
+        case 'delete':
+            handleChatOptionsDelete(chatId, wrapper);
+            break;
+        default:
+            console.warn('[chat-options] unknown action:', param);
+    }
+});
 
-    document.getElementById('chat-options-delete')?.addEventListener('click', (e) => {
-        if (!currentOptionsChatId) return;
-        deleteChat(currentOptionsChatId, e);
-        document.getElementById('chat-options-dialog')?.close();
-    });
+async function handleChatOptionsClone(chatId, wrapper) {
+    const exchanges = await storage.loadConversation(chatId);
+    if (!exchanges) return;
+    const chatMeta = chatHistory.conversations.find(c => c.id === chatId);
+    if (!chatMeta) return;
+
+    const newId = chatHistory._generateId();
+    const cloneMeta = {
+        ...chatMeta,
+        id: newId,
+        title: `Copy of ${chatMeta.title || 'Chat'}`,
+        timestamp: Date.now(),
+        updatedAt: Date.now()
+    };
+    chatHistory.conversations.unshift(cloneMeta);
+    chatHistory._saveList();
+    await storage.saveConversation(newId, exchanges);
+    renderHistoryList();
+
+    // Close the dialog that contains this button
+    const dialogEl = wrapper.closest('dialog');
+    if (dialogEl) dialogEl.close();
+
+    await switchChat(newId);
+    nui.components.toast?.success?.('Chat cloned successfully');
+}
+
+async function handleChatOptionsDelete(chatId, wrapper) {
+    // Close dialog first
+    const dialogEl = wrapper.closest('dialog');
+    if (dialogEl) dialogEl.close();
+
+    deleteChat(chatId);
 }
 
 // ============================================
@@ -4882,12 +4922,11 @@ async function showAdminUI() {
         </div>
     `;
 
-    const html = `<div id="admin-users-container" style="padding: 1rem;">${renderTable()}</div>`;
-
-    const { dialog, main } = await nui.components.dialog.page('User Management', html, {
+    const { dialog, main } = await nui.components.dialog.page('User Management', '', {
         contentScroll: true,
         buttons: [ { label: 'Close', type: 'outline', value: 'close' } ]
     });
+    main.innerHTML = `<div id="admin-users-container" style="padding: 1rem;">${renderTable()}</div>`;
 
     const refreshTable = async () => {
         users = await backendClient.adminGetUsers();
@@ -4958,10 +4997,11 @@ async function showAdminUI() {
                 </div>
                 `;
 
-                const subDialog = await nui.components.dialog.page(isEdit ? 'Edit User' : 'Add User', formHtml, {
+                const subDialog = await nui.components.dialog.page(isEdit ? 'Edit User' : 'Add User', '', {
                     contentScroll: true,
                     buttons: [ { label: 'Cancel', type: 'outline', value: 'cancel' } ]
                 });
+                subDialog.main.innerHTML = formHtml;
 
                 const form = subDialog.main.querySelector('form');
                 form.addEventListener('submit', async (e) => {

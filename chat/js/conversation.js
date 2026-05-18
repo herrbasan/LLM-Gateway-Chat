@@ -462,8 +462,11 @@ export class Conversation {
                 // Fall through to emit the assistant response (the follow-up after tool execution)
             } else {
                 // User message (Only parse for normal exchanges)
-                // Only include attachments for the current (last) exchange
-                const validAttachments = isLastExchange
+                // Include attachments for the last exchange OR for any exchange that
+                // originally had them (prevents images being stripped after tool calls
+                // make a tool exchange the geometrically last one).
+                const hasAttachments = exchange.user?.attachments?.some(att => att.getDataUrl || att.dataUrl) || false;
+                const validAttachments = isLastExchange || hasAttachments
                     ? exchange.user?.attachments?.filter(att => att.getDataUrl || att.dataUrl) || []
                     : [];
 
