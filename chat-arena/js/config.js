@@ -6,6 +6,12 @@ window.ARENA_CONFIG = {
     defaultModelB: 1,  // 0-indexed, so 6 = 7th option
     defaultTopic: 'This is a Chat app that connects two LLM\'s for autonomous conversation. This is not a task, feel free to be yourself and allow yourself to be curious.',
 
+    // Identity visibility: prepends [ModelName]: prefix to messages so each
+    // participant can distinguish their own output from the other model's.
+    // Set to false to study dissociation phenomena where models can't tell
+    // who said what.
+    showIdentities: true,
+
     // TTS Configuration
     ttsEndpoint: 'http://localhost:2244',
     ttsVoiceA: '',
