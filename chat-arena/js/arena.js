@@ -691,15 +691,32 @@ class Arena {
         arena.importJSON(data);
 
         // Restore participants if model names are available
-        if (data.participants && data.participants.length >= 2 && (data.participants[0] || data.participants[1])) {
+        const hasParticipants = data.participants && data.participants.length >= 2 && (data.participants[0] || data.participants[1]);
+        let participantA = data.participants?.[0] || '';
+        let participantB = data.participants?.[1] || '';
+
+        // Infer from message speakers when participants metadata is missing
+        if (!hasParticipants) {
+            const speakers = [...new Set(
+                data.messages
+                    .filter(m => m.speaker && m.speaker !== 'moderator')
+                    .map(m => m.speaker)
+            )];
+            if (speakers.length >= 2) {
+                participantA = speakers[0];
+                participantB = speakers[1];
+            }
+        }
+
+        if (participantA || participantB) {
             const settings = data.settings || {};
             arena.setParticipants({
-                name: data.participantNames?.[0] || data.participants[0]?.split('/').pop() || 'Model A',
-                modelName: data.participants[0] || settings.modelA || '',
+                name: data.participantNames?.[0] || participantA?.split('/').pop() || 'Model A',
+                modelName: participantA || settings.modelA || '',
                 systemPrompt: settings.systemPromptA
             }, {
-                name: data.participantNames?.[1] || data.participants[1]?.split('/').pop() || 'Model B',
-                modelName: data.participants[1] || settings.modelB || '',
+                name: data.participantNames?.[1] || participantB?.split('/').pop() || 'Model B',
+                modelName: participantB || settings.modelB || '',
                 systemPrompt: settings.systemPromptB
             });
         }
