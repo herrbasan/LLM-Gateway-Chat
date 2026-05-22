@@ -744,6 +744,19 @@ class Arena {
             isStreaming: false
         }));
 
+        // Ensure topic message exists at index 0 (old exports may not include it)
+        const firstMsg = this.messages[0];
+        const hasTopicMsg = firstMsg && firstMsg.role === 'system' && firstMsg.speaker === 'moderator';
+        if (!hasTopicMsg && data.topic) {
+            this.messages.unshift({
+                role: 'system',
+                speaker: 'moderator',
+                content: `Topic: ${data.topic}`,
+                createdAt: data.exportedAt ? new Date(data.exportedAt).getTime() : null,
+                isStreaming: false
+            });
+        }
+
         this.currentTurn = data.messages.filter(m => m.speaker !== 'moderator').length;
         this.maxTurns = data.settings?.maxTurns || this.currentTurn;
         this.autoAdvance = data.settings?.autoAdvance ?? true;
@@ -775,6 +788,19 @@ class Arena {
             createdAt: m.createdAt || null,
             isStreaming: false
         }));
+
+        // Ensure topic message exists at index 0 (old exports may not include it)
+        const firstMsg = this.messages[0];
+        const hasTopicMsg = firstMsg && firstMsg.role === 'system' && firstMsg.speaker === 'moderator';
+        if (!hasTopicMsg && data.topic) {
+            this.messages.unshift({
+                role: 'system',
+                speaker: 'moderator',
+                content: `Topic: ${data.topic}`,
+                createdAt: data.exportedAt ? new Date(data.exportedAt).getTime() : null,
+                isStreaming: false
+            });
+        }
 
         // Restore backend chat ID mapping for embedding
         if (data.backendChatId) {
@@ -2023,8 +2049,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.arena.onProgress = (progress) => this._updateGenerationProgress(progress);
 
             // Restore settings to UI
+            const topicMsg = arena.messages.find(m => m.role === 'system' && m.speaker === 'moderator');
             this._restoreSettingsToUI(arena._importedSettings, {
-                topic: arena.messages[0]?.content.replace('Topic: ', '') || '',
+                topic: topicMsg?.content?.replace('Topic: ', '') || '',
                 participants: [arena.participantA?.modelName, arena.participantB?.modelName],
                 participantNames: [arena.participantA?.name, arena.participantB?.name]
             });
