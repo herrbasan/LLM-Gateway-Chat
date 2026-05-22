@@ -4046,8 +4046,8 @@ function renderHistoryList() {
     }
 
     const categories = Object.keys(groupedChats).sort((a, b) => {
-        if (a === 'Uncategorized') return 1;
-        if (b === 'Uncategorized') return -1;
+        if (a === 'Uncategorized') return -1;
+        if (b === 'Uncategorized') return 1;
         return a.localeCompare(b);
     });
 

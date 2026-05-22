@@ -1970,8 +1970,8 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             }
 
             const categories = Object.keys(groupedHistory).sort((a, b) => {
-                if (a === 'Uncategorized') return 1;
-                if (b === 'Uncategorized') return -1;
+                if (a === 'Uncategorized') return -1;
+                if (b === 'Uncategorized') return 1;
                 return a.localeCompare(b);
             });
 
