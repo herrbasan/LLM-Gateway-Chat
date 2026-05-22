@@ -782,8 +782,16 @@ class Arena {
         }
 
         // Backfill empty speaker values for old sessions loaded from backend
-        // where speaker wasn't stored. Non-moderator messages alternate between
-        // participant A and B. Use stored participant names to fill gaps.
+        // where speaker wasn't stored.
+        // System messages without speaker are moderator messages (topic, prompts)
+        for (const m of this.messages) {
+            if (!m.speaker && m.role === 'system') {
+                m.speaker = 'moderator';
+            }
+        }
+
+        // Non-moderator messages without speaker alternate between
+        // participant A and B.
         const nonModMsgs = this.messages.filter(m => m.speaker !== 'moderator');
         const speakerNames = data.participantNames || data.participants || [];
         const aName = speakerNames[0] || 'Model A';
