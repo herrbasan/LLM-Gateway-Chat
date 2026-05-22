@@ -46,11 +46,15 @@ export const arenaStorage = {
             id: s.id,
             exportedAt: s.updatedAt || s.createdAt,
             topic: s.title || s.arenaConfig?.topic || '',
-            participants: [s.arenaConfig?.modelA || '', s.arenaConfig?.modelB || ''],
+            participants: [
+                s.arenaConfig?.modelA || '',
+                s.arenaConfig?.modelB || ''
+            ],
             messages: msgs.map(m => ({
                 speaker: m.speaker || '',
                 role: m.role || 'assistant',
                 content: m.content || '',
+                createdAt: m.createdAt || null,
                 model: m.model || null
             })),
             summary: s.summary || null,
@@ -65,9 +69,14 @@ export const arenaStorage = {
                 title: sessionData.topic || 'Arena Session',
                 mode: 'arena',
                 model: sessionData.participants?.[0] || null,
-                arenaConfig: sessionData.settings || {
-                    modelA: sessionData.participants?.[0] || '',
-                    modelB: sessionData.participants?.[1] || ''
+                arenaConfig: {
+                    modelA: sessionData.settings?.modelA || sessionData.participants?.[0] || '',
+                    modelB: sessionData.settings?.modelB || sessionData.participants?.[1] || '',
+                    maxTurns: sessionData.settings?.maxTurns,
+                    autoAdvance: sessionData.settings?.autoAdvance,
+                    systemPromptA: sessionData.settings?.systemPromptA,
+                    systemPromptB: sessionData.settings?.systemPromptB,
+                    targetTokens: sessionData.settings?.targetTokens
                 }
             });
             return created?.id || id;

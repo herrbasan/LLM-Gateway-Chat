@@ -10,6 +10,19 @@ import { getPlainText } from '../../chat/js/tts-utils.js';
 import { arenaStorage } from './storage.js';
 
 // ============================================
+// Helpers
+// ============================================
+
+function _formatArenaTime(date) {
+    const pad = (n) => n.toString().padStart(2, '0');
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function _stripIdentityPrefix(content) {
+    return content.replace(/\[[\w.-]+ · \d{2}:\d{2}:\d{2}\]:\s*/g, '').trim();
+}
+
+// ============================================
 // Participant Class
 // ============================================
 
@@ -134,8 +147,9 @@ class Participant {
 
     _buildMessages(conversationHistory) {
         const messages = [];
+        const showIdentities = window.ARENA_CONFIG?.showIdentities !== false;
 
-        // Add speaker's system prompt if set (after template substitution)
+        // System prompt only if role-play mode is active (custom prompt was set)
         if (this.systemPrompt) {
             messages.push({ role: 'system', content: this.systemPrompt });
         }
@@ -146,13 +160,7 @@ class Participant {
             messages.push({ role: 'system', content: topicMsg.content });
         }
 
-        // Include full conversation history from the OTHER participant
-        // Find the other participant's name by looking at conversation history
-        const otherParticipantName = conversationHistory.find(m => 
-            m.speaker !== 'moderator' && m.speaker !== this.name
-        )?.speaker;
-        
-        let otherMsgCount = 0;
+        let userMsgCount = 0;
         for (const msg of conversationHistory) {
             // Skip the topic message — already added as system above
             if (msg === topicMsg) continue;
@@ -167,28 +175,46 @@ class Participant {
             if (msg.role !== 'assistant') continue;
             if (!msg.content || !msg.content.trim()) continue;
 
-            // The OTHER participant's message becomes 'user' role
-            if (msg.speaker !== this.name) {
-                messages.push({ role: 'user', content: msg.content });
-                otherMsgCount++;
+            if (showIdentities) {
+                const timeStr = msg.createdAt ? _formatArenaTime(new Date(msg.createdAt)) : '';
+                const timePart = timeStr ? ` · ${timeStr}` : '';
+                const prefix = `[${msg.speaker}${timePart}]:\n`;
+
+                if (msg.speaker === this.name) {
+                    // Own message — include as assistant so the model sees its own output
+                    messages.push({
+                        role: 'assistant',
+                        content: prefix + msg.content,
+                        name: this.name
+                    });
+                } else {
+                    // Other participant — user role with identity marker
+                    messages.push({
+                        role: 'user',
+                        content: prefix + msg.content,
+                        name: msg.speaker
+                    });
+                    userMsgCount++;
+                }
+            } else {
+                // Blind mode: no identity markers, skip own messages
+                if (msg.speaker !== this.name) {
+                    messages.push({ role: 'user', content: msg.content });
+                    userMsgCount++;
+                }
             }
         }
 
         // CRITICAL: Ensure at least one 'user' role message exists
-        // Some LLM APIs require at least one user message in the conversation
-        // If no messages from other participant, use topic as initial user message
         const hasUserMessage = messages.some(m => m.role === 'user');
         if (!hasUserMessage && topicMsg) {
-            // Extract topic text and use as opening user message
             const topicText = topicMsg.content.replace(/^Topic:\s*/i, '').trim();
             if (topicText) {
-                // Insert after system messages (not at index 0 which would push system messages down)
                 const systemMsgCount = messages.filter(m => m.role === 'system').length;
                 messages.splice(systemMsgCount, 0, { role: 'user', content: topicText });
             }
         }
 
-        // Debug: console.log(`[Participant ${this.name}] _buildMessages: ${messages.length} msgs (${otherMsgCount} from other)`);
         return messages;
     }
 
@@ -287,7 +313,9 @@ class Arena {
                         role: msg.role || 'assistant',
                         content: msg.content || '',
                         speaker: msg.speaker || (msg.role === 'system' ? 'moderator' : ''),
-                        model: this.participants?.[0]?.model || null
+                        model: (msg.speaker === this.participantA?.name
+                            ? this.participantA?.modelName
+                            : this.participantB?.modelName) || null
                     }).catch(() => {});
                 }
                 this._lastSyncedCount = sessionData.messages.length;
@@ -385,7 +413,8 @@ class Arena {
         this.messages = [{
             role: 'system',
             speaker: 'moderator',
-            content: topicContent
+            content: topicContent,
+            createdAt: Date.now()
         }];
         // Auto-save initial topic
         this._saveToStorage();
@@ -433,26 +462,18 @@ class Arena {
         const otherParticipant = speaker === this.participantA ? this.participantB : this.participantA;
 
         const history = this.messages.filter(m => !m.isStreaming);
-        // Debug: console.log(`[Arena] _triggerResponse for ${speaker.name}`);
 
-        let effectivePrompt = speaker.systemPrompt;
         const topic = this.messages[0]?.content.replace('Topic: ', '') || '';
 
-        // Build default prompt when no custom system prompt is set
-        if (!effectivePrompt) {
-            effectivePrompt = `You are ${speaker.modelName}. Engage in a thoughtful conversation about the following topic: ${topic}`;
-        }
-
-        if (this.messages.length === 1) {
-            effectivePrompt = effectivePrompt
+        // Only set system prompt if role-play mode is active (custom prompt was set)
+        // Template substitution only on first turn
+        if (speaker.systemPrompt && this.messages.length === 1) {
+            const effectivePrompt = speaker.systemPrompt
                 .replace('{modelName}', speaker.modelName)
                 .replace('{otherParticipantName}', otherParticipant.name)
                 .replace('{otherModelName}', otherParticipant.modelName)
                 .replace('{topic}', topic);
-            // Only persist the system prompt if roleplay mode was active (custom prompt was set)
-            if (speaker.systemPrompt) {
-                speaker.setSystemPrompt(effectivePrompt);
-            }
+            speaker.setSystemPrompt(effectivePrompt);
         }
 
         try {
@@ -463,15 +484,14 @@ class Arena {
             // Update context tracking
             this._updateContextUsage(speaker, response.context, response.usage);
 
-            // Strip thinking blocks from content before storing/sending
+            // Strip thinking blocks and identity prefixes from content before storing
             const parsed = parseThinking(response.content || '');
-            const cleanContent = parsed.answer?.trim() || '';
+            const rawContent = parsed.answer?.trim() || '';
+            const cleanContent = _stripIdentityPrefix(rawContent);
 
             // Skip empty responses - don't store or advance
             if (!cleanContent) {
-                // Debug: console.log('[Arena] Empty response from', speaker.name, '- skipping');
                 this.onStatusChange({ isRunning: true, activeSpeaker: null, turn: this.currentTurn, isStreaming: false });
-                // Retry or just advance to next speaker
                 if (this.autoAdvance && this.isRunning) {
                     this._advanceTurn();
                     setTimeout(() => this._triggerResponse(), 500);
@@ -483,6 +503,7 @@ class Arena {
                 role: 'assistant',
                 speaker: speaker.name,
                 content: cleanContent,
+                createdAt: Date.now(),
                 isStreaming: false
             };
             this.messages.push(messageEntry);
@@ -573,7 +594,8 @@ class Arena {
         this.messages.push({
             role: 'system',
             speaker: 'moderator',
-            content: content
+            content: content,
+            createdAt: Date.now()
         });
         // Auto-save after moderator message
         this._saveToStorage();
@@ -637,16 +659,19 @@ class Arena {
             settings: {
                 maxTurns: this.maxTurns,
                 autoAdvance: this.autoAdvance,
+                modelA: this.participantA?.modelName || '',
+                modelB: this.participantB?.modelName || '',
                 systemPromptA: this.participantA?.systemPrompt,
                 systemPromptB: this.participantB?.systemPrompt,
-                targetTokens: this.targetTokens // Token target hint (not enforced)
+                targetTokens: this.targetTokens
             },
             contextUsage: this.contextUsage,
             summary: this.summary || null,
             messages: this.messages.map(m => ({
                 role: m.role,
                 speaker: m.speaker,
-                content: m.content
+                content: m.content,
+                createdAt: m.createdAt || null
             }))
         };
     }
@@ -666,15 +691,15 @@ class Arena {
         arena.importJSON(data);
 
         // Restore participants if model names are available
-        if (data.participants && data.participants.length >= 2) {
+        if (data.participants && data.participants.length >= 2 && (data.participants[0] || data.participants[1])) {
             const settings = data.settings || {};
             arena.setParticipants({
-                name: data.participantNames?.[0] || data.participants[0].split('/').pop(),
-                modelName: data.participants[0],
+                name: data.participantNames?.[0] || data.participants[0]?.split('/').pop() || 'Model A',
+                modelName: data.participants[0] || settings.modelA || '',
                 systemPrompt: settings.systemPromptA
             }, {
-                name: data.participantNames?.[1] || data.participants[1].split('/').pop(),
-                modelName: data.participants[1],
+                name: data.participantNames?.[1] || data.participants[1]?.split('/').pop() || 'Model B',
+                modelName: data.participants[1] || settings.modelB || '',
                 systemPrompt: settings.systemPromptB
             });
         }
@@ -698,6 +723,7 @@ class Arena {
             role: m.role,
             speaker: m.speaker,
             content: m.content,
+            createdAt: m.createdAt || null,
             isStreaming: false
         }));
 
@@ -729,6 +755,7 @@ class Arena {
             role: m.role,
             speaker: m.speaker,
             content: m.content,
+            createdAt: m.createdAt || null,
             isStreaming: false
         }));
 
