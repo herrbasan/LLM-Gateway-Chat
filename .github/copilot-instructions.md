@@ -138,6 +138,22 @@ npm start
 # Navigate to http://localhost:3500/chat/
 ```
 
+### Deployment (Production Server)
+
+The production deployment lives on a network share. After committing and pushing
+changes, always pull on the deployment server:
+
+```powershell
+# Add safe directory exception (one-time, already done):
+# git config --global --add safe.directory '//BADKID/Stuff/SRV/LLM-Gateway-Chat'
+
+# Pull latest:
+git -C "\\BADKID\Stuff\SRV\LLM-Gateway-Chat" pull
+```
+
+The server auto-restarts when files change (nodemon or similar). The share is at
+`\\BADKID\Stuff\SRV\LLM-Gateway-Chat` and is a git clone of this repo.
+
 ---
 
 ## Architecture Overview
