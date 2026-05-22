@@ -111,6 +111,31 @@
                         </div>
 
                         <div class="sidebar-section">
+                            <label>Temperature: <span id="temperature-value">0.7</span></label>
+                            <nui-input>
+                                <input type="range" id="temperature-slider" min="0" max="2" step="0.1" value="0.7">
+                            </nui-input>
+                        </div>
+
+                        <div class="sidebar-section">
+                            <div class="checkbox-group">
+                                <nui-checkbox>
+                                    <input type="checkbox" id="thinking-checkbox">
+                                </nui-checkbox>
+                                <label for="thinking-checkbox">Enable Thinking/Reasoning</label>
+                            </div>
+                        </div>
+
+                        <div class="sidebar-section">
+                            <div class="checkbox-group">
+                                <nui-checkbox>
+                                    <input type="checkbox" id="auto-advance-checkbox" checked>
+                                </nui-checkbox>
+                                <label for="auto-advance-checkbox">Auto-Advance</label>
+                            </div>
+                        </div>
+
+                        <div class="sidebar-section">
                             <div class="checkbox-group">
                                 <nui-checkbox>
                                     <input type="checkbox" id="roleplay-checkbox">

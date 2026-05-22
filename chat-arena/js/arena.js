@@ -32,6 +32,8 @@ class Participant {
         this.modelName = options.modelName || '';
         this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
         this.systemPrompt = options.systemPrompt || null;
+        this.temperature = options.temperature !== undefined ? options.temperature : (window.ARENA_CONFIG?.defaultTemperature ?? 0.7);
+        this.reasoningEffort = options.reasoningEffort || null;
         this.onProgress = options.onProgress || null;
 
         this.client = new GatewayClient({ 
@@ -69,12 +71,16 @@ class Participant {
 
     async _startStreaming(messages) {
         try {
-            const stream = this.client.chatStream({
+            const params = {
                 model: this.modelName,
                 messages: messages,
                 stream: true,
-                temperature: 0.7
-            });
+                temperature: this.temperature
+            };
+            if (this.reasoningEffort) {
+                params.reasoning_effort = this.reasoningEffort;
+            }
+            const stream = this.client.chatStream(params);
 
             let hasReceivedDelta = false;
             
@@ -249,6 +255,8 @@ class Arena {
         this.maxTurns = options.maxTurns || window.ARENA_CONFIG?.defaultMaxTurns || 10;
         this.autoAdvance = options.autoAdvance !== undefined ? options.autoAdvance : true;
         this.targetTokens = options.targetTokens || null; // Token target for hint (not enforced as hard limit)
+        this.temperature = options.temperature !== undefined ? options.temperature : (window.ARENA_CONFIG?.defaultTemperature ?? 0.7);
+        this.reasoningEffort = options.reasoningEffort || null;
 
         this.participantA = null;
         this.participantB = null;
@@ -384,7 +392,8 @@ class Arena {
             modelName: participantAConfig.modelName,
             gatewayUrl: this.gatewayUrl,
             systemPrompt: participantAConfig.systemPrompt,
-            maxTokens: participantAConfig.maxTokens,
+            temperature: participantAConfig.temperature,
+            reasoningEffort: participantAConfig.reasoningEffort,
             sessionId: sessionIdA,
             onProgress: (phase, data) => this._onParticipantProgress('A', phase, data)
         });
@@ -394,7 +403,8 @@ class Arena {
             modelName: participantBConfig.modelName,
             gatewayUrl: this.gatewayUrl,
             systemPrompt: participantBConfig.systemPrompt,
-            maxTokens: participantBConfig.maxTokens,
+            temperature: participantBConfig.temperature,
+            reasoningEffort: participantBConfig.reasoningEffort,
             sessionId: sessionIdB,
             onProgress: (phase, data) => this._onParticipantProgress('B', phase, data)
         });
@@ -659,6 +669,8 @@ class Arena {
             settings: {
                 maxTurns: this.maxTurns,
                 autoAdvance: this.autoAdvance,
+                temperature: this.temperature,
+                reasoningEffort: this.reasoningEffort || null,
                 modelA: this.participantA?.modelName || '',
                 modelB: this.participantB?.modelName || '',
                 systemPromptA: this.participantA?.systemPrompt,
@@ -685,6 +697,8 @@ class Arena {
             sessionId: data.sessionId,
             maxTurns: data.settings?.maxTurns || data.messages.filter(m => m.speaker !== 'moderator').length,
             autoAdvance: data.settings?.autoAdvance ?? true,
+            temperature: data.settings?.temperature,
+            reasoningEffort: data.settings?.reasoningEffort || null,
             targetTokens: data.settings?.targetTokens || null
         });
 
@@ -713,10 +727,14 @@ class Arena {
             arena.setParticipants({
                 name: data.participantNames?.[0] || participantA?.split('/').pop() || 'Model A',
                 modelName: participantA || settings.modelA || '',
+                temperature: settings.temperature,
+                reasoningEffort: settings.reasoningEffort || null,
                 systemPrompt: settings.systemPromptA
             }, {
                 name: data.participantNames?.[1] || participantB?.split('/').pop() || 'Model B',
                 modelName: participantB || settings.modelB || '',
+                temperature: settings.temperature,
+                reasoningEffort: settings.reasoningEffort || null,
                 systemPrompt: settings.systemPromptB
             });
         }
@@ -1133,6 +1151,10 @@ class ArenaUI {
         this.systemPromptAInput = document.getElementById('system-prompt-a');
         this.systemPromptBInput = document.getElementById('system-prompt-b');
         this.maxTurnsInput = document.getElementById('max-turns');
+        this.temperatureSlider = document.getElementById('temperature-slider');
+        this.temperatureValue = document.getElementById('temperature-value');
+        this.thinkingCheckbox = document.getElementById('thinking-checkbox');
+        this.autoAdvanceCheckbox = document.getElementById('auto-advance-checkbox');
         this.startButton = document.getElementById('start-btn');
         this.stopButton = document.getElementById('stop-btn');
         this.summarizeBtn = document.getElementById('summarize-btn');
@@ -1171,6 +1193,20 @@ class ArenaUI {
         this.roleplayCheckbox?.addEventListener('change', (e) => {
             if (this.roleplaySection) {
                 this.roleplaySection.style.display = e.target.checked ? 'block' : 'none';
+            }
+        });
+
+        // Temperature slider display update
+        this.temperatureSlider?.addEventListener('input', (e) => {
+            if (this.temperatureValue) {
+                this.temperatureValue.textContent = parseFloat(e.target.value).toFixed(1);
+            }
+        });
+
+        // Auto-advance checkbox syncs with footer button
+        this.autoAdvanceCheckbox?.addEventListener('change', (e) => {
+            if (this.arena && this.arena.isRunning) {
+                this.arena.toggleAutoAdvance();
             }
         });
 
@@ -1319,6 +1355,9 @@ class ArenaUI {
         const modelB = this._getSelectValue(this.modelBSelect);
         const maxTurns = parseInt(this.maxTurnsInput?.value) || 10;
         const maxTokens = this.maxTokensInput?.value?.trim() || '';
+        const temperature = parseFloat(this.temperatureSlider?.value) || 0.7;
+        const reasoningEffort = this.thinkingCheckbox?.checked ? 'medium' : null;
+        const autoAdvance = this.autoAdvanceCheckbox?.checked !== false;
 
         if (!topic) {
             this._showError('Please enter a topic');
@@ -1337,7 +1376,9 @@ class ArenaUI {
         this.arena = new Arena({
             gatewayUrl: config.gatewayUrl || 'http://localhost:3400',
             maxTurns,
-            autoAdvance: true,
+            autoAdvance,
+            temperature,
+            reasoningEffort,
             onMessage: (msg) => this._renderMessage(msg),
             onStatusChange: (status) => this._updateStatus(status),
             onError: (err) => this._showError(err),
@@ -1362,13 +1403,15 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         this.arena.setParticipants({
             name: modelAName,
             modelName: modelA,
+            temperature: temperature,
+            reasoningEffort: reasoningEffort,
             systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptAInput?.value || systemPromptTemplate) : null
-            // Note: maxTokens intentionally NOT passed - we use target hint instead of hard limit
         }, {
             name: modelBName,
             modelName: modelB,
+            temperature: temperature,
+            reasoningEffort: reasoningEffort,
             systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptBInput?.value || systemPromptTemplate) : null
-            // Note: maxTokens intentionally NOT passed - we use target hint instead of hard limit
         });
 
         // Set topic with token budget hint (models self-regulate, no hard cutoff)
@@ -1833,10 +1876,14 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 this.arena.setParticipants({
                     name: result.participantNames?.[0] || result.participants[0].split('/').pop(),
                     modelName: result.participants[0],
+                    temperature: result.settings?.temperature,
+                    reasoningEffort: result.settings?.reasoningEffort || null,
                     systemPrompt: result.settings?.systemPromptA
                 }, {
                     name: result.participantNames?.[1] || result.participants[1].split('/').pop(),
                     modelName: result.participants[1],
+                    temperature: result.settings?.temperature,
+                    reasoningEffort: result.settings?.reasoningEffort || null,
                     systemPrompt: result.settings?.systemPromptB
                 });
             }
@@ -2249,6 +2296,24 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         // Restore target tokens (token hint, not hard limit)
         if (this.maxTokensInput && settings?.targetTokens) {
             this.maxTokensInput.value = settings.targetTokens;
+        }
+
+        // Restore temperature
+        if (this.temperatureSlider && settings?.temperature !== undefined) {
+            this.temperatureSlider.value = settings.temperature;
+            if (this.temperatureValue) {
+                this.temperatureValue.textContent = parseFloat(settings.temperature).toFixed(1);
+            }
+        }
+
+        // Restore thinking checkbox
+        if (this.thinkingCheckbox) {
+            this.thinkingCheckbox.checked = !!settings?.reasoningEffort;
+        }
+
+        // Restore auto-advance checkbox
+        if (this.autoAdvanceCheckbox && settings?.autoAdvance !== undefined) {
+            this.autoAdvanceCheckbox.checked = settings.autoAdvance;
         }
 
         // Restore system prompts if they exist

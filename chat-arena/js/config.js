@@ -12,6 +12,9 @@ window.ARENA_CONFIG = {
     // who said what.
     showIdentities: true,
 
+    // Temperature (0.0 - 2.0). Controls response randomness.
+    defaultTemperature: 0.7,
+
     // TTS Configuration
     ttsEndpoint: 'http://localhost:2244',
     ttsVoiceA: '',
