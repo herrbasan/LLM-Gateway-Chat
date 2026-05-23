@@ -75,7 +75,12 @@ class Participant {
                 model: this.modelName,
                 messages: messages,
                 stream: true,
-                temperature: this.temperature
+                temperature: this.temperature,
+                extra_body: {
+                    chat_template_kwargs: {
+                        enable_thinking: !!this.reasoningEffort
+                    }
+                }
             };
             if (this.reasoningEffort) {
                 params.reasoning_effort = this.reasoningEffort;

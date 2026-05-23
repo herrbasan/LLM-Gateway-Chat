@@ -2046,7 +2046,12 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
             model: currentModel,
             messages,
             temperature,
-            stream: true
+            stream: true,
+            extra_body: {
+                chat_template_kwargs: {
+                    enable_thinking: elements.thinkingCheckbox?.checked === true
+                }
+            }
         };
         
         if (reasoningEffort) {
