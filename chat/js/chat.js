@@ -558,7 +558,9 @@ function buildExchangeElement(exchange) {
 
             const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
             const assistantParsed = parseTimestamp(cleanedContent);
-            const assistantTimestamp = assistantParsed.timestamp || '';
+            const vers = exchange.assistant?.versions || [];
+            const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
+            const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
             const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
 
             const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
@@ -623,7 +625,9 @@ function buildExchangeElement(exchange) {
     if (exchange.assistant?.content || exchange.assistant?.isStreaming) {
         const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
         const assistantParsed = parseTimestamp(cleanedContent);
-        const assistantTimestamp = assistantParsed.timestamp || '';
+        const vers = exchange.assistant?.versions || [];
+            const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
+            const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
         const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
         assistantEl.dataset.isStreaming = exchange.assistant.isStreaming ? 'true' : 'false';
 
@@ -2400,7 +2404,9 @@ function renderExchange(exchange) {
         if (exchange.assistant.content || exchange.assistant.isStreaming) {
             const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
             const assistantParsed = parseTimestamp(cleanedContent);
-            const assistantTimestamp = assistantParsed.timestamp || '';
+            const vers = exchange.assistant?.versions || [];
+            const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
+            const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
             const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
 
             const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
@@ -2482,7 +2488,9 @@ function renderExchange(exchange) {
         // Clean up any duplicate timestamps from historical data
         const cleanedContent = stripExtraTimestamps(exchange.assistant.content);
         const assistantParsed = parseTimestamp(cleanedContent);
-        const assistantTimestamp = assistantParsed.timestamp || '';
+        const vers = exchange.assistant?.versions || [];
+            const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
+            const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
         
         const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
         // For historical messages, we already have the clean content

@@ -774,8 +774,11 @@ export class Conversation {
                         if (msg.thinking_signature) {
                             target.assistant.thinking_signature = msg.thinking_signature;
                         }
+                        if (msg.streamStats) {
+                            target.assistant.streamStats = msg.streamStats;
+                        }
                         target.assistant.isComplete = true;
-                        if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now() }];
+                        if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now(), streamStats: msg.streamStats || null }];
                     }
                 }
             }
