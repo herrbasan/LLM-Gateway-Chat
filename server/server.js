@@ -67,7 +67,10 @@ logger.info('Chat Backend starting, loading users_db...', { port: PORT }, 'Serve
 const usersDbDir = path.dirname(path.resolve(USERS_DB_PATH));
 if (!fs.existsSync(usersDbDir)) fs.mkdirSync(usersDbDir, { recursive: true });
 
-usersDb = nDB.open(USERS_DB_PATH);
+usersDb = nDB.open(USERS_DB_PATH, {
+    trash_ttl: 86400 * 7, // 7 days
+    trash_purge_interval: 3600 // 1 hour
+});
 logger.info('users_db opened', { path: USERS_DB_PATH }, 'Auth');
 
 // 2. User Seeding (Auth + Routing schema)
@@ -181,6 +184,20 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// File Bucket Garbage Collection (runs every 6 hours)
+setInterval(() => {
+  for (const [dbPath, instance] of activeDbs.entries()) {
+    try {
+      const stats = instance.db.gcBuckets();
+      if (stats.trashed > 0) {
+        logger.info('File GC completed', { dbPath, stats }, 'Storage');
+      }
+    } catch(err) {
+      logger.error('nDB gcBuckets failed', err, { dbPath }, 'Storage');
+    }
+  }
+}, 6 * 60 * 60 * 1000);
+
 // Embeddings check & flush loop across all mounted isolated DBs
 setInterval(async () => {
     // 1. Recover embedding health if down
@@ -245,7 +262,10 @@ function getOrLoadUserDb(dbPath) {
     if (!fs.existsSync(nvdbDir)) fs.mkdirSync(nvdbDir, { recursive: true });
     
     console.time(`nDB.open:${dbPath}`);
-    const db = nDB.open(ndbPath);
+    const db = nDB.open(ndbPath, {
+        trash_ttl: 86400 * 7, // 7 days
+        trash_purge_interval: 3600 // 1 hour
+    });
     console.timeEnd(`nDB.open:${dbPath}`);
     
     let vdb, embeddingsCol;
@@ -340,17 +360,17 @@ function getAuthUser(req) {
     if (SESSION_TTL > 0 && user.lastAccess) {
         if (Date.now() - new Date(user.lastAccess).getTime() > SESSION_TTL) {
             user.userToken = null; // Expire Token
-            usersDb.update(user._id, user);
+            usersDb.set(user._id, 'userToken', null);
             return null;
         }
         // Refresh lastAccess only if more than half the TTL has elapsed
         if (Date.now() - new Date(user.lastAccess).getTime() > SESSION_TTL / 2) {
             user.lastAccess = new Date().toISOString();
-            usersDb.update(user._id, user);
+            usersDb.set(user._id, 'lastAccess', user.lastAccess);
         }
     } else if (SESSION_TTL > 0) {
         user.lastAccess = new Date().toISOString();
-        usersDb.update(user._id, user);
+        usersDb.set(user._id, 'lastAccess', user.lastAccess);
     }
     
     return user;
@@ -724,7 +744,8 @@ const routes = {
     const userToken = 'sess_' + crypto.randomUUID().replace(/-/g, '');
     user.userToken = userToken;
     user.lastAccess = new Date().toISOString();
-    usersDb.update(user._id, user);
+    usersDb.set(user._id, 'userToken', user.userToken);
+    usersDb.set(user._id, 'lastAccess', user.lastAccess);
     
     // Check if user requires initialization of settings in their chat db
     const dbInstance = getOrLoadUserDb(user.dbPath);
@@ -756,7 +777,7 @@ const routes = {
     const user = getAuthUser(req);
     if (user) {
         user.userToken = null;
-        usersDb.update(user._id, user);
+        usersDb.set(user._id, 'userToken', null);
     }
     
     res.writeHead(200, {
