@@ -3479,9 +3479,23 @@ async function copyMessageToClipboard(exchangeId, btn) {
     const currentContent = parseTimestamp(rawContent).cleanContent;
     const parsed = parseThinking(currentContent);
     const mdToCopy = parsed.answer || currentContent;
+    const textToCopy = mdToCopy.trim();
     
     try {
-        await navigator.clipboard.writeText(mdToCopy.trim());
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(textToCopy);
+        } else {
+            // Fallback for non-https environments where navigator.clipboard is missing
+            const textArea = document.createElement('textarea');
+            textArea.value = textToCopy;
+            textArea.style.position = 'fixed'; // Avoid scrolling to bottom
+            textArea.style.opacity = '0';
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+        }
         const icon = btn.querySelector('nui-icon');
         const oldIconName = icon.getAttribute('name');
         icon.setAttribute('name', 'check');
