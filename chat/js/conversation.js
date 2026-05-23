@@ -254,6 +254,8 @@ export class Conversation {
         if (exchange.assistant.reasoning_content) metadata.reasoning_content = exchange.assistant.reasoning_content;
         if (exchange.assistant.thinking_signature) metadata.thinking_signature = exchange.assistant.thinking_signature;
         if (exchange.assistant.streamStats) metadata.streamStats = exchange.assistant.streamStats;
+        if (exchange.assistant.usage) metadata.usage = exchange.assistant.usage;
+        if (exchange.assistant.context) metadata.context = exchange.assistant.context;
 
         this._syncMessage('assistant', cleanedContent, null, exchangeId, metadata);
 
@@ -777,8 +779,14 @@ export class Conversation {
                         if (msg.streamStats) {
                             target.assistant.streamStats = msg.streamStats;
                         }
+                        if (msg.usage) {
+                            target.assistant.usage = msg.usage;
+                        }
+                        if (msg.context) {
+                            target.assistant.context = msg.context;
+                        }
                         target.assistant.isComplete = true;
-                        if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now(), streamStats: msg.streamStats || null }];
+                        if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now(), streamStats: msg.streamStats || null, usage: msg.usage || null, context: msg.context || null }];
                     }
                 }
             }

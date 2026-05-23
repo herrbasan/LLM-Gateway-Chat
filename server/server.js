@@ -1243,6 +1243,8 @@ const routes = {
       if (body.reasoning_content) message.reasoning_content = body.reasoning_content;
       if (body.thinking_signature) message.thinking_signature = body.thinking_signature;
       if (body.streamStats) message.streamStats = body.streamStats;
+      if (body.usage) message.usage = body.usage;
+      if (body.context) message.context = body.context;
       
       conv.messages.push(message);
       conv.messageCount = conv.messages.length;
