@@ -229,6 +229,9 @@ export class Conversation {
         if (thinkingData?.thinking_signature) {
             exchange.assistant.thinking_signature = thinkingData.thinking_signature;
         }
+        if (thinkingData?.streamStats) {
+            exchange.assistant.streamStats = thinkingData.streamStats;
+        }
 
         // Clean content - remove any duplicate timestamps the LLM may have generated
         const cleanedContent = this._stripExtraTimestamps(exchange.assistant.content);
@@ -240,7 +243,8 @@ export class Conversation {
                 content: cleanedContent,
                 timestamp: Date.now(),
                 usage: usage,
-                context: contextInfo
+                context: contextInfo,
+                streamStats: thinkingData?.streamStats
             });
             // Update current version to point to the latest
             exchange.assistant.currentVersion = exchange.assistant.versions.length - 1;
@@ -249,6 +253,7 @@ export class Conversation {
         const metadata = {};
         if (exchange.assistant.reasoning_content) metadata.reasoning_content = exchange.assistant.reasoning_content;
         if (exchange.assistant.thinking_signature) metadata.thinking_signature = exchange.assistant.thinking_signature;
+        if (exchange.assistant.streamStats) metadata.streamStats = exchange.assistant.streamStats;
 
         this._syncMessage('assistant', cleanedContent, null, exchangeId, metadata);
 

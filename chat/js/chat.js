@@ -2116,10 +2116,16 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         const RENDER_INTERVAL = 50; // Render at most every 50ms
 
         let isReceivingTool = false;
+        const requestStartTime = performance.now();
+        let firstTokenTime = null;
 
         for await (const event of client.streamChatIterable(requestBody, chatId, false, conversation)) {
             switch (event.type) {
                 case 'delta':
+                    if (firstTokenTime === null && (event.content !== undefined || event.reasoning_content !== undefined || event.tool_calls !== undefined)) {
+                        firstTokenTime = performance.now();
+                    }
+
                     // Hide progress status once text generation begins
                     const statusEl = assistantEl.querySelector('.progress-status');
                     if (statusEl) statusEl.classList.remove('visible');
@@ -2241,12 +2247,22 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     }
                     // Ensure final content is rendered
                     updateAssistantContent(assistantEl, finalContent);
+                    
+                    const streamEndTime = performance.now();
+                    const ttftMs = firstTokenTime !== null ? Math.round(firstTokenTime - requestStartTime) : Math.round(streamEndTime - requestStartTime);
+                    const durationSecs = (streamEndTime - (firstTokenTime !== null ? firstTokenTime : requestStartTime)) / 1000;
+                    const streamStats = { 
+                        ttft: ttftMs, 
+                        durationSecs: durationSecs > 0 ? durationSecs : 0.001 
+                    };
+
                     // Await save to ensure data is persisted before continuing
                     await conversation.setAssistantComplete(exchangeId, event.usage, event.context, {
                         reasoning_content: event.reasoning_content || null,
-                        thinking_signature: event.thinking_signature || null
+                        thinking_signature: event.thinking_signature || null,
+                        streamStats: streamStats
                     });
-                    finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context);
+                    finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context, streamStats);
                     scrollToBottom();
                     break;
                 case 'progress':
@@ -2523,7 +2539,7 @@ function createAssistantElement(exchangeId, timestamp = '') {
     return el;
 }
 
-function updateUsageDisplay(el, contextData) {
+function updateUsageDisplay(el, contextData, usageData = null, streamStats = null) {
     if (!el || !contextData) return;
     const displaySpan = el.querySelector('.context-usage-display');
     const valueSpan = el.querySelector('.usage-values');
@@ -2554,6 +2570,13 @@ function updateUsageDisplay(el, contextData) {
             text += ` / ${formatTokensCompact(windowSize)}`;
         }
         text += ' Tokens';
+
+        if (streamStats && usageData && usageData.completion_tokens) {
+            const tps = (usageData.completion_tokens / streamStats.durationSecs).toFixed(1);
+            text += ` | ${streamStats.ttft}ms TTFT | ${tps} T/s`;
+        } else if (streamStats) {
+            text += ` | ${streamStats.ttft}ms TTFT`;
+        }
 
         // Only update if value changed - prevents tooltip flicker
         if (valueSpan.textContent !== text) {
@@ -3237,7 +3260,7 @@ function showError(el, message) {
     if (indicator) indicator.style.display = 'none';
 }
 
-function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null) {
+function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null, streamStats = null) {
     el.dataset.isStreaming = 'false';
     // Hide streaming indicator
     const indicator = el.querySelector('.streaming-indicator');
@@ -3247,18 +3270,20 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     const exchange = conversation.getExchange(exchangeId);
     let finalUsage = usage || exchange?.assistant?.usage;
     let finalContext = contextInfo || exchange?.assistant?.context;
+    let finalStats = streamStats || exchange?.assistant?.streamStats;
     
     // Fallback to the saved version data if we are loading from history
     if (!finalUsage && !finalContext && exchange?.assistant) {
         const curVersion = exchange.assistant.versions?.[exchange.assistant.currentVersion || 0];
         if (curVersion) {
-             finalUsage = curVersion.usage;
-             finalContext = curVersion.context;
+            finalUsage = curVersion.usage;
+            finalContext = curVersion.context;
+            finalStats = curVersion.streamStats || finalStats;
         }
     }
 
     if (finalContext) {
-        updateUsageDisplay(el, finalContext);
+        updateUsageDisplay(el, finalContext, finalUsage, finalStats);
     } else if (exchange && exchange.assistant?.content) {
         // If we lack explicit context stats, fallback to a heuristic estimation if it's rendered in history
         const userContent = exchange.user ? (typeof exchange.user.content === 'string' ? exchange.user.content : '') : '';
