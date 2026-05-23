@@ -147,8 +147,8 @@ changes, always pull on the deployment server:
 # Add safe directory exception (one-time, already done):
 # git config --global --add safe.directory '//BADKID/Stuff/SRV/LLM-Gateway-Chat'
 
-# Pull latest:
-git -C "\\BADKID\Stuff\SRV\LLM-Gateway-Chat" pull
+# Pull latest (including submodules):
+git -C "\\BADKID\Stuff\SRV\LLM-Gateway-Chat" pull --recurse-submodules
 ```
 
 The server auto-restarts when files change (nodemon or similar). The share is at
