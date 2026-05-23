@@ -3060,6 +3060,10 @@ function updateAssistantContent(el, content, reasoningContent = null) {
     if (reasoningContent) {
         parsed.thinking = reasoningContent;
         // if explicitly passed via API, the content doesn't have <think> tags so answer is just the content.
+        // If we have reasoning but no main answer yet while streaming, reasoning is currently active.
+        if (el.dataset.isStreaming === 'true' && !visibleContent.trim()) {
+            parsed.isStreaming = true;
+        }
     }
 
     // Use the element's actual streaming state, not just whether <think> is open
