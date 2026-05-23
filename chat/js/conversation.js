@@ -246,7 +246,11 @@ export class Conversation {
             exchange.assistant.currentVersion = exchange.assistant.versions.length - 1;
         }
 
-        this._syncMessage('assistant', cleanedContent, null, exchangeId);
+        const metadata = {};
+        if (exchange.assistant.reasoning_content) metadata.reasoning_content = exchange.assistant.reasoning_content;
+        if (exchange.assistant.thinking_signature) metadata.thinking_signature = exchange.assistant.thinking_signature;
+
+        this._syncMessage('assistant', cleanedContent, null, exchangeId, metadata);
 
         return this.save();
     }
@@ -753,10 +757,18 @@ export class Conversation {
                     lastToolExchange = toolEx;
                 } else if (msg.role === 'assistant') {
                     const content = (msg.content || '').trim();
-                    if (!content) continue;
+                    if (!content && !msg.reasoning_content) continue;
                     const target = lastToolExchange || regularExchange;
                     if (target) {
-                        target.assistant.content = target.assistant.content ? target.assistant.content + '\n' + content : content;
+                        if (content) {
+                            target.assistant.content = target.assistant.content ? target.assistant.content + '\n' + content : content;
+                        }
+                        if (msg.reasoning_content) {
+                            target.assistant.reasoning_content = msg.reasoning_content;
+                        }
+                        if (msg.thinking_signature) {
+                            target.assistant.thinking_signature = msg.thinking_signature;
+                        }
                         target.assistant.isComplete = true;
                         if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now() }];
                     }

@@ -1240,6 +1240,8 @@ const routes = {
     if (body.toolArgs) message.toolArgs = body.toolArgs;
     if (body.toolStatus) message.toolStatus = body.toolStatus;
       if (body.toolImages) message.toolImages = body.toolImages;
+      if (body.reasoning_content) message.reasoning_content = body.reasoning_content;
+      if (body.thinking_signature) message.thinking_signature = body.thinking_signature;
       
       conv.messages.push(message);
       conv.messageCount = conv.messages.length;
