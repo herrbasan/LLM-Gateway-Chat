@@ -407,6 +407,7 @@ let currentTtsExchangeId = null;
 const elements = {
     modelSelect: document.getElementById('model-select'),
     temperature: document.getElementById('temperature'),
+    thinkingCheckbox: document.getElementById('thinking-checkbox'),
     maxTokens: document.getElementById('max-tokens'),
     systemPrompt: document.getElementById('system-prompt'),
     presetSelect: document.getElementById('preset-select'),
@@ -859,6 +860,12 @@ async function applyDefaultConfig() {
             const savedTemp = await storage.getPref('default-temperature');
             tempInput.value = savedTemp !== null ? savedTemp : DEFAULT_TEMPERATURE;
         }
+    }
+
+    // Set default thinking
+    if (elements.thinkingCheckbox) {
+        const savedThinking = await storage.getPref('default-thinking');
+        elements.thinkingCheckbox.checked = savedThinking === true;
     }
 
     // Set default max tokens
@@ -1351,6 +1358,10 @@ function setupEventListeners() {
     // Session metadata - save to storage on change
     elements.temperature?.querySelector('input')?.addEventListener('change', (e) => {
         storage.setPref('default-temperature', parseFloat(e.target.value) || DEFAULT_TEMPERATURE).catch(() => {});
+    });
+
+    elements.thinkingCheckbox?.addEventListener('change', (e) => {
+        storage.setPref('default-thinking', !!e.target.checked).catch(() => {});
     });
     
     elements.maxTokens?.querySelector('input')?.addEventListener('change', (e) => {
@@ -2000,6 +2011,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     // No transient injection needed here.
 
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
+    const reasoningEffort = elements.thinkingCheckbox?.checked ? 'medium' : null;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
 
@@ -2037,6 +2049,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
             stream: true
         };
         
+        if (reasoningEffort) {
+            requestBody.reasoning_effort = reasoningEffort;
+        }
+
         if (maxTokens) {
             requestBody.max_tokens = maxTokens;
         }
