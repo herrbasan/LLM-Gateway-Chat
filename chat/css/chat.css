@@ -1059,6 +1059,12 @@ nui-app:not(.nui-ready) { display: none; }
     font-size: 0.9em;
     color: var(--color-shade5, #888);
     font-weight: normal;
+    opacity: 0;
+    transition: opacity 0.2s ease-in-out;
+}
+
+.chat-message:hover .context-usage-display {
+    opacity: 1;
 }
 
 /* Message Actions */

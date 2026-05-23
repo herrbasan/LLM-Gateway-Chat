@@ -2034,7 +2034,13 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         if (tsEl) {
             tsEl.textContent = assistantTimestamp.replace(/^\[|\]$/g, '').replace('@', ' @ ');
         } else {
-            headerEl.innerHTML += ` <span class="message-timestamp">${assistantTimestamp.replace(/^\[|\]$/g, '').replace('@', ' @ ')}</span>`;
+            const newTsEl = document.createElement('span');
+            newTsEl.className = 'message-timestamp';
+            newTsEl.textContent = assistantTimestamp.replace(/^\[|\]$/g, '').replace('@', ' @ ');
+            const authorSpan = headerEl.querySelector('span'); // The 'Assistant' span
+            if (authorSpan) {
+                authorSpan.insertAdjacentElement('afterend', newTsEl);
+            }
         }
     }
     scrollToBottom();
