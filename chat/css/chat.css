@@ -836,6 +836,20 @@ nui-app:not(.nui-ready) { display: none; }
     50% { opacity: 0.5; transform: scale(0.8); }
 }
 
+/* New content indicator: blue dot on background chats */
+.chat-history-item.new-content::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 2.8rem;
+    transform: translateY(-50%);
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--nui-accent, #4fc3f7);
+    animation: streaming-pulse 1.5s ease-in-out infinite;
+}
+
 .chat-history-item-title-container {
     display: flex;
     flex-direction: column;

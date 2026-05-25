@@ -240,6 +240,7 @@ export class GatewayClient extends EventEmitter {
     }
     
     const paramsWithSession = { ...params, request_id: requestId, session_id: this.sessionId };
+    console.log('[GatewayClient WS] _createStream session_id:', this.sessionId, 'requestId:', requestId);
     
     this.connect()
       .then(() => {
@@ -344,7 +345,6 @@ export class GatewayClient extends EventEmitter {
         }
       }
     } finally {
-      // Save the correct conversation (stored per-stream) before cleaning up
       if (chatId) {
         const entry = this._streamRegistry.get(chatId);
         const convToSave = entry?.conv;
@@ -384,10 +384,19 @@ export class GatewayClient extends EventEmitter {
         headers['Authorization'] = `Bearer ${this.accessKey}`;
       }
 
+      // Defensive: Ensure sessionId is always set
+      if (!this.sessionId) {
+        console.warn('[GatewayClient] sessionId was missing, regenerating');
+        this.sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      }
+
       const bodyParams = {
         ...params,
-        stream: true
+        stream: true,
+        session_id: this.sessionId
       };
+
+      console.log('[GatewayClient SSE] POST session_id:', this.sessionId, 'chatId:', chatId);
 
       const response = await fetch(url, {
         method: 'POST',

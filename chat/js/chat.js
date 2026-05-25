@@ -386,6 +386,8 @@ let conversation = null;
 const chatContainers = new Map(); // chatId -> HTMLDivElement
 // Multi-conversation: in-memory conversation objects (avoid re-loading from IndexedDB)
 const activeConversations = new Map(); // chatId -> Conversation
+// Chats that received new content while in background (cleared when viewed)
+const chatsWithNewContent = new Set();
 
 let client = new GatewayClient({ baseUrl: GATEWAY_URL });
 let models = [];
@@ -477,6 +479,18 @@ function getOrCreateContainer(chatId) {
  */
 function getActiveContainer() {
     return chatContainers.get(currentChatId) || elements.messages;
+}
+
+/**
+ * Returns the chatId of the currently visible (displayed) chat.
+ * This is the GROUND TRUTH for which chat the user is looking at,
+ * derived from the DOM, not the global currentChatId variable.
+ */
+function getDisplayedChatId() {
+    for (const [id, container] of chatContainers.entries()) {
+        if (container.style.display !== 'none') return id;
+    }
+    return currentChatId; // fallback
 }
 
 /**
@@ -804,21 +818,17 @@ async function init() {
     // Cache in activeConversations for multi-conversation support
     activeConversations.set(currentChatId, conversation);
 
-    // Set session ID for this conversation (generate if missing for backwards compat)
-    const chatInfo = chatHistory.get(currentChatId);
-    if (chatInfo?.sessionId) {
-        client.setSessionId(chatInfo.sessionId);
-    } else if (chatInfo) {
-        // Old conversation without sessionId - generate and save one
-        const newSessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-        chatHistory.updateSessionId(currentChatId, newSessionId);
-        client.setSessionId(newSessionId);
+    // Set session ID from the Conversation object itself.
+    // conv.sessionId is always set (derived from storageKey).
+    if (conversation.sessionId) {
+        client.setSessionId(conversation.sessionId);
     }
 
     // Apply default config values (needs history loaded first for async prefs)
     await applyDefaultConfig();
 
     // Restore system prompt for the initially loaded chat
+    const chatInfo = chatHistory.get(currentChatId);
     restoreSystemPromptUI(chatInfo);
 
     // Setup event listeners first
@@ -1651,25 +1661,36 @@ async function sendMessage() {
     const editor = elements.messageInput;
     const content = editor?.getMarkdown().trim();
     
-    if ((!content && attachedImages.length === 0) || client.hasActiveStream(currentChatId)) return;
-    if (!currentModel) {
+    // Use the DOM as ground truth — find the VISIBLE chat's ID.
+    // currentChatId is a global that can be stale; the visible container
+    // is what the user is actually looking at and typing into.
+    const sendChatId = getDisplayedChatId();
+    const sendConv = activeConversations.get(sendChatId) || conversation;
+    const sendModel = currentModel;
+
+    console.log('%c✉️ SEND  %c→ %c' + sendChatId + ' %c(' + sendModel + ')',
+        'font-weight:bold;color:#ffb74d', 'color:#aaa', 'color:#ffb74d', 'color:#666');
+    
+    if ((!content && attachedImages.length === 0) || client.hasActiveStream(sendChatId)) return;
+    if (!sendModel) {
         nui.components.dialog.alert('Model Required', 'Please select a model first.');
         return;
     }
     
-    // Clear welcome message if present
-    const welcome = getActiveContainer()?.querySelector('.welcome-message');
+    // Clear welcome message if present (use sendChatId's container, not getActiveContainer)
+    const sendContainer = getOrCreateContainer(sendChatId);
+    const welcome = sendContainer?.querySelector('.welcome-message');
     if (welcome) welcome.remove();
     
     // Add user message to conversation
-    currentExchangeId = await conversation.addExchange(content, [...attachedImages]);
+    currentExchangeId = await sendConv.addExchange(content, [...attachedImages]);
 
     // Track the used model for this chat
-    updateChatModel(currentChatId, currentModel);
+    updateChatModel(sendChatId, sendModel);
 
     // Update chat title if it's the first message
-    if (conversation.length === 1 && content) {
-        updateChatTitle(currentChatId, content);
+    if (sendConv.length === 1 && content) {
+        updateChatTitle(sendChatId, content);
     }
 
     // Check vision capabilities before sending
@@ -1697,30 +1718,30 @@ async function sendMessage() {
     clearAttachments();
     updateVisionToggleVisibility();
     
-    // Render user message
-    renderExchange(conversation.getExchange(currentExchangeId));
+    // Render user message into the correct chat's container
+    renderExchange(sendConv.getExchange(currentExchangeId), sendContainer);
     
     // MCP VISION: If toggle is ON and tools available, create vision sessions BEFORE sending to model
     // This happens AFTER user message is rendered, BEFORE LLM responds
     if (shouldUseMcpVision) {
         try {
-            const visionResult = await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, currentChatId);
+            const visionResult = await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, sendChatId);
 
             if (visionResult && visionResult.analysis) {
                 // Append analysis directly to user message — becomes natural
                 // conversation history, no tool_calls backfill, no thinking_signature issues
-                const ex = conversation.getExchange(currentExchangeId);
+                const ex = sendConv.getExchange(currentExchangeId);
                 if (ex?.user?.content) {
                     ex.user.content += `\n\n[Auto-vision: ${visionResult.sessionId}]\n${visionResult.analysis}`;
-                    conversation.save();
+                    sendConv.save();
                 }
             }
 
             // Remove image attachments so raw base64 isn't sent to Gateway
-            const ex = conversation.getExchange(currentExchangeId);
+            const ex = sendConv.getExchange(currentExchangeId);
             if (ex?.user?.attachments) {
                 ex.user.attachments = [];
-                conversation.save();
+                sendConv.save();
             }
         } catch (err) {
             console.error('[Vision] MCP vision session creation failed:', err);
@@ -1732,8 +1753,9 @@ async function sendMessage() {
         }
     }
     
-    // Start streaming response
-    await streamResponse(currentExchangeId);
+    // Start streaming response — pass sendChatId so streamResponse locks to the correct chat
+    // even if the user switched tabs while vision processing was in flight
+    await streamResponse(currentExchangeId, sendChatId);
 }
 
 // ============================================
@@ -1980,9 +2002,14 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     // Use provided chatId if given (for background tool continuations), otherwise use current
     const chatId = streamChatId || currentChatId;
 
-    // Ensure conversation is synced to the correct chat in case user switched tabs during an async operation
-    // This is critical for tool continuations where handleToolExecution awaited while user switched chats
-    conversation = activeConversations.get(chatId) || conversation;
+    // Capture the conversation for THIS chat in a LOCAL variable.
+    // Using the global `conversation` is NOT safe — switchChat() reassigns it,
+    // which would silently redirect all delta writes from a background stream
+    // into the foreground chat's conversation (where the exchangeId doesn't exist),
+    // causing complete data loss for the background chat.
+    const streamConv = activeConversations.get(chatId) || conversation;
+    // Also update the global so other synchronous code sees the right conversation
+    conversation = streamConv;
 
     // Track original user exchange ID for chained tool calls.
     // origUserExchangeId is passed when this stream is a tool continuation (so we know the original user exchange).
@@ -1993,12 +2020,12 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     markChatAsStreaming(chatId, true);
     updateSendButton();
 
-    const exchange = conversation.getExchange(exchangeId);
+    const exchange = streamConv.getExchange(exchangeId);
 
     // Guard: skip operations on missing exchanges and tool exchanges (they have no user message)
     const isToolExchange = exchange && exchange.type === 'tool';
 
-    const assistantTimestamp = conversation._formatTimestamp();
+    const assistantTimestamp = streamConv._formatTimestamp();
     const timestampWithSpace = assistantTimestamp + ' ';
     
     // Determine if we should exclude vision tools from system prompt
@@ -2009,7 +2036,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     
     const systemPrompt = getSystemPromptWithMetadata(excludedToolPrefixes);
     // Store system prompt for debugging (included in JSON export)
-    conversation.setSystemPrompt(exchangeId, systemPrompt);
+    streamConv.setSystemPrompt(exchangeId, systemPrompt);
 
     // Auto-vision analysis is appended directly to the user message content in sendMessage().
     // No transient injection needed here.
@@ -2050,10 +2077,15 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     scrollToBottom();
     
     try {
-        const messages = await conversation.getMessagesForApi(systemPrompt);
+        const messages = await streamConv.getMessagesForApi(systemPrompt);
+
+        // Use the per-chat model from chatHistory, falling back to the global currentModel.
+        // This is essential for simultaneous chatting — a background tool continuation
+        // must use its own chat's model, not whatever the foreground chat has selected.
+        const streamModel = chatHistory.get(chatId)?.model || currentModel;
 
         const requestBody = {
-            model: currentModel,
+            model: streamModel,
             messages,
             temperature,
             stream: true,
@@ -2074,7 +2106,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 
         // Check if auto-vision already ran for this exchange chain
         // by looking for the [Auto-vision: ...] marker in user messages
-        const hasAutoVisionAnalysis = conversation.exchanges.some(ex =>
+        const hasAutoVisionAnalysis = streamConv.exchanges.some(ex =>
             ex.user?.content?.includes('[Auto-vision:')
         );
 
@@ -2129,11 +2161,29 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         const requestStartTime = performance.now();
         let firstTokenTime = null;
 
-        for await (const event of client.streamChatIterable(requestBody, chatId, false, conversation)) {
+        // Set session ID RIGHT before starting the stream (after all awaits).
+        // Both WS and SSE capture this.sessionId at stream-start.
+        // Use the Conversation's own sessionId — it's always unique per chat
+        // (derived from storageKey). chatHistory may not have sessionId if the
+        // backend is disabled or storage stubs returned empty.
+        if (streamConv.sessionId) {
+            client.setSessionId(streamConv.sessionId);
+            console.log('%c🔄 STREAM %c→ %c' + chatId + ' %csession: ' + streamConv.sessionId,
+                'font-weight:bold;color:#81c784', 'color:#aaa', 'color:#81c784', 'color:#666');
+        } else {
+            console.warn('[Session] streamResponse MISSING sessionId for chatId:', chatId);
+        }
+
+        for await (const event of client.streamChatIterable(requestBody, chatId, false, streamConv)) {
             switch (event.type) {
                 case 'delta':
                     if (firstTokenTime === null && (event.content !== undefined || event.reasoning_content !== undefined || event.tool_calls !== undefined)) {
                         firstTokenTime = performance.now();
+                        // Mark background chat as having new content
+                        if (chatId !== currentChatId) {
+                            chatsWithNewContent.add(chatId);
+                            markChatActivity(chatId);
+                        }
                     }
 
                     // Hide progress status once text generation begins
@@ -2146,12 +2196,12 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 
                     if (event.content !== undefined) {
                         contentBuffer += event.content;
-                        conversation.updateAssistantResponse(exchangeId, event.content);
+                        streamConv.updateAssistantResponse(exchangeId, event.content);
                     }
 
                     if (event.reasoning_content !== undefined) {
                         reasoningBuffer += event.reasoning_content;
-                        conversation.updateAssistantReasoning(exchangeId, event.reasoning_content);
+                        streamConv.updateAssistantReasoning(exchangeId, event.reasoning_content);
                     }
 
                     if (event.tool_calls && event.tool_calls.length > 0 && !isReceivingTool) {
@@ -2194,7 +2244,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     const errorFullContent = errorTsMatch ? errorTsMatch[0] + contentBuffer : contentBuffer;
                     updateAssistantContent(assistantEl, errorFullContent);
                     showError(assistantEl, event.error);
-                    conversation.setAssistantError(exchangeId, event.error);
+                    streamConv.setAssistantError(exchangeId, event.error);
                     break;
                     
                 case 'aborted':
@@ -2203,12 +2253,12 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     const abortFullContent = abortTsMatch ? abortTsMatch[0] + contentBuffer : contentBuffer;
                     updateAssistantContent(assistantEl, stripExtraTimestamps(abortFullContent));
                     showError(assistantEl, 'Stopped');
-                    conversation.setAssistantError(exchangeId, 'Stopped');
+                    streamConv.setAssistantError(exchangeId, 'Stopped');
                     break;
                     
                 case 'done':
                     if (event.finish_reason === 'tool_calls' && event.tool_calls?.length > 0) {
-                        const toolDoneEx = conversation.getExchange(exchangeId);
+                        const toolDoneEx = streamConv.getExchange(exchangeId);
                         if (toolDoneEx) {
                             if (event.reasoning_content) toolDoneEx.assistant.reasoning_content = event.reasoning_content;
                             if (event.thinking_signature) toolDoneEx.assistant.thinking_signature = event.thinking_signature;
@@ -2241,7 +2291,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 
                     // contentBuffer doesn't include our injected timestamp
                     // Get the exchange to find the original timestamp we injected
-                    const ex = conversation.getExchange(exchangeId);
+                    const ex = streamConv.getExchange(exchangeId);
                     
                     let finalContent = contentBuffer;
                     const tsMatch = ex?.assistant?.content?.match(TIMESTAMP_REGEX);
@@ -2267,7 +2317,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     };
 
                     // Await save to ensure data is persisted before continuing
-                    await conversation.setAssistantComplete(exchangeId, event.usage, event.context, {
+                    await streamConv.setAssistantComplete(exchangeId, event.usage, event.context, {
                         reasoning_content: event.reasoning_content || null,
                         thinking_signature: event.thinking_signature || null,
                         streamStats: streamStats
@@ -2304,12 +2354,16 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         console.error('[Chat] Stream error caught in try/catch:', error);
         const errorMessage = typeof error === 'string' ? error : (error.message || 'Unknown error');
         showError(assistantEl, errorMessage);
-        conversation.setAssistantError(exchangeId, errorMessage);
+        streamConv.setAssistantError(exchangeId, errorMessage);
     } finally {
-        isStreaming = false;
         markChatAsStreaming(chatId, false);
         updateSendButton();
-        currentExchangeId = null;
+        // Only clear currentExchangeId if this stream belongs to the foreground chat.
+        // Background streams completing should not interfere with the active chat's state.
+        if (chatId === currentChatId) {
+            isStreaming = false;
+            currentExchangeId = null;
+        }
     }
 }
 
@@ -2342,7 +2396,8 @@ function renderConversation() {
     scrollToBottom();
 }
 
-function renderExchange(exchange) {
+function renderExchange(exchange, targetContainer = null) {
+    const container = targetContainer || getActiveContainer();
     if (exchange.type === 'tool') {
         const parsedObj = { name: exchange.tool.name, args: exchange.tool.args };
         const toolEl = document.createElement('div');
@@ -2387,7 +2442,7 @@ function renderExchange(exchange) {
                 </div>
             </div>
         `;
-        getActiveContainer()?.appendChild(toolEl);
+        container?.appendChild(toolEl);
 
         // Use textContent to prevent SVG/code examples from being parsed as HTML
         const resultEl = toolEl.querySelector('.tool-result');
@@ -2468,7 +2523,7 @@ function renderExchange(exchange) {
         renderConversation();
     });
 
-    getActiveContainer()?.appendChild(userEl);
+    container?.appendChild(userEl);
 
     // Initialize Lightbox declarative handlers for attached images
     if (exchange.user?.attachments?.length > 0) {
@@ -2976,15 +3031,8 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
 
         // 5. Automatically resume stream!
         // We will start a new pseudo-assistant stream using the toolExchangeId
-        // The LLM will receive the shimmed 'user' message and continue generating
-        // Ensure sessionId and model are correct so server routes continuation WS messages to this chat
-        const toolChatInfo = chatHistory.get(toolChatId);
-        if (toolChatInfo?.sessionId) {
-            client.setSessionId(toolChatInfo.sessionId);
-        }
-        if (toolChatInfo?.model) {
-            currentModel = toolChatInfo.model;
-        }
+        // The LLM will receive the shimmed 'user' message and continue generating.
+        // Session ID is set per-chat inside streamResponse — no need to set it here.
         
         if (resumeStream) {
             await streamResponse(toolExchangeId, toolChatId, userExchangeId);
@@ -3024,15 +3072,8 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         });
         
         toolEl.querySelector('.dismiss-tool')?.addEventListener('click', () => {
-            // Dismiss tool implies just continuing without tool result
-            // Ensure sessionId and model are correct so server routes continuation WS messages to this chat
-            const dismissChatInfo = chatHistory.get(toolChatId);
-            if (dismissChatInfo?.sessionId) {
-                client.setSessionId(dismissChatInfo.sessionId);
-            }
-            if (dismissChatInfo?.model) {
-                currentModel = dismissChatInfo.model;
-            }
+            // Dismiss tool implies just continuing without tool result.
+            // Session ID is set per-chat inside streamResponse — no need to set it here.
             if (resumeStream) {
                 streamResponse(toolExchangeId, toolChatId, userExchangeId);
             }
@@ -3452,9 +3493,9 @@ async function regenerate(exchangeId) {
         oldEl.querySelector('.message-actions').classList.remove('visible');
     }
     
-    // Stream new response
+    // Stream new response — pass currentChatId to lock to the correct chat
     currentExchangeId = exchangeId;
-    await streamResponse(exchangeId);
+    await streamResponse(exchangeId, currentChatId);
 }
 
 function switchVersion(exchangeId, direction) {
@@ -3509,7 +3550,12 @@ async function startEditMode(exchangeId, role = 'user') {
     // Block editing only if this specific exchange in the current chat is currently streaming
     if (client.hasActiveStream(currentChatId) && currentExchangeId === exchangeId) return;
 
-    const exchange = conversation.getExchange(exchangeId);
+    // Capture chat context at call time — the dialog is async and the user may
+    // switch tabs while it's open. We must save edits to the original conversation.
+    const editConv = conversation;
+    const editChatId = currentChatId;
+
+    const exchange = editConv.getExchange(exchangeId);
     if (!exchange) return;
 
     const rawContent = role === 'user' ? exchange.user.content : exchange.assistant.content;
@@ -3564,26 +3610,30 @@ async function startEditMode(exchangeId, role = 'user') {
         }
 
         if (newContent && newContent !== currentContent) {
-            commitEdit(exchangeId, role, newContent);
+            commitEdit(exchangeId, role, newContent, editConv, editChatId);
         }
     });
 }
 
-function commitEdit(exchangeId, role, newContent) {
-    const exchange = conversation.getExchange(exchangeId);
+function commitEdit(exchangeId, role, newContent, editConv, editChatId) {
+    // Use the captured conversation for the chat being edited, not the global.
+    // editConv is captured in startEditMode before the async dialog opens,
+    // so it's safe even if the user switched tabs while editing.
+    const conv = editConv || conversation;
+    const exchange = conv.getExchange(exchangeId);
     if (!exchange) return;
 
     if (role === 'user') {
         // 1. Update content with timestamp
-        const timestamp = conversation._formatTimestamp(new Date(exchange.timestamp));
+        const timestamp = conv._formatTimestamp(new Date(exchange.timestamp));
         exchange.user.content = `${timestamp} ${newContent}`;
 
         // 2. Save and render - keep existing assistant response intact
-        conversation.save();
+        conv.save();
         renderConversation();
     } else {
         // 1. Update content for assistant with timestamp
-        const timestamp = conversation._formatTimestamp();
+        const timestamp = conv._formatTimestamp();
         const contentWithTimestamp = `${timestamp} ${newContent}`;
         exchange.assistant.content = contentWithTimestamp;
 
@@ -3596,10 +3646,10 @@ function commitEdit(exchangeId, role, newContent) {
         }
 
         // 2. Truncate conversation downstream
-        conversation.truncateAfter(exchangeId);
+        conv.truncateAfter(exchangeId);
 
         // 3. Save manually since we aren't streaming
-        conversation.save();
+        conv.save();
 
         // 4. Render wipes downstream
         renderConversation();
@@ -3661,13 +3711,18 @@ function restoreSystemPromptUI(chatInfo) {
 }
 
 async function switchChat(targetChatId) {
-    // Save current conversation before switching to ensure no data loss
-    if (conversation) {
-        await conversation.save();
-    }
-    
+    // Capture the outgoing conversation before changing currentChatId.
+    // We MUST set currentChatId BEFORE any await — otherwise sendMessage()
+    // can fire during the yield point and capture the old chatId, sending
+    // the user's message into the wrong conversation.
+    const oldConv = conversation;
     currentChatId = targetChatId;
     storage.setActiveChatId(currentChatId).catch(() => {});
+
+    // Save the outgoing conversation (now safe — currentChatId already updated)
+    if (oldConv) {
+        await oldConv.save();
+    }
 
     // 1. Get or create the container for this chat (creates DOM node if first time)
     const targetContainer = getOrCreateContainer(targetChatId);
@@ -3681,14 +3736,13 @@ async function switchChat(targetChatId) {
     }
     conversation = conv;
 
-    // 3. Sync session ID for the SDK
-    const chatInfo = chatHistory.get(targetChatId);
-    if (chatInfo?.sessionId) {
-        client.setSessionId(chatInfo.sessionId);
-    } else if (chatInfo) {
-        const newSessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-        chatHistory.updateSessionId(targetChatId, newSessionId);
-        client.setSessionId(newSessionId);
+    // 3. Sync session ID from the Conversation object itself.
+    // conv.sessionId is always set (derived from storageKey), unlike
+    // chatHistory which may be empty when backend is disabled.
+    if (conv.sessionId) {
+        client.setSessionId(conv.sessionId);
+    } else {
+        console.warn('[Session] switchChat MISSING sessionId for chatId:', targetChatId);
     }
 
     // 4. Build historical DOM if this is the first time viewing this session
@@ -3702,6 +3756,7 @@ async function switchChat(targetChatId) {
     }
 
     // Restore the system prompt
+    const chatInfo = chatHistory.get(targetChatId);
     restoreSystemPromptUI(chatInfo);
 
     // 6. Restore the model if saved in history
@@ -3738,6 +3793,16 @@ async function switchChat(targetChatId) {
             ? '<nui-icon name="close"></nui-icon>'
             : '<nui-icon name="send"></nui-icon>';
     }
+
+    // Clear new-content indicator since the user is viewing this chat now
+    if (chatsWithNewContent.has(targetChatId)) {
+        chatsWithNewContent.delete(targetChatId);
+        const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${targetChatId}"]`);
+        if (item) item.classList.remove('new-content');
+    }
+
+    console.log('%c📋 DISPLAY %c' + (chatInfo?.title || 'New Chat') + ' %c' + targetChatId,
+        'font-weight:bold;color:#4fc3f7', 'color:#aaa', 'color:#666');
 }
 
 async function deleteChat(chatId, e) {
@@ -4098,6 +4163,16 @@ function markChatAsStreaming(chatId, isStreaming) {
     const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${chatId}"]`);
     if (item) {
         item.classList.toggle('streaming', isStreaming);
+    }
+}
+
+/**
+ * Shows a "new content" indicator on a background chat that received a response.
+ */
+function markChatActivity(chatId) {
+    const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${chatId}"]`);
+    if (item) {
+        item.classList.add('new-content');
     }
 }
 
