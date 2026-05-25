@@ -575,7 +575,7 @@ function buildExchangeElement(exchange) {
             const vers = exchange.assistant?.versions || [];
             const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
             const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
-            const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+            const assistantEl = createAssistantElement(exchange.id, assistantTimestamp, exchange.model);
 
             const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
             if (tsLen > 0) {
@@ -642,7 +642,7 @@ function buildExchangeElement(exchange) {
         const vers = exchange.assistant?.versions || [];
             const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
             const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
-        const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+        const assistantEl = createAssistantElement(exchange.id, assistantTimestamp, exchange.model);
         assistantEl.dataset.isStreaming = exchange.assistant.isStreaming ? 'true' : 'false';
 
         const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
@@ -2050,7 +2050,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const targetContainer = getOrCreateContainer(chatId);
     let assistantEl = targetContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
     if (!assistantEl) {
-        assistantEl = createAssistantElement(exchangeId);
+        assistantEl = createAssistantElement(exchangeId, '', streamModel);
         targetContainer?.appendChild(assistantEl);
     }
     // Store timestamp info for stripping during rendering (reset on regeneration)
@@ -2058,9 +2058,13 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     assistantEl.dataset.timestampLen = tsLen.toString();
     assistantEl.dataset.timestampStripped = 'true';
     assistantEl.dataset.isStreaming = 'true';
-    // Update header with new timestamp
+    // Update header with new timestamp and model name
     const headerEl = assistantEl.querySelector('.message-header');
     if (headerEl) {
+        // Update the model label (first span)
+        const labelSpan = headerEl.querySelector('span');
+        if (labelSpan) labelSpan.textContent = streamModel || 'Assistant';
+
         const tsEl = headerEl.querySelector('.message-timestamp');
         if (tsEl) {
             tsEl.textContent = assistantTimestamp.replace(/^\[|\]$/g, '').replace('@', ' @ ');
@@ -2068,9 +2072,8 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
             const newTsEl = document.createElement('span');
             newTsEl.className = 'message-timestamp';
             newTsEl.textContent = assistantTimestamp.replace(/^\[|\]$/g, '').replace('@', ' @ ');
-            const authorSpan = headerEl.querySelector('span'); // The 'Assistant' span
-            if (authorSpan) {
-                authorSpan.insertAdjacentElement('afterend', newTsEl);
+            if (labelSpan) {
+                labelSpan.insertAdjacentElement('afterend', newTsEl);
             }
         }
     }
@@ -2083,6 +2086,9 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         // This is essential for simultaneous chatting — a background tool continuation
         // must use its own chat's model, not whatever the foreground chat has selected.
         const streamModel = chatHistory.get(chatId)?.model || currentModel;
+
+        // Store model name on the exchange for header display
+        if (exchange) exchange.model = streamModel;
 
         const requestBody = {
             model: streamModel,
@@ -2462,7 +2468,7 @@ function renderExchange(exchange, targetContainer = null) {
             const vers = exchange.assistant?.versions || [];
             const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
             const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
-            const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+            const assistantEl = createAssistantElement(exchange.id, assistantTimestamp, exchange.model);
 
             const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
             if (tsLen > 0) {
@@ -2547,7 +2553,7 @@ function renderExchange(exchange, targetContainer = null) {
             const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
             const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
         
-        const assistantEl = createAssistantElement(exchange.id, assistantTimestamp);
+        const assistantEl = createAssistantElement(exchange.id, assistantTimestamp, exchange.model);
         // For historical messages, we already have the clean content
         // Store expected length to prevent re-parsing issues
         const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
@@ -2564,13 +2570,14 @@ function renderExchange(exchange, targetContainer = null) {
     }
 }
 
-function createAssistantElement(exchangeId, timestamp = '') {
+function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
     const el = document.createElement('div');
     el.className = 'chat-message assistant';
     el.dataset.exchangeId = exchangeId;
+    const label = modelName || 'Assistant';
     el.innerHTML = `
         <div class="message-header message-header-flex">
-            <span>Assistant</span>${timestamp ? ` <span class="message-timestamp">${timestamp}</span>` : ''}
+            <span>${label}</span>${timestamp ? ` <span class="message-timestamp">${timestamp}</span>` : ''}
             <span class="streaming-indicator visible">
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
