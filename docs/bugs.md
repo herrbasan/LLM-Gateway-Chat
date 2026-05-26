@@ -20,7 +20,7 @@ Status: Resolved — Works as side effect of the image attachment pipeline fix.
 
 The default sorting of chats are currently by "last updated", which is correct. But when I pick up an old chat, it should be sorted up in the UI immediately, once a message is added, making it the most recently updated chat. Currently, the chat session is only sorted when I reload the page.
 
-Status: Pending
+Status: Open — `updatedAt` is updated in backend and in `chatHistory.save()`, but `renderHistoryList()` is never called after a message is sent, so the sidebar doesn't re-sort until page reload.
 
 ## Operation mode setting doesn't save
 the "operation mode" select does not save the setting to the database. On reload it always defaults to "SSE Rest"
@@ -58,4 +58,10 @@ Status: Resolved —
 
 The "Copy JSON" button in the chat options dialog logs JSON to the console but doesn't copy to the system clipboard. The `nui-action` custom event dispatched by NUI preserves the user gesture (synchronous `dispatchEvent`), and `execCommand('copy')` on an `opacity:0` textarea returns `true` — but the clipboard remains empty. `navigator.clipboard.writeText()` is also unavailable (insecure context on non-localhost IP). The per-message "copy" button works fine using the same approach, so the difference is likely the dialog context or the data volume (~12KB JSON vs short text).
 
-Status: Open — Currently logging to console as workaround.
+Status: Resolved — Added clipboard fallback (textarea + execCommand) matching the per-message copy approach.
+
+## Model names not persisted across reload
+
+Model names are displayed in the conversation (e.g. "gemini-flash"), but they are not stored with the conversation data. On page reload, the sender label falls back to "Assistant". The model name should be saved alongside each exchange/message and restored on load.
+
+Status: Resolved — `streamResponse()` now sets `exchange.model = streamModel` on the exchange object, which gets persisted via `save()` and restored on reload via `renderConversation()`.

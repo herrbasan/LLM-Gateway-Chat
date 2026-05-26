@@ -270,6 +270,12 @@ export class ChatHistory {
                     const target = lastToolExchange || regularExchange;
                     if (target) {
                         target.assistant.content = target.assistant.content ? target.assistant.content + '\n' + content : content;
+                        if (msg.context) {
+                            target.assistant.context = msg.context;
+                        }
+                        if (msg.model) {
+                            target.model = msg.model;
+                        }
                         target.assistant.isComplete = true;
                         if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now() }];
                     }

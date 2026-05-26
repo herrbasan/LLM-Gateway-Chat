@@ -204,10 +204,10 @@ setInterval(async () => {
     if (!embedAvailable) {
         try {
             const reqBody = { input: ['health check'], dimensions: EMBEDDING_DIMS };
-            if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
             const res = await fetch(EMBED_URL, {
                 method: 'POST', headers: EMBED_HEADERS,
-                body: JSON.stringify(reqBody)
+                body: JSON.stringify(reqBody),
+                signal: AbortSignal.timeout(10000)
             });
             if (res.ok) {
                 embedAvailable = true;
@@ -222,9 +222,20 @@ setInterval(async () => {
         if (!instance.embeddingsCol) continue;
 
         if (instance.pendingQueue.length > 0 && embedAvailable) {
-            const item = instance.pendingQueue.shift();
-            // Process queue asynchronously (fire & forget)
-            embedMessageAsync(instance, item.msg, item.session, item.convNdbId, item.msgIdx).catch(() => {});
+            // Find the first item ready for retry (skip items in backoff)
+            let item = null;
+            let itemIdx = -1;
+            for (let i = 0; i < instance.pendingQueue.length; i++) {
+                if (Date.now() >= (instance.pendingQueue[i].nextRetryAt || 0)) {
+                    item = instance.pendingQueue[i];
+                    itemIdx = i;
+                    break;
+                }
+            }
+            if (item) {
+                instance.pendingQueue.splice(itemIdx, 1);
+                embedMessageAsync(instance, item.msg, item.session, item.convNdbId, item.msgIdx, item.failCount || 0).catch(() => {});
+            }
         }
 
         if (instance.needsFlush > 0) {
@@ -435,11 +446,10 @@ async function embedQuery(text) {
         const res = await fetch(EMBED_URL, {
             method: 'POST',
             headers: EMBED_HEADERS,
-            body: JSON.stringify(reqBody)
+            body: JSON.stringify(reqBody),
+            signal: AbortSignal.timeout(60000)
         });
         if (!res.ok) {
-            embedFailCount++;
-            if (embedFailCount >= 3) embedAvailable = false;
             throw new Error(`Embed ${res.status}`);
         }
         embedFailCount = 0;
@@ -479,16 +489,27 @@ function middleTruncateEmbedText(text) {
     };
 }
 
-async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx) {
+async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _prevFails = 0) {
     // Skip embedding for tool responses (prevents indexing massive JSON loads or duplicated session exports)
     if (msg.role === 'tool') {
         return;
     }
 
-    if (!instance.embeddingsCol || !embedAvailable) {
+    if (!instance.embeddingsCol) {
         if (msg.embedStatus === 'pending') {
             L().info('Embed skipped (nVDB unavailable)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
         }
+        return;
+    }
+
+    if (!embedAvailable) {
+        // Queue for later — the periodic health check loop will retry when endpoint recovers
+        if (instance.pendingQueue.length < 500) {
+            instance.pendingQueue.push({ msg, session, convNdbId, msgIdx, failCount: _prevFails, nextRetryAt: 0 });
+        } else {
+            L().warn('Embed queue full — message dropped', { msgId: msg.id, role: msg.role, queueLen: instance.pendingQueue.length, dbPath: instance.dbPath }, 'Embed');
+        }
+        L().info('Embed queued (endpoint down)', { msgId: msg.id, role: msg.role, queueLen: instance.pendingQueue.length, dbPath: instance.dbPath }, 'Embed');
         return;
     }
 
@@ -532,8 +553,17 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx) {
         }
     }
 
-    L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3 }, 'Embed');
-    instance.pendingQueue.push({ msg, session, convNdbId, msgIdx });
+    L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3, prevFails: _prevFails }, 'Embed');
+    // Exponential backoff: 5s → 30s → 2m → 10m → 30m (cap)
+    const delays = [5000, 30000, 120000, 600000, 1800000];
+    const newFailCount = _prevFails + 1;
+    const delay = delays[Math.min(newFailCount - 1, delays.length - 1)];
+    instance.pendingQueue.push({
+        msg, session, convNdbId, msgIdx,
+        failCount: newFailCount,
+        nextRetryAt: Date.now() + delay
+    });
+    L().info('Embed re-queued with backoff', { msgId: msg.id, failCount: newFailCount, delayMs: delay, nextRetry: new Date(Date.now() + delay).toISOString() }, 'Embed');
 }
 
 // ============================================

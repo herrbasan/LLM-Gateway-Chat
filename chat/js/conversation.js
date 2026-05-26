@@ -257,7 +257,7 @@ export class Conversation {
         if (exchange.assistant.usage) metadata.usage = exchange.assistant.usage;
         if (exchange.assistant.context) metadata.context = exchange.assistant.context;
 
-        this._syncMessage('assistant', cleanedContent, null, exchangeId, metadata);
+        this._syncMessage('assistant', cleanedContent, exchange.model || null, exchangeId, metadata);
 
         return this.save();
     }
@@ -784,6 +784,9 @@ export class Conversation {
                         }
                         if (msg.context) {
                             target.assistant.context = msg.context;
+                        }
+                        if (msg.model) {
+                            target.model = msg.model;
                         }
                         target.assistant.isComplete = true;
                         if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now(), streamStats: msg.streamStats || null, usage: msg.usage || null, context: msg.context || null }];

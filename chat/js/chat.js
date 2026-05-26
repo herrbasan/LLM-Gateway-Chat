@@ -864,6 +864,9 @@ async function init() {
         }
     });
 
+    // Non-critical: load TTS voices in background after main init
+    loadTtsVoices();
+
 }
 
 async function applyDefaultConfig() {
@@ -957,8 +960,7 @@ async function applyDefaultConfig() {
         if (input) input.value = ttsSpeed;
     }
 
-    // Load voices from TTS endpoint
-    await loadTtsVoices();
+    // TTS voices loaded asynchronously after init — see end of init()
 }
 
 // ============================================
@@ -1295,7 +1297,9 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
 async function loadTtsVoices() {
     if (!ttsEndpoint) return;
     try {
-        const resp = await fetch(`${ttsEndpoint}/voices`);
+        const resp = await fetch(`${ttsEndpoint}/voices`, {
+            signal: AbortSignal.timeout(5000)
+        });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         ttsVoices = data.voices || [];
@@ -1303,7 +1307,6 @@ async function loadTtsVoices() {
         showTtsStatus(null);
     } catch (error) {
         console.warn('[TTS] Failed to load voices:', error.message);
-        showTtsStatus('Failed to load voices. Check endpoint.');
     }
 }
 
@@ -3858,7 +3861,7 @@ async function deleteChat(chatId, e) {
     }
 }
 
-function exportChatAsJson(chatId, btn) {
+async function exportChatAsJson(chatId, btn) {
     // Export from in-memory conversation object (source of truth for current session state)
     const conv = activeConversations.get(chatId);
     const exchanges = conv ? conv.getAll() : [];
@@ -3923,8 +3926,26 @@ function exportChatAsJson(chatId, btn) {
         };
 
         const formattedJson = JSON.stringify(exportData, null, 2);
-        console.log(formattedJson);
-        nui.components.toast?.success?.('JSON logged to console');
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(formattedJson);
+            } else {
+                const textArea = document.createElement('textarea');
+                textArea.value = formattedJson;
+                textArea.style.position = 'fixed';
+                textArea.style.opacity = '0';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+            }
+            nui.components.toast?.success?.('JSON copied to clipboard');
+        } catch (clipErr) {
+            console.error('Failed to copy JSON to clipboard', clipErr);
+            console.log(formattedJson);
+            nui.components.toast?.success?.('JSON logged to console');
+        }
     } catch (e) {
         console.error('Failed to parse chat data', e);
     }
