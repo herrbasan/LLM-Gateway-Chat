@@ -2029,7 +2029,9 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const timestampWithSpace = assistantTimestamp + ' ';
     
     // Determine if we should exclude vision tools from system prompt
-    const modelSupportsVision = currentModelSupportsVision();
+    // Use the per-chat streamModel, not the global currentModel
+    const streamModelConfig = models.find(m => m.id === streamModel);
+    const modelSupportsVision = streamModelConfig?.capabilities?.vision === true;
     const shouldExcludeVisionTools = modelSupportsVision && !useVisionAnalysis;
     const excludedToolPrefixes = shouldExcludeVisionTools ? ['vision_'] : [];
     
@@ -2118,7 +2120,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         //   B) Auto-vision already analyzed images (analysis appended to user message)
         const allMcpTools = mcpClient.getFormattedToolsForLLM();
         if (allMcpTools.length > 0) {
-            const modelSupportsVision = currentModelSupportsVision();
             const shouldFilterVisionTools = (modelSupportsVision && !useVisionAnalysis) || hasAutoVisionAnalysis;
 
             if (shouldFilterVisionTools) {
@@ -3920,7 +3921,19 @@ async function exportChatAsJson(chatId, btn) {
 
         const formattedJson = JSON.stringify(exportData, null, 2);
         try {
-            await navigator.clipboard.writeText(formattedJson);
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(formattedJson);
+            } else {
+                // Fallback for non-secure contexts (e.g. non-localhost IPs)
+                const ta = document.createElement('textarea');
+                ta.value = formattedJson;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+            }
             nui.components.toast?.success?.('JSON copied to clipboard');
         } catch (err) {
             console.error('Failed to copy JSON to clipboard', err);
