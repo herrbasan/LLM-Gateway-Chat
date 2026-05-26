@@ -3858,7 +3858,7 @@ async function deleteChat(chatId, e) {
     }
 }
 
-async function exportChatAsJson(chatId, btn) {
+function exportChatAsJson(chatId, btn) {
     // Export from in-memory conversation object (source of truth for current session state)
     const conv = activeConversations.get(chatId);
     const exchanges = conv ? conv.getAll() : [];
