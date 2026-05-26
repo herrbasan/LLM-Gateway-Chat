@@ -3862,7 +3862,11 @@ async function exportChatAsJson(chatId, btn) {
     // Export from in-memory conversation object (source of truth for current session state)
     const conv = activeConversations.get(chatId);
     const exchanges = conv ? conv.getAll() : [];
-    if (!exchanges || exchanges.length === 0) return;
+    console.log('[exportChatAsJson] chatId:', chatId, 'conv found:', !!conv, 'exchanges:', exchanges.length);
+    if (!exchanges || exchanges.length === 0) {
+        nui.components.toast?.error?.('No messages to export');
+        return;
+    }
 
     try {
         const chatInfo = chatHistory.get(chatId);
