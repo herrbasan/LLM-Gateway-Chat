@@ -2046,6 +2046,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
 
+    // Resolve model early — needed for both the header label and the API request
+    const streamModel = chatHistory.get(chatId)?.model || currentModel;
+    if (exchange) exchange.model = streamModel;
+
     // Get or create assistant message element in the correct chat's container
     const targetContainer = getOrCreateContainer(chatId);
     let assistantEl = targetContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
@@ -2078,11 +2082,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         }
     }
     scrollToBottom();
-
-    // Resolve model early — needed for both the header label and the API request
-    const streamModel = chatHistory.get(chatId)?.model || currentModel;
-    if (exchange) exchange.model = streamModel;
-
+    
     try {
         const messages = await streamConv.getMessagesForApi(systemPrompt);
 
