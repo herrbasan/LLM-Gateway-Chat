@@ -53,3 +53,9 @@ Automatic embedding does not seem to trigger when having a conversation in the c
 Status: Resolved — 
 1. Server failed to create the `embeddings` collection inside nVDB internally during mount because the native binding threw a "collection not found" error when attempting to fetch it. Wrapped `getCollection` in a check against `listCollections()` to conditionally invoke `createCollection('embeddings', 2560)`.
 2. The `embedUrl` setting inside `server/config.json` was pointing to `http://localhost:3400/v1/embeddings` instead of the required `http://192.168.0.100:3400/v1/embeddings`. After 3 automated retries on `localhost`, the endpoint threw `ECONNREFUSED` internally and permanently disabled the global `embedAvailable` flag for the active backend session, meaning background jobs were silently dropped. Updated the configuration to point to the correct IP.
+
+## "Copy JSON" doesn't copy to clipboard
+
+The "Copy JSON" button in the chat options dialog logs JSON to the console but doesn't copy to the system clipboard. The `nui-action` custom event dispatched by NUI preserves the user gesture (synchronous `dispatchEvent`), and `execCommand('copy')` on an `opacity:0` textarea returns `true` — but the clipboard remains empty. `navigator.clipboard.writeText()` is also unavailable (insecure context on non-localhost IP). The per-message "copy" button works fine using the same approach, so the difference is likely the dialog context or the data volume (~12KB JSON vs short text).
+
+Status: Open — Currently logging to console as workaround.
