@@ -2078,17 +2078,13 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         }
     }
     scrollToBottom();
-    
+
+    // Resolve model early — needed for both the header label and the API request
+    const streamModel = chatHistory.get(chatId)?.model || currentModel;
+    if (exchange) exchange.model = streamModel;
+
     try {
         const messages = await streamConv.getMessagesForApi(systemPrompt);
-
-        // Use the per-chat model from chatHistory, falling back to the global currentModel.
-        // This is essential for simultaneous chatting — a background tool continuation
-        // must use its own chat's model, not whatever the foreground chat has selected.
-        const streamModel = chatHistory.get(chatId)?.model || currentModel;
-
-        // Store model name on the exchange for header display
-        if (exchange) exchange.model = streamModel;
 
         const requestBody = {
             model: streamModel,
