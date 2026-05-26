@@ -2028,6 +2028,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const assistantTimestamp = streamConv._formatTimestamp();
     const timestampWithSpace = assistantTimestamp + ' ';
     
+    // Resolve model early — needed for vision check, header label, and API request
+    const streamModel = chatHistory.get(chatId)?.model || currentModel;
+    if (exchange) exchange.model = streamModel;
+
     // Determine if we should exclude vision tools from system prompt
     // Use the per-chat streamModel, not the global currentModel
     const streamModelConfig = models.find(m => m.id === streamModel);
@@ -2047,10 +2051,6 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const reasoningEffort = elements.thinkingCheckbox?.checked ? 'medium' : null;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
-
-    // Resolve model early — needed for both the header label and the API request
-    const streamModel = chatHistory.get(chatId)?.model || currentModel;
-    if (exchange) exchange.model = streamModel;
 
     // Get or create assistant message element in the correct chat's container
     const targetContainer = getOrCreateContainer(chatId);
@@ -3923,18 +3923,8 @@ function exportChatAsJson(chatId, btn) {
         };
 
         const formattedJson = JSON.stringify(exportData, null, 2);
-        console.log('[copy-json] data length:', formattedJson.length, 'bytes');
         console.log(formattedJson);
-        const ta = document.createElement('textarea');
-        ta.value = formattedJson;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        const copied = document.execCommand('copy');
-        console.log('[copy-json] execCommand result:', copied);
-        document.body.removeChild(ta);
-        nui.components.toast?.success?.('JSON copied to clipboard');
+        nui.components.toast?.success?.('JSON logged to console');
     } catch (e) {
         console.error('Failed to parse chat data', e);
     }
