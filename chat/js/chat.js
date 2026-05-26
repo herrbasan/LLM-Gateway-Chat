@@ -3862,7 +3862,6 @@ async function exportChatAsJson(chatId, btn) {
     // Export from in-memory conversation object (source of truth for current session state)
     const conv = activeConversations.get(chatId);
     const exchanges = conv ? conv.getAll() : [];
-    console.log('[exportChatAsJson] chatId:', chatId, 'conv found:', !!conv, 'exchanges:', exchanges.length);
     if (!exchanges || exchanges.length === 0) {
         nui.components.toast?.error?.('No messages to export');
         return;
@@ -3924,25 +3923,17 @@ async function exportChatAsJson(chatId, btn) {
         };
 
         const formattedJson = JSON.stringify(exportData, null, 2);
-        try {
-            if (navigator.clipboard?.writeText) {
-                await navigator.clipboard.writeText(formattedJson);
-            } else {
-                // Fallback for non-secure contexts (e.g. non-localhost IPs)
-                const ta = document.createElement('textarea');
-                ta.value = formattedJson;
-                ta.style.position = 'fixed';
-                ta.style.left = '-9999px';
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand('copy');
-                document.body.removeChild(ta);
-            }
-            nui.components.toast?.success?.('JSON copied to clipboard');
-        } catch (err) {
-            console.error('Failed to copy JSON to clipboard', err);
-            nui.components.toast?.error?.('Failed to copy JSON to clipboard');
-        }
+        // Use textarea fallback — navigator.clipboard requires a user gesture
+        // which is lost in async context
+        const ta = document.createElement('textarea');
+        ta.value = formattedJson;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        nui.components.toast?.success?.('JSON copied to clipboard');
     } catch (e) {
         console.error('Failed to parse chat data', e);
     }
