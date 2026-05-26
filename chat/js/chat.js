@@ -3923,15 +3923,16 @@ function exportChatAsJson(chatId, btn) {
         };
 
         const formattedJson = JSON.stringify(exportData, null, 2);
-        // Use textarea fallback — navigator.clipboard requires a user gesture
-        // which is lost in async context
+        console.log('[copy-json] data length:', formattedJson.length, 'bytes');
+        console.log(formattedJson);
         const ta = document.createElement('textarea');
         ta.value = formattedJson;
         ta.style.position = 'fixed';
         ta.style.left = '-9999px';
         document.body.appendChild(ta);
         ta.select();
-        document.execCommand('copy');
+        const copied = document.execCommand('copy');
+        console.log('[copy-json] execCommand result:', copied);
         document.body.removeChild(ta);
         nui.components.toast?.success?.('JSON copied to clipboard');
     } catch (e) {
