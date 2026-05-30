@@ -723,6 +723,10 @@ class Arena {
 
         arena.importJSON(data);
 
+        // Restore backend chat ID — the loaded session's ID IS the backend ID.
+        // Without this, _saveToStorage() thinks it's a new session and creates duplicates.
+        arena._backendChatId = data.id;
+
         // Restore participants if model names are available
         const hasParticipants = data.participants && data.participants.length >= 2 && (data.participants[0] || data.participants[1]);
         let participantA = data.participants?.[0] || '';
@@ -771,6 +775,9 @@ class Arena {
         }
         if (data.sessionId) {
             this.sessionId = data.sessionId;
+        }
+        if (data.backendChatId) {
+            this._backendChatId = data.backendChatId;
         }
 
         this.messages = data.messages.map(m => ({
