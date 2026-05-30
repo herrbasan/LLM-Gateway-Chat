@@ -12,6 +12,15 @@
 
 LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend** (default port 8080, configurable in `server/config.json`). It connects to an LLM Gateway for chat streaming and embedding, and stores all data in Rust-based embedded databases.
 
+### Development vs. Production
+
+| Machine | Role | Database |
+|---------|------|----------|
+| **Coolkid** (this repo) | Development & testing | Stale copy of production data — safe to break |
+| **BADKID** (`\\BADKID\Stuff\SRV\LLM-Gateway-Chat`) | Production deployment | Live database — do NOT touch directly |
+
+**Rule:** Test all storage/save-path changes locally on Coolkid before pushing. The test DB here is disposable. BADKID's live data is not.
+
 ### Key Characteristics
 
 - **No Build Process**: Directly serve static HTML/JS/CSS files via the backend
