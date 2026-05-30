@@ -332,6 +332,15 @@ class Arena {
                     }).catch(() => {});
                 }
                 this._lastSyncedCount = sessionData.messages.length;
+
+                // Persist summary and title to backend session metadata
+                if (this.summary && this._backendChatId) {
+                    const title = this.summary.title || sessionData.topic?.substring(0, 80) || 'Arena Session';
+                    backend.updateSession(effectiveId, {
+                        summary: this.summary,
+                        title: title
+                    }).catch(err => console.error('Failed to persist arena summary:', err));
+                }
             }
 
             await this._updateHistory(sessionData, effectiveId);
