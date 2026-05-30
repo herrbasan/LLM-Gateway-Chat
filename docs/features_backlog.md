@@ -56,5 +56,8 @@
 - [ ] **Rights Enforcement in Backend**: All new rights flags must be enforced server-side (not just UI-hidden). The `requireAuth()` middleware should accept an optional rights mask. Admin UI should expose these toggles alongside existing `login/read/write/admin` checkboxes.
 - [ ] **Rights Enforcement in Frontend**: UI should hide/disable features based on the user's rights object returned by `GET /api/auth/session`. Arena button, MCP config panel, export buttons, and vision toggle should all respect the flags.
 
+## Navigation & Mode Switching
+- [ ] **Open Arena in New Tab**: Add a "Chat Arena" button to Chat's header that opens `/chat-arena/` in a new browser tab (`target="_blank"`). Arena already has a "Back to Chat" link. Both modes remain fully independent — each runs in its own window, sharing the same backend/auth via cookies but with no cross-window coupling. This is intentional: Chat and Arena are different kinds of experience and should not share a tab.
+
 ## Technical Debt / Code Cleanup
 - [ ] **User Management Refactor**: Current cookie-based auth with nDB user isolation works but is rigid. The `config.json` users array + env var SUPERADMIN bootstrap pattern functions correctly for Phase 2 signoff, but deserves a more elegant design in future iterations.
