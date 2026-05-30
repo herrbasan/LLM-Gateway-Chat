@@ -10,6 +10,21 @@ The May 23 handover reported that thinking blocks don't render during active str
 
 Status: Verify at runtime. The implementation is in place — if it doesn't work, the issue may be in the Gateway not sending `reasoning_content` events, or the CSS hiding the thinking blocks.
 
+## [2026-05-30] Arena summaries are not persisted to the backend
+
+When a user generates a conversation summary in the Arena (summarize dialog → Save), the summary (title, condensedVersion, longSummary, shortSummary) is set on `this.arena.summary` and `_saveToStorage()` is called — but `_saveToStorage()` routes through `arenaStorage.saveSession()` which always calls `POST /api/chats` (`bc.createSession()`). On subsequent saves (when `_backendChatId` already exists), it only syncs new messages via `bc.sendMessage()`. The summary is **never PATCHed to the backend** via `bc.updateSession()`.
+
+**Root cause:** `_saveToStorage()` has no path to call `PATCH /api/chats/:id` with `{ summary: {...} }`. The backend endpoint supports `body.summary` on `PATCH /api/chats/:id` (L1207), but the frontend never sends it.
+
+**Consequences:**
+1. Summary is lost on page reload (only lives in memory)
+2. The generated title is not used for the session's display name in the arena history list
+3. `_updateHistory()` reads `sessionData.summary?.title` for the history entry's `title` field, but since summary is never persisted, reload displays "Arena Session" as the title
+
+**Fix needed (in `_saveToStorage()`):** After the summary is updated in the dialog, call `backend.updateSession(effectiveId, { summary: this.summary, title: this.summary.title })` to persist it. The `arenaStorage.saveSession()` path should also check if a session already exists and PATCH rather than re-POST.
+
+Status: Open
+
 ---
 
 ## System Prompts are not saved with the chat session.
