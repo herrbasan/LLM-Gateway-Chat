@@ -301,6 +301,9 @@ class Arena {
     }
 
     async _saveToStorage() {
+        if (this._saving) return;
+        this._saving = true;
+
         try {
             const sessionData = this.exportJSON();
             const backend = this._getBackendClient();
@@ -347,6 +350,8 @@ class Arena {
             this.onSave();
         } catch (err) {
             console.error('Failed to save arena session:', err);
+        } finally {
+            this._saving = false;
         }
     }
 
