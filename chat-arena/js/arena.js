@@ -727,6 +727,10 @@ class Arena {
         // Without this, _saveToStorage() thinks it's a new session and creates duplicates.
         arena._backendChatId = data.id;
 
+        // Restore sync counter so only new messages are sent to backend.
+        // Without this, the first save after loading re-sends ALL messages via sendMessage().
+        arena._lastSyncedCount = data.messages?.length || 0;
+
         // Restore participants if model names are available
         const hasParticipants = data.participants && data.participants.length >= 2 && (data.participants[0] || data.participants[1]);
         let participantA = data.participants?.[0] || '';
