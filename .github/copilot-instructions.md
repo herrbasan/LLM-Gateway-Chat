@@ -10,7 +10,7 @@
 
 ## Project Overview
 
-LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend** (port 3500). It connects to an LLM Gateway for chat streaming and embedding, and stores all data in Rust-based embedded databases.
+LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend** (default port 8080, configurable in `server/config.json`). It connects to an LLM Gateway for chat streaming and embedding, and stores all data in Rust-based embedded databases.
 
 ### Key Characteristics
 
@@ -19,7 +19,7 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 - **Dual-Mode Transport**: SSE (default) or WebSocket via JSON-RPC 2.0 to gateway
 - **Frontend-Driven Architecture**: MCP tool execution happens entirely in the browser
 - **AI-First Maintainability**: Code is optimized for LLM parsing, not human readability dogmas
-- **Own Backend**: Node.js server on port 3500 serves static files + REST API + search
+- **Own Backend**: Node.js server (port from `server/config.json`, default 8080) serves static files + REST API + search
 
 ---
 
@@ -29,7 +29,7 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 |-------|------------|
 | **Language** | Vanilla JavaScript (ES2022+), HTML5, CSS3 |
 | **UI Library** | NUI Web Components (proprietary, via Git submodule) |
-| **Backend** | Node.js native HTTP (no framework), port 3500 |
+| **Backend** | Node.js native HTTP (no framework), port from `server/config.json` (default 8080) |
 | **Structured DB** | nDB (Rust-based JSON Lines document store) |
 | **Vector DB** | nVDB (Rust-based vector DB, exact search) |
 | **Embedding** | Gateway `/v1/embeddings` (Qwen3-Embedding-4B via OpenRouter, 2560d) |
@@ -65,29 +65,30 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 │       ├── arena.js           # Arena orchestrator + UI
 │       ├── config.js          # Arena defaults
 │       └── storage.js         # Arena backend-only storage
-├── chat/vendor/               # Vendored dependencies + update scripts
-├── nui_wc2/                   # NUI Web Components (Git submodule)
 ├── lib/                       # Shared libraries
+│   ├── nui_wc2/               # NUI Web Components (Git submodule)
 │   ├── ndb/napi/              # nDB Node bindings
 │   ├── nvdb/napi/             # nVDB Node bindings
+│   ├── nlogger/               # nLogger (ESM)
 │   └── nlogger-cjs.js         # nLogger CJS bridge
 ├── server/                    # Node.js backend
-│   ├── server.js              # HTTP server (port 3500), REST API, search, embeddings
-│   ├── embed.js               # Bulk embedding pipeline
-│   ├── migrate-import-nedb.js       # Import legacy NeDB backups → nDB (step 1 of 2)
-│   ├── migrate-pack-conversations.js # Repack per-message docs → conversation docs (step 2 of 2)
-│   ├── migrate-ndb-to-folder.js     # Flat .jsonl → folder-as-database (future, not yet needed)
-│   ├── config.json            # Server configuration
+│   ├── server.js              # HTTP server (REST API, static files, search, embeddings, auth)
+│   ├── embed.js               # Shared embedding utilities (chunking, fetch, vector ops)
+│   ├── backfill-embed.js      # Offline bulk embedding backfill
+│   ├── migrate-import-nedb.js       # Import legacy NeDB backups → nDB (step 1 of 2, historical)
+│   ├── migrate-pack-conversations.js # Per-message docs → conversation docs (step 2 of 2, historical)
+│   ├── migrate-ndb-to-folder.js     # Flat .jsonl → folder-as-database (future)
+│   ├── migrate-ndb-buckets.js       # File migration utilities
+│   ├── config.json            # Server configuration (port, users, embedding, paths)
 │   ├── server.bat             # Windows convenience launcher
 │   ├── logs/                  # JSON Lines log files (gitignored)
 │   └── data/                  # nDB + nVDB database files (gitignored)
 ├── docs/                      # Documentation
-│   ├── api_rest.md
-│   ├── api_websocket.md
-│   ├── bugs.md
-│   ├── dev_plan_refactor.md
-│   ├── dev_plan_user_settings.md
-│   └── features_backlog.md
+│   ├── api_rest.md            # Gateway REST API reference
+│   ├── api_websocket.md       # Gateway WebSocket/JSON-RPC protocol
+│   ├── bugs.md                # Known bugs and their status
+│   ├── features_backlog.md    # Feature backlog (completed + pending)
+│   └── dev_plan_user_settings.md  # Multi-user auth architecture plan
 └── package.json               # Minimal metadata
 ```
 
@@ -99,32 +100,42 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 
 1. A running **LLM Gateway backend** instance (default: `http://192.168.0.100:3400`)
 2. Node.js v24+
+3. At least one user configured (via `server/config.json` `users[]` or `SUPERADMIN_USERNAME`/`SUPERADMIN_PASSWORD` env vars)
 
 ### Configuration
 
-Edit `server/config.json` for backend settings and `chat/js/config.js` for frontend:
-
-```javascript
-// chat/js/config.js
-window.CHAT_CONFIG = {
-    gatewayUrl: 'http://192.168.0.100:3400',
-    enableBackend: true,
-    backendUrl: 'http://localhost:3500',
-    defaultModel: '',
-    defaultTemperature: 0.7,
-    defaultMaxTokens: null,
-};
-```
-
+**Server config** (`server/config.json`) — controls the backend, users, embedding, and data paths:
 ```json
-// server/config.json
 {
-    "port": 3500,
+    "port": 8080,
     "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
     "embedDims": 2560,
-    "embedMaxTokens": 30000,
-    "embedBatchTokenLimit": 29000
+    "embedMaxTokens": 25000,
+    "embedBatchTokenLimit": 29000,
+    "sessionTtlMinutes": 1440,
+    "users": [
+        {
+            "id": "admin-seed-user",
+            "username": "chat_user",
+            "password": "chat2026",
+            "displayName": "Chat User",
+            "dbPath": "server/data/chat_user",
+            "rights": { "login": true, "read": true, "write": true, "admin": true }
+        }
+    ]
 }
+```
+
+**Frontend config** — `chat/js/config.js` is **dynamically generated by the server** from environment variables (`.env` file). Available env vars:
+```bash
+LLM_GATEWAY_URL=http://192.168.0.100:3400
+UI_DEFAULT_MODEL=
+UI_DEFAULT_TEMP=0.7
+UI_DEFAULT_TOKENS=
+UI_OPERATION_MODE=sse
+TTS_ENDPOINT=http://localhost:2244
+TTS_VOICE=
+TTS_SPEED=1.0
 ```
 
 ### Start Commands
@@ -135,7 +146,7 @@ node server/server.js
 # or
 npm start
 
-# Navigate to http://localhost:3500/chat/
+# Navigate to http://localhost:8080/chat/
 ```
 
 ### Deployment (Production Server)
@@ -166,7 +177,7 @@ The server auto-restarts when files change (nodemon or similar). The share is at
 │  (Browser)  │  (JSON-RPC 2.0 WS)  │  (Backend)   │               │  (Provider) │
 └──────┬──────┘                      └──────┬──────┘               └─────────────┘
        │                                    │
-       │ REST (port 3500)                   │ /v1/embeddings
+       │ REST (configurable port)           │ /v1/embeddings
        ▼                                    ▼
 ┌─────────────┐                    ┌─────────────┐
 │ Chat Backend│◄──── nDB/nVDB ───►│ Rust DBs    │
@@ -184,14 +195,17 @@ The server auto-restarts when files change (nodemon or similar). The share is at
 
 | Module | Purpose |
 |--------|---------|
-| `chat.js` | UI controller, event handlers, message rendering, streaming logic, archive tools |
-| `client-sdk.js` | `GatewayClient` class - WebSocket connection, JSON-RPC protocol, auto-reconnect |
-| `api-client.js` | `BackendClient` class - REST calls to Node backend (/api/chats, /api/search) |
-| `conversation.js` | `Conversation` class - message history, versioning, API message formatting, backend sync |
+| `chat.js` | UI controller, event handlers, message rendering, streaming logic, archive tools, login, presets, admin UI |
+| `client-sdk.js` | `GatewayClient` class - dual-mode (SSE + WebSocket) transport, JSON-RPC 2.0, auto-reconnect, stream registry |
+| `api-client.js` | `BackendClient` class - REST calls to Node backend (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`, `/api/user/settings`) |
+| `conversation.js` | `Conversation` class - message history, versioning, API message formatting, backend sync, `thinking_signature` propagation |
 | `chat-history.js` | `ChatHistory` class - multi-conversation management, backend CRUD, localStorage fallback |
 | `mcp-client.js` | `MCPClient` class - SSE connections to MCP servers, tool registry, execution |
-| `image-store.js` | `ImageStore` class - re-exports fileStore for backward compatibility |
+| `file-store.js` | File storage — sends base64 to server `/api/buckets/images/`, returns lightweight URLs |
+| `image-store.js` | Re-exports `fileStore` as `imageStore` for backward compatibility |
 | `markdown.js` | `renderMarkdown()` - markdown-it with Prism highlighting, DOMPurify sanitization |
+| `tts-utils.js` | Text-to-speech utilities (endpoint management, voice list, playback) |
+| `storage.js` | localStorage/IndexedDB fallback for preferences (MCP config, presets) |
 
 ---
 
@@ -246,11 +260,13 @@ Key variables:
 | Sessions | nDB | `_type: 'session'`, `id: chat_xxx` |
 | Conversation messages | nDB | `_type: 'conversation'`, `id: chat_xxx`, inline `messages` array |
 | Embedding vectors | nVDB | `chatId` + `msgIdx` payload, keyed by message ID |
+| User settings | nDB | `_type: 'user_settings'`, `id: {userId}` — operationMode, temperature, language, presets, etc. |
+| User auth | nDB (`users_db`) | `_type: 'user'` — username, passwordHash, dbPath, rights, userToken |
 | Conversation history (fallback) | localStorage | `chat-conversation-${chatId}` |
 | Chat list metadata (fallback) | localStorage | `chat-history-index` |
-| User preferences | localStorage | `chat-user-*` |
+| System prompt presets | localStorage | `chat-system-presets` (via `storage.getPref`) |
 | MCP server config | localStorage | `mcp-servers`, `mcp-enabledTools` |
-| Image files | nDB Buckets | `_files/images/{hash}.{ext}`, linked via `images:hash.ext` strings in DB |
+| Image files | nDB Buckets | `/api/buckets/images/{sessionId}/{filename}`, garbage-collected on chat delete |
 
 **Data model**: One conversation document per session. Messages are an inline array indexed by `idx`. nVDB stores vectors keyed by message ID with `{ chatId, msgIdx }` payload for back-reference.
 
@@ -346,7 +362,7 @@ export const singleton = new MyClass();
 ```javascript
 const client = new GatewayClient({
     baseUrl: 'http://localhost:3400',
-    accessKey: 'optional-key'
+    operationMode: 'sse'  // 'sse' (default) or 'websocket'
 });
 
 // REST methods
@@ -423,9 +439,10 @@ const result = await mcpClient.executeTool(toolName, parameters, onProgress);
 
 ### Adding a New Configuration Option
 
-1. Add default to `chat/js/config.js` `window.CHAT_CONFIG`
-2. Read value in `chat/js/chat.js` from `CONFIG` object
-3. Apply in `applyDefaultConfig()` or directly where used
+1. Add default to the server's dynamic config generation (`server/server.js` L1738-1753)
+2. Optionally add an env var override (`.env` file)
+3. Read value in `chat/js/chat.js` from `CONFIG` object
+4. Apply in `applyDefaultConfig()` or directly where used
 
 ### Modifying MCP Tool Behavior
 
@@ -435,15 +452,13 @@ const result = await mcpClient.executeTool(toolName, parameters, onProgress);
 
 ### Updating Vendor Libraries
 
-Run the update script from `chat/vendor/` when WebAdmin vendor files change:
+Vendored dependencies (markdown-it, Prism.js, DOMPurify) are served from `nui_wc2` (the NUI submodule). When WebAdmin vendor files change, update the submodule:
 
 ```bash
-cd chat/vendor
-node update-vendor.js       # Cross-platform Node
-.\update-vendor.ps1         # Windows PowerShell
-update-vendor.bat           # Windows CMD
-./update-vendor.sh          # Linux/macOS
+git submodule update --remote lib/nui_wc2
 ```
+
+No separate vendor directory or update scripts are needed.
 
 ---
 
@@ -464,11 +479,12 @@ The LLM Gateway is our proprietary project - we can and should modify it when ne
 
 ## Security Considerations
 
-1. **No secrets in frontend**: API keys are stored in Gateway config, not here
-2. **XSS Protection**: DOMPurify sanitizes all rendered markdown
-3. **CORS**: Backend must allow origin from this client
-4. **Image validation**: Only image/* MIME types accepted
-5. **Local-only by default**: WebSocket access restricted to local IPs
+1. **Cookie-only auth**: No API keys or secrets in frontend code. HttpOnly cookies prevent XSS token theft.
+2. **Password hashing**: `crypto.scryptSync` with random salt per user, stored in isolated `users_db`.
+3. **XSS Protection**: DOMPurify sanitizes all rendered markdown.
+4. **Same-origin by default**: Server serves both frontend and API — no CORS needed in production.
+5. **Image validation**: Only `image/*` MIME types accepted.
+6. **Database isolation**: Each user gets a physically separate nDB + nVDB at their `dbPath`.
 
 ---
 

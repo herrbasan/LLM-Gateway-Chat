@@ -1,41 +1,42 @@
 # Features Backlog
 
+> Last updated: 2026-05-30 — post-refactor audit
+> 
+> **Legend:** [x] = Done, [ ] = Not started, [~] = Partially done
+
 ## Message Management
 - [x] **Delete Messages**: Add UI to trigger the existing deleteExchange function to remove individual user or assistant messages from the active conversation context.
 - [x] **Edit Messages**: Allow editing of past user messages (destructive edit where downstream messages are dropped). [See Dev Plan: Edit](dev_plan_edit.md)
 - [x] **Rich-Text Editor for Edit Dialog**: Replace the standard textarea in the message edit dialog with the `nui-rich-text` element (without toolbar) for better markdown parsing and editing experience.
 
 ## Performance & Telemetry
-- [ ] **Tokens Per Second (TPS)**: Display real-time and final generation speeds (Tokens/sec).
-- [ ] **Time to First Token (TTFT)**: Track and display the delay before the first chunk is received.
-- [ ] **Total Generation Time**: Show the overall time taken for the API to complete the response.
+- [x] **Tokens Per Second (TPS) + Time to First Token (TTFT)**: Displayed in context bar after stream completes (`chat.js` L2651-2654). Both TPS and TTFT are tracked via `streamStats` on the exchange.
+- [ ] **Total Generation Time**: Show the overall time taken for the API to complete the response. (TTFT + total duration are tracked internally but not displayed distinctly.)
 
 ## Workspace & Context Management
 - [x] **Context Usage Display**: Show current context token usage with progress indicator in the chat header.
-- [x] **Import/Export Chat Session**: 
-  - Debug export (clipboard): JSON without images for debugging
-  - Full export (file): JSON with embedded images for backup/restore
-  - Import (file): Restore from full export file
-- [x] **Chat Organization Utilities**: Ability to Pin conversations to the top of the history list and Clone/duplicate existing sessions.
+- [x] **Import/Export Chat Session**: Debug export (clipboard, no images) + full export (file, with images) + import (file restore).
+- [x] **Chat Organization Utilities**: Pin conversations to top of history list + Clone/duplicate existing sessions.
 - [x] **Chat Statistics**: View creation times and message turn counts inside the Chat Options dialog.
 - [x] **Compact Sidebar**: Consolidate chat actions into a dialog to reduce UI clutter.
-- [ ] **Chat Summarization Generator**: Automatically or manually trigger an LLM to read the current chat and generate a non-destructive, highly condensed markdown summary to save space and context.
-- [ ] **System Prompt Presets**: Save, name, and quickly select frequently used system prompts directly from the sidebar.
+- [x] **System Prompt Presets**: Save, name, and quickly select frequently used system prompts from the sidebar (`chat.js` `setupPresets`, `loadPresets`, `savePresets`). Stored in localStorage via `storage.getPref`.
+- [ ] **Chat Summarization Generator**: Automatically or manually trigger an LLM to read the current chat and generate a non-destructive, highly condensed markdown summary. (Arena has `summarize()` — direct chat does not.)
 - [ ] **Real-time Input Token Estimator**: Show an estimated token count for the user's input draft before they hit send.
 
 ## Input & Rich Media
-- [x] **Rich-Text Editor Input**: Replace the standard message input textarea with the NUI library's `<nui-rich-text>` component (configured without its toolbar). This will allow users to paste markdown into the prompt input in a readable but still fully editable format.
+- [x] **Rich-Text Editor Input**: Replace the standard message input textarea with the NUI library's `<nui-rich-text>` component (without toolbar).
 - [x] **Markdown Support in User Message**: Render user inputs using markdown when displayed in the chat history.
-- [x] **Multiline Input**: Improve text area behavior for proper multiline support. (Resolved by Rich-Text Editor transition).
+- [x] **Multiline Input**: Resolved by Rich-Text Editor transition.
 - [x] **Image Paste Support**: Allow users to paste images directly from their clipboard into the chat interface as attachments.
 - [x] **File Upload Support**: Allow users to upload and attach images via file picker.
 
 ## System & Visualization
 - [x] **Realtime Process Status Blocks**: Display realtime server status updates (e.g., compaction progress, upload status) via progress indicators in assistant message area.
-- [ ] **Tool Execution Status**: Display realtime MCP tool executions and MediaService tasks similar to VS Code Copilot's tool-use UI.
+- [ ] **Tool Execution Status UI**: Display realtime MCP tool executions with status badges, progress, and result expansion — similar to VS Code Copilot's tool-use UI. Current tool UI is basic (collapsible box with Pending/Success/Error badges).
 
 ## Network & Connection
-- [x] **Streaming Crash Self-Healing**: Properly intercept backend or API aborts (e.g., HTTP 400) mid-stream and auto-inject the raw system error into the completion array so the LLM is aware of the failure context.
-- [ ] **SSE Operation Mode**: Support Server-Sent Events (SSE) as an optional operation mode for chat messaging and streaming (pending backend support).
+- [x] **Streaming Crash Self-Healing**: Properly intercept backend or API aborts (e.g., HTTP 400) mid-stream and auto-inject the raw system error into the completion array.
+- [x] **SSE Operation Mode**: SSE is the **default** mode (`'sse'` in server-generated config.js). Full SSE streaming path implemented in `client-sdk.js` (`_streamChatIterableSSE`). WebSocket is also available.
+
 ## Technical Debt / Code Cleanup
-- [ ] **User Management Refactor**: The current user management approach (passing ackendClient.user via cookies, setting explicit folders in Node) is functioning and provides isolation, but is very clunky. Need to design and implement a more robust identity and session management system in the future.
+- [ ] **User Management Refactor**: Current cookie-based auth with nDB user isolation works but is rigid. The `config.json` users array + env var SUPERADMIN bootstrap pattern functions correctly for Phase 2 signoff, but deserves a more elegant design in future iterations.

@@ -1,3 +1,17 @@
+## [2026-05-30 Audit] chat/js/config.js is missing from the repo
+
+The file `chat/js/config.js` is referenced in `chat/index.html` line 402-403 but does not exist on disk. The server dynamically generates it in-memory when serving `/chat/js/config.js` (see `server/server.js` L1738-1753). This is by design — the config is injected from `.env`/environment variables — but there's no fallback file in the repo for local development or documentation purposes.
+
+Status: By Design — server dynamically generates the config. However, a sample/template file with comments would help LLMs understand available settings without reading the server code.
+
+## [2026-05-30 Audit] Realtime thinking rendering was reported broken but is implemented
+
+The May 23 handover reported that thinking blocks don't render during active streaming. Code audit shows this IS implemented: `reasoningBuffer` accumulates in `streamResponse()` and `updateAssistantContent(assistantEl, contentBuffer, reasoningBuffer)` is called on a debounced interval (L2221-2230). Both `reasoning_content` and `thinking_signature` are saved to nDB and restored on reload.
+
+Status: Verify at runtime. The implementation is in place — if it doesn't work, the issue may be in the Gateway not sending `reasoning_content` events, or the CSS hiding the thinking blocks.
+
+---
+
 ## System Prompts are not saved with the chat session.
 
 When I select a system prompt from the presets, the added system prompt is not saved, so on reloading the conversation the field is empty.
@@ -20,7 +34,7 @@ Status: Resolved — Works as side effect of the image attachment pipeline fix.
 
 The default sorting of chats are currently by "last updated", which is correct. But when I pick up an old chat, it should be sorted up in the UI immediately, once a message is added, making it the most recently updated chat. Currently, the chat session is only sorted when I reload the page.
 
-Status: Open — `updatedAt` is updated in backend and in `chatHistory.save()`, but `renderHistoryList()` is never called after a message is sent, so the sidebar doesn't re-sort until page reload.
+Status: Open — `updatedAt` is updated in backend and in `chatHistory.save()`, but `renderHistoryList()` is never called after a message is sent/stream completes, so the sidebar doesn't re-sort until page reload. Fix: call `renderHistoryList()` in `streamResponse()` after `setAssistantComplete()` and/or in `sendMessage()` after `chatHistory.save()`. (Audited 2026-05-30: confirmed still open.)
 
 ## Operation mode setting doesn't save
 the "operation mode" select does not save the setting to the database. On reload it always defaults to "SSE Rest"
