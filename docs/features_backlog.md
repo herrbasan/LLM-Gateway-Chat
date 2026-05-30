@@ -38,5 +38,23 @@
 - [x] **Streaming Crash Self-Healing**: Properly intercept backend or API aborts (e.g., HTTP 400) mid-stream and auto-inject the raw system error into the completion array.
 - [x] **SSE Operation Mode**: SSE is the **default** mode (`'sse'` in server-generated config.js). Full SSE streaming path implemented in `client-sdk.js` (`_streamChatIterableSSE`). WebSocket is also available.
 
+## Rich Media & Binary Support
+- [ ] **Automatic Thumbnail Generation for Unsupported Image Formats**: Use the nMedia service to generate thumbnails for image formats not natively supported by browsers (e.g., HEIC, TIFF, RAW). Thumbnails render inline while the original file is available for download.
+- [ ] **Expand Binary Support (PDF, Audio, Video, Arbitrary Files)**: Allow attaching and previewing non-image binary files — PDFs, audio clips, video, documents, etc. Requires Gateway-side features for file handling, MIME type routing, and media processing. Blocked on Gateway backend changes.
+
+## Search
+- [ ] **Scoped Search (Chat vs. Arena)**: Both normal (text) and vector (semantic) search should list sessions separately — chat results in one group, arena results in another. Currently `/api/search` returns mixed results with `filter_mode: 'direct|arena|all'` but the UI doesn't differentiate. The landing/search results view should clearly partition conversations by type.
+- [ ] **Full-Text Search Parity**: The hybrid search (`search_type: 'hybrid'`) falls back to text-only when nVDB returns no results. Ensure text search (FTS) has complete coverage — currently some exact-word queries miss due to FTS index gaps (see `bugs.md`).
+
+## Per-User Feature Flags
+- [ ] **Granular User Rights**: Extend the existing `rights` object beyond `{ login, read, write, admin }` to control feature access per user:
+  - `arenaAccess` — whether the user can access the Chat Arena
+  - `mcpAccess` — whether the user can connect external MCP servers (separate from built-in archive tools)
+  - `autoEmbed` — whether the user's messages are automatically embedded (on by default, disable for privacy-sensitive use)
+  - `visionAccess` — whether the user can use MCP Vision tools
+  - `exportAccess` — whether the user can export/import conversations
+- [ ] **Rights Enforcement in Backend**: All new rights flags must be enforced server-side (not just UI-hidden). The `requireAuth()` middleware should accept an optional rights mask. Admin UI should expose these toggles alongside existing `login/read/write/admin` checkboxes.
+- [ ] **Rights Enforcement in Frontend**: UI should hide/disable features based on the user's rights object returned by `GET /api/auth/session`. Arena button, MCP config panel, export buttons, and vision toggle should all respect the flags.
+
 ## Technical Debt / Code Cleanup
 - [ ] **User Management Refactor**: Current cookie-based auth with nDB user isolation works but is rigid. The `config.json` users array + env var SUPERADMIN bootstrap pattern functions correctly for Phase 2 signoff, but deserves a more elegant design in future iterations.
