@@ -43,9 +43,9 @@ Baseline the state before your change. Note session count, message counts, any e
 Same command. Compare against baseline. Any new duplicates? Any changed message counts?
 
 ### 5. Update the test DB if the data model changed
-If your change alters the data format, export a fresh snapshot from BADKID:
+If your change alters the data format, export a fresh snapshot from the production database on BADKID. Replace `herrbasan` with the actual user folder name:
 ```powershell
-robocopy "\\BADKID\Stuff\SRV\LLM-Gateway-Chat\server\data\chat_user" "server\data\chat_user_test" /E
+robocopy "\\BADKID\Stuff\SRV\LLM-Gateway-Chat\server\data\herrbasan" "server\data\chat_user_test" /E
 ```
 Commit the updated test DB so the next change has accurate test data.
 
