@@ -16,7 +16,7 @@ window.ARENA_CONFIG = {
     defaultTemperature: 0.7,
 
     // TTS Configuration
-    ttsEndpoint: 'http://localhost:2244',
+    ttsEndpoint: 'http://localhost:2233',
     ttsVoiceA: '',
     ttsVoiceB: '',
     ttsSpeed: 1.0,

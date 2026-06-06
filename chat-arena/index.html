@@ -17,7 +17,7 @@
     <link rel="stylesheet" href="js/arena.css">
 </head>
 <body>
-        <nui-app nui-vars-sidebar_width="16rem" nui-vars-sidebar_force-breakpoint="50rem" nui-vars-sidebar-right_width="20rem" nui-vars-sidebar-right_force-breakpoint="none">
+        <nui-app sidebar-width="20rem" nui-vars-sidebar_force-breakpoint="50rem" nui-vars-sidebar-right_force-breakpoint="none">
         <nui-app-header>
             <div slot="left">
                 <nui-button data-action="toggle-sidebar">
@@ -183,7 +183,7 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                         <div class="sidebar-section">
                             <label>Endpoint URL</label>
                             <nui-input id="tts-endpoint">
-                                <input type="url" placeholder="http://localhost:2244">
+                                <input type="url" placeholder="http://localhost:2233">
                             </nui-input>
                         </div>
                         
@@ -322,8 +322,10 @@ Speak naturally as if in a thoughtful conversation.</textarea>
 
         // Centralized arena-options action handler (mirrors chat's handleChatOptionsAction)
         document.addEventListener('nui-action-arena-options', (e) => {
+            console.log('[arena-options] action event fired, detail:', e.detail);
             const handler = window._arenaOptionsHandler;
             if (handler) handler(e.detail);
+            else console.warn('[arena-options] no handler registered');
         });
 
         // Toggle thinking block visibility (kept for any historical messages that still call it)
@@ -401,9 +403,14 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
                     <label style="margin: 0;">AI Summary</label>
                     <nui-button size="small" id="arena-options-generate-btn">
-                        <button type="button" data-action="arena-options:generate"><nui-icon name="auto_awesome"></nui-icon> Generate</button>
+                        <button type="button" data-action="arena-options:generate">Generate</button>
                     </nui-button>
                 </div>
+                <nui-select id="arena-options-summary-model-select" searchable data-label="Select model...">
+                    <select>
+                        <option value="">Loading models...</option>
+                    </select>
+                </nui-select>
                 <div id="arena-options-summary-status" style="color: var(--text-color-dim); font-style: italic; font-size: 0.875rem; min-height: 1.25rem;"></div>
                 <nui-input-group>
                     <label for="arena-options-teaser-input">Teaser</label>

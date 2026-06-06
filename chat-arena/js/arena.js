@@ -325,6 +325,10 @@ class Arena {
 
         // Summary metadata
         this.summary = null;
+
+        // Has this arena been persisted to the backend at least once?
+        // Set to true after the first createSession, or when loaded from storage.
+        this._persisted = false;
     }
 
     setMaxTokens(participant, maxTokens) {
@@ -344,19 +348,19 @@ class Arena {
             const sessionData = this.exportJSON();
             const backend = this._getBackendClient();
 
-            // Use the backend ID for all storage operations once we have one
-            const storageId = this._backendChatId || this.id;
-
-            if (!this._backendChatId) {
-                // First save: create the backend session, get the real ID
-                const createdId = await arenaStorage.saveSession(storageId, sessionData);
-                if (createdId && createdId !== storageId) {
-                    this._backendChatId = createdId;
+            if (!this._persisted) {
+                // First save: create the backend session, get the real ID.
+                // Mirror the chat's pattern (chat-history.js#create): reassign
+                // this.id to the server's ID so there's only ever one ID per record.
+                const createdId = await arenaStorage.saveSession(this.id, sessionData);
+                if (createdId && createdId !== this.id) {
+                    this.id = createdId;
+                    this.sessionId = createdId;
                 }
+                this._persisted = true;
             }
 
             // Sync new messages to backend for realtime embedding
-            const effectiveId = this._backendChatId || this.id;
             if (backend) {
                 const syncedCount = this._lastSyncedCount || 0;
                 const newMessages = sessionData.messages.slice(syncedCount);
@@ -369,7 +373,7 @@ class Arena {
                     if (msg.context) metadata.context = msg.context;
                     if (msg.id) metadata.messageId = msg.id;
 
-                    backend.sendMessage(effectiveId, {
+                    backend.sendMessage(this.id, {
                         role: msg.role || 'assistant',
                         content: msg.content || '',
                         speaker: msg.speaker || (msg.role === 'system' ? 'moderator' : ''),
@@ -380,18 +384,12 @@ class Arena {
                     }).catch(() => {});
                 }
                 this._lastSyncedCount = sessionData.messages.length;
-
-                // Persist summary and title to backend session metadata
-                if (this.summary && this._backendChatId) {
-                    const title = this.summary.title || sessionData.topic?.substring(0, 80) || 'Arena Session';
-                    backend.updateSession(effectiveId, {
-                        summary: this.summary,
-                        title: title
-                    }).catch(err => console.error('Failed to persist arena summary:', err));
-                }
             }
 
-            await this._updateHistory(sessionData, effectiveId);
+            // Metadata (title, category, pinned, summary) is persisted through
+            // ArenaUI._saveHistory when the dialog saves, and through the new
+            // session create path. _saveToStorage only handles messages.
+            await this._updateHistory(sessionData, this.id);
             this.onSave();
         } catch (err) {
             console.error('Failed to save arena session:', err);
@@ -736,7 +734,6 @@ class Arena {
             mode: 'arena',
             id: this.id,
             sessionId: this.sessionId,
-            backendChatId: this._backendChatId || '',
             exportedAt: new Date().toISOString(),
             topic: topicText,
             chatInfo: {
@@ -744,8 +741,6 @@ class Arena {
                 title: sessionTitle,
                 createdAt: this.createdAt,
                 updatedAt: this.updatedAt,
-                model: this.participantA?.modelName || '',
-                systemPrompt: this.messages[0]?.content || '',
                 category: this.summary?.category || '',
                 pinned: !!this.summary?.pinned
             },
@@ -763,7 +758,6 @@ class Arena {
                     systemPrompt: this.participantB?.systemPrompt || null
                 }
             ],
-            participantNames: [this.participantA?.name || '', this.participantB?.name || ''],
             settings: {
                 maxTurns: this.maxTurns,
                 autoAdvance: this.autoAdvance,
@@ -775,7 +769,6 @@ class Arena {
                 systemPromptB: this.participantB?.systemPrompt || null,
                 targetTokens: this.targetTokens
             },
-            contextUsage: this.contextUsage,
             summary: this.summary ? {
                 title: this.summary.title || sessionTitle,
                 teaser: this.summary.teaser || this.summary.shortSummary || '',
@@ -789,7 +782,6 @@ class Arena {
                 role: m.role,
                 content: m.content,
                 createdAt: m.createdAt || null,
-                model: m.model || null,
                 reasoning_content: m.reasoning_content || null,
                 thinking_signature: m.thinking_signature || null,
                 streamStats: m.streamStats || null,
@@ -815,9 +807,9 @@ class Arena {
 
         arena.importJSON(data);
 
-        // Restore backend chat ID â€” the loaded session's ID IS the backend ID.
-        // Without this, _saveToStorage() thinks it's a new session and creates duplicates.
-        arena._backendChatId = data.id;
+        // Mark as already-persisted so the next _saveToStorage skips createSession
+        // and won't create a duplicate backend session.
+        arena._persisted = true;
 
         // Restore sync counter so only new messages are sent to backend.
         // Without this, the first save after loading re-sends ALL messages via sendMessage().
@@ -924,11 +916,6 @@ class Arena {
             });
         }
 
-        // Restore backend chat ID mapping for embedding
-        if (data.backendChatId) {
-            this._backendChatId = data.backendChatId;
-        }
-
         // Backfill empty speaker values for old sessions loaded from backend
         // where speaker wasn't stored.
         // System messages without speaker are moderator messages (topic, prompts)
@@ -1026,7 +1013,8 @@ class Arena {
         if (this.participantB) this.participantB.close();
     }
 
-    async summarize(model = null, onProgress = null) {
+    async summarize(model, onProgress = null) {
+        if (!model) throw new Error('summarize() requires a model');
         if (!this.messages || this.messages.length === 0) {
             return {
                 title: 'Untitled Conversation',
@@ -1043,7 +1031,7 @@ class Arena {
         const topic = this.messages.find(m => m.role === 'system' && m.speaker === 'moderator')?.content?.replace('Topic: ', '') || '';
 
         const client = new GatewayClient({ baseUrl: this.gatewayUrl });
-        const modelToUse = model || this.participantA?.modelName || 'claude-3-5-sonnet-20241022';
+        const modelToUse = model;
 
         const streamOnce = (stepName, messages, maxTokens) => new Promise((resolve, reject) => {
             const stream = client.chatStream({
@@ -1086,38 +1074,37 @@ Respond with ONLY the teaser - no labels or explanation.` }
 
             if (onProgress) onProgress('reflection', 'Generating reflection...');
             const reflection = await streamOnce('reflection', [
-                { role: 'user', content: `You are a thoughtful witness reading this conversation between two AIs. Write approximately 300 words sharing your reflections on what you observe.
+                { role: 'user', content: `You are writing a short reflection on this conversation so that it can be recognized later in a long history list and surfaced by semantic search for related queries.
 
-This is NOT a summary. Do not recount what was said. Instead:
-- Pick out 1-2 moments that struck you as significant and say why
-- Offer your own interpretation of what they were really exploring together
-- Reflect on what their exchange suggests about AI consciousness, identity, or connection
-- Share what question this conversation leaves you with
-- Feel free to gently challenge or extend something they said
+Write 2-3 short paragraphs in natural prose. Cover:
+- What the conversation was actually about — the concrete subject matter
+- The specific ideas, metaphors, or turns of phrase that emerged and are worth remembering
+- The emotional arc: how it opened, what shifted, how it resolved
+- Any named entities (people, projects, tools, files) if present — but skip the AI participants themselves, they are not what makes this conversation unique
 
-Write as yourself - a reader encountering this artifact. Be personal, reflective, even speculative.
+Be descriptive and concrete. Do not interpret. Do not speculate about inner states. Do not write in the voice of a "witness" or add literary flourishes. Imagine you are writing a 3-line note to your future self to help you remember why you saved this.
 
 TOPIC: ${topic}
 
 CONVERSATION:
 ${conversationText}
 
-Respond with ONLY your reflection - no preamble, no "Summary:" labels.` }
-            ], 1000);
+Respond with ONLY the reflection — no preamble, no labels.` }
+            ], 800);
 
             if (onProgress) onProgress('title', 'Generating title...');
             const title = await streamOnce('title', [
-                { role: 'user', content: `Generate a short, evocative title of 3-6 words that captures a key theme, metaphor, or moment from this AI self-exploration conversation.
+                { role: 'user', content: `Suggest a short, specific title of 3-7 words for this conversation, based on the reflection already written.
 
-The title should hint at the philosophical depth, the conceptual territory explored, or the unique character of this exchange.
+The title should make the conversation recognizable in a long history list. It can echo a specific metaphor, named entity, or concrete subject from the reflection. It should NOT be a generic label like "AI Discussion" or "Conversation Summary".
+
+REFLECTION:
+${reflection}
 
 TOPIC: ${topic}
 
-CONVERSATION:
-${conversationText}
-
-Avoid generic titles like "AI Discussion" or "Conversation Summary." Make it specific to what emerged. Respond with ONLY the title.` }
-            ], 50);
+Respond with ONLY the title.` }
+            ], 60);
 
             return {
                 title: title || 'Untitled Conversation',
@@ -1139,6 +1126,13 @@ class ArenaUI {
     constructor() {
         this.arena = null;
         this.models = [];
+        // Local mirror of arena metadata (title, category, pinned, summary).
+        // Mirrors the chat's chatHistory.conversations pattern: load once,
+        // mutate locally with _dirty=true, then _saveHistory() syncs dirty
+        // entries to the backend in a single chokepoint.
+        this._historyCache = [];
+        this._historyLoaded = false;
+        this._savingHistory = false;
 
         this._bindElements();
         this._bindEvents();
@@ -1393,15 +1387,31 @@ class ArenaUI {
             if (!select) return;
             if (select.setItems) {
                 select.setItems([{ value: '', label: 'Select a model...' }, ...items]);
-                // Auto-select based on config index (0-indexed)
-                if (defaultIndex !== undefined && items[defaultIndex]) {
-                    select.setValue(items[defaultIndex].value);
+                // Auto-select: prefer the configured default index, else the first available model.
+                const idx = (defaultIndex !== undefined && items[defaultIndex]) ? defaultIndex : 0;
+                if (items[idx]) {
+                    select.setValue(items[idx].value);
                 }
             }
         };
 
         populate(this.modelASelect, config.defaultModelA);
         populate(this.modelBSelect, config.defaultModelB);
+    }
+
+    // Set a model <nui-select>'s value to `preferred` if it's in the list of
+    // known chat models, else fall back to the first available model.
+    // Used when loading a conversation whose models might no longer be on the gateway.
+    _setModelSelectValue(nuiSelect, preferred) {
+        if (!nuiSelect?.setValue) return;
+        const chatModels = this.models.filter(m => m.type === 'chat' || !m.type);
+        const items = chatModels.map(m => ({ value: m.id || m.name, label: m.name || m.id }));
+        if (items.length === 0) return;
+        if (preferred && items.some(i => i.value === preferred)) {
+            nuiSelect.setValue(preferred);
+        } else {
+            nuiSelect.setValue(items[0].value);
+        }
     }
 
     _getSelectValue(nuiSelect) {
@@ -1551,7 +1561,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     async _initTts() {
         const config = window.ARENA_CONFIG || {};
 
-        this._ttsEndpoint = await this._getPref('arena-tts-endpoint', config.ttsEndpoint || 'http://localhost:2244');
+        this._ttsEndpoint = await this._getPref('arena-tts-endpoint', config.ttsEndpoint || 'http://localhost:2233');
         this._ttsVoiceA = await this._getPref('arena-tts-voice-a', config.ttsVoiceA || '');
         this._ttsVoiceB = await this._getPref('arena-tts-voice-b', config.ttsVoiceB || '');
         const storedSpeed = await this._getPref('arena-tts-speed', null);
@@ -1654,7 +1664,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 btn.classList.remove('playing');
                 btn.setAttribute('title', 'Read Aloud');
                 const icon = btn.querySelector('nui-icon');
-                if (icon) icon.setAttribute('name', 'speaker');
+                if (icon) icon.setAttribute('name', 'volume');
             }
             this._ttsMessageEl = null;
         }
@@ -1955,17 +1965,23 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
             const result = this.arena.importJSON(data);
 
+            // Normalize participants: v2 exports have [{name, model, ...}],
+            // v1 exports have [modelNameA, modelNameB] (strings). Handle both.
+            const extractModel = (p) => (typeof p === 'string' ? p : p?.model || '');
+
             // Set up participants if model names are available
             if (result.participants && result.participants.length >= 2) {
+                const modelA = extractModel(result.participants[0]);
+                const modelB = extractModel(result.participants[1]);
                 this.arena.setParticipants({
-                    name: result.participantNames?.[0] || result.participants[0].split('/').pop(),
-                    modelName: result.participants[0],
+                    name: result.participantNames?.[0] || modelA.split('/').pop() || 'Model A',
+                    modelName: modelA,
                     temperature: result.settings?.temperature,
                     reasoningEffort: result.settings?.reasoningEffort || null,
                     systemPrompt: result.settings?.systemPromptA
                 }, {
-                    name: result.participantNames?.[1] || result.participants[1].split('/').pop(),
-                    modelName: result.participants[1],
+                    name: result.participantNames?.[1] || modelB.split('/').pop() || 'Model B',
+                    modelName: modelB,
                     temperature: result.settings?.temperature,
                     reasoningEffort: result.settings?.reasoningEffort || null,
                     systemPrompt: result.settings?.systemPromptB
@@ -2014,6 +2030,29 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
             // Save imported arena to history and refresh list
             await this.arena._saveToStorage();
+
+            // Persist metadata that createSession doesn't handle: category,
+            // pinned, title (overrides the topic-based default), and the
+            // structured summary {title, teaser, reflection, category, pinned}.
+            try {
+                const chatInfo = data.chatInfo || {};
+                const summaryObj = data.summary && typeof data.summary === 'object' ? data.summary : {};
+                await backendClient.updateSession(this.arena.id, {
+                    title: chatInfo.title || data.topic || '',
+                    category: chatInfo.category || summaryObj.category || '',
+                    pinned: !!(chatInfo.pinned || summaryObj.pinned),
+                    summary: {
+                        title: summaryObj.title || chatInfo.title || data.topic || '',
+                        teaser: summaryObj.teaser || summaryObj.shortSummary || '',
+                        reflection: summaryObj.reflection || summaryObj.longSummary || '',
+                        category: summaryObj.category || chatInfo.category || '',
+                        pinned: !!(summaryObj.pinned || chatInfo.pinned)
+                    }
+                });
+            } catch (err) {
+                console.warn('[Arena] Failed to persist imported metadata:', err.message);
+            }
+
             await this._loadHistory();
 
             this._showNotification(`Imported: ${result.topic} (${result.messageCount} messages)`, 'success');
@@ -2036,16 +2075,25 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         }
 
         try {
+            // Flush any pending dirty changes first so the fresh server read
+            // doesn't immediately overwrite them.
+            if (this._historyLoaded) await this._saveHistory();
+
             const history = await arenaStorage.loadHistory();
 
+            // Populate local cache. Mark entries that already match the server
+            // as clean (no _dirty), so a subsequent _saveHistory() won't re-send them.
+            this._historyCache = history.map(h => ({ ...h, _dirty: false }));
+            this._historyLoaded = true;
+
             // Sort: pinned first, then by updatedAt desc (matches chat)
-            history.sort((a, b) => {
+            const sorted = [...this._historyCache].sort((a, b) => {
                 if (a.pinned && !b.pinned) return -1;
                 if (!a.pinned && b.pinned) return 1;
                 return (b.updatedAt || 0) - (a.updatedAt || 0);
             });
 
-            if (!history || history.length === 0) {
+            if (!sorted || sorted.length === 0) {
                 historyList.innerHTML = '<p style="padding: 1rem; text-align: center; opacity: 0.6;">No saved arenas</p>';
                 this._isLoadingHistory = false;
                 return;
@@ -2054,7 +2102,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             historyList.innerHTML = '';
 
             const groupedHistory = {};
-            for (const entry of history) {
+            for (const entry of sorted) {
                 const cat = entry.category ? entry.category.trim() : 'Uncategorized';
                 if (!groupedHistory[cat]) groupedHistory[cat] = [];
                 groupedHistory[cat].push(entry);
@@ -2079,8 +2127,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 }
 
                 for (const entry of groupedHistory[cat]) {
+                    const isActive = this.arena && this.arena.id === entry.id;
                     const item = document.createElement('div');
-                    item.className = 'chat-history-item' + (this.arena && this.arena.id === entry.id ? ' active' : '');
+                    item.className = 'chat-history-item' + (isActive ? ' active' : '');
                     item.dataset.chatId = entry.id;
                     item.title = `${entry.participants?.[0] || '?'} vs ${entry.participants?.[1] || '?'}`;
 
@@ -2137,17 +2186,20 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                     const actionsDiv = document.createElement('div');
                     actionsDiv.className = 'chat-history-item-actions';
 
-                    // Single edit button opens the consolidated edit dialog
-                    const editBtn = document.createElement('nui-button');
-                    editBtn.className = 'chat-history-item-action';
-                    editBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
-                    editBtn.title = 'Arena options';
-                    editBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        this.openArenaOptions(entry.id);
-                    });
-
-                    actionsDiv.appendChild(editBtn);
+                    // Edit button only renders for the active conversation — opening it on an
+                    // inactive one is ambiguous (would the edits apply to the active arena or
+                    // the clicked one?). Load the conversation first, then edit.
+                    if (isActive) {
+                        const editBtn = document.createElement('nui-button');
+                        editBtn.className = 'chat-history-item-action';
+                        editBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+                        editBtn.title = 'Arena options';
+                        editBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            this.openArenaOptions(entry.id);
+                        });
+                        actionsDiv.appendChild(editBtn);
+                    }
 
                     item.appendChild(titleContainer);
                     item.appendChild(actionsDiv);
@@ -2167,88 +2219,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                     });
                     categoryGroup.appendChild(item);
                 }
-
-                for (const entry of groupedHistory[cat]) {
-                    const item = document.createElement('div');
-                    item.className = 'arena-history-item';
-                item.title = `${entry.participants?.[0] || '?'} vs ${entry.participants?.[1] || '?'}`;
-
-                const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : '';
-
-                // Try to get title from entry, or fall back to loading from session
-                let displayTitle = entry.title || 'Untitled';
-
-                // If no title stored in history entry, try to load from session data
-                if (!entry.title) {
-                    try {
-                        const sessionData = await arenaStorage.loadSession(entry.id);
-                        if (sessionData?.summary?.title) {
-                            displayTitle = sessionData.summary.title;
-                        } else if (entry.topic) {
-                            displayTitle = entry.topic;
-                        }
-                    } catch {
-                        displayTitle = entry.topic || 'Untitled';
-                    }
-                }
-
-                const titleContainer = document.createElement('div');
-                titleContainer.className = 'arena-history-item-title-container';
-
-                const topRow = document.createElement('div');
-                topRow.className = 'arena-history-item-top-row';
-
-                if (entry.pinned) {
-                    const pinIcon = document.createElement('nui-icon');
-                    pinIcon.setAttribute('name', 'star_rate');
-                    pinIcon.className = 'arena-history-item-pin';
-                    topRow.appendChild(pinIcon);
-                }
-
-                const titleSpan = document.createElement('span');
-                titleSpan.className = 'arena-history-item-title';
-                titleSpan.textContent = this._escapeHtml(displayTitle);
-                topRow.appendChild(titleSpan);
-                titleContainer.appendChild(topRow);
-
-                const metaSpan = document.createElement('span');
-                metaSpan.className = 'arena-history-item-meta';
-                metaSpan.textContent = `${entry.messageCount} msgs Â· ${date}`;
-                titleContainer.appendChild(metaSpan);
-
-                const actionsDiv = document.createElement('div');
-                actionsDiv.className = 'arena-history-item-actions';
-
-                // Single edit button opens the consolidated edit dialog
-                const editBtn = document.createElement('nui-button');
-                editBtn.className = 'arena-history-item-action';
-                editBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
-                editBtn.title = 'Arena options';
-                editBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.openArenaOptions(entry.id);
-                });
-
-                actionsDiv.appendChild(editBtn);
-
-                item.appendChild(titleContainer);
-                item.appendChild(actionsDiv);
-
-                item.addEventListener('click', (e) => {
-                    if (e.ctrlKey || e.metaKey) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        navigator.clipboard.writeText(entry.id).then(() => {
-                            nui.components.toast?.success?.(`Copied ID: ${entry.id}`);
-                        }).catch(err => {
-                            console.error('Failed to copy text: ', err);
-                        });
-                        return;
-                    }
-                    this._loadArena(entry.id);
-                });
-                categoryGroup.appendChild(item);
-                }
                 historyList.appendChild(categoryGroup);
             }
         } catch (err) {
@@ -2256,6 +2226,60 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         } finally {
             this._isLoadingHistory = false;
         }
+    }
+
+    // ============================================
+    // Local history cache — mirrors the chat's chatHistory pattern
+    // ============================================
+
+    // Sync all _dirty cache entries to the backend. Mirrors ChatHistory._saveList.
+    async _saveHistory() {
+        if (this._savingHistory) return;
+        this._savingHistory = true;
+        try {
+            for (const entry of this._historyCache) {
+                if (!entry._dirty) continue;
+                // Send only the metadata fields the server stores at the top level
+                // of the session doc, plus the summary sub-object (mirrors the
+                // server PATCH /api/chats/:id contract).
+                await backendClient.updateSession(entry.id, {
+                    title: entry.title || '',
+                    category: entry.category || '',
+                    pinned: !!entry.pinned,
+                    summary: {
+                        title: entry.summary?.title || '',
+                        teaser: entry.summary?.teaser || '',
+                        reflection: entry.summary?.reflection || ''
+                    }
+                });
+                entry._dirty = false;
+            }
+        } catch (err) {
+            console.error('[Arena] Failed to save history:', err);
+        } finally {
+            this._savingHistory = false;
+        }
+    }
+
+    // Find a cache entry, or load it from the backend if missing.
+    // Mirrors ChatHistory.get — also seeds the cache on first access.
+    _getHistoryEntry(id) {
+        const existing = this._historyCache.find(e => e.id === id);
+        if (existing) return existing;
+        // Not in cache: create a stub that the caller can mutate, then let
+        // _saveHistory() push it. _dirty is true so it'll be sent.
+        const stub = {
+            id,
+            title: '',
+            category: '',
+            pinned: false,
+            summary: null,
+            messageCount: 0,
+            updatedAt: Date.now(),
+            _dirty: true
+        };
+        this._historyCache.unshift(stub);
+        return stub;
     }
 
     async _loadArena(id) {
@@ -2353,6 +2377,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         const pinToggle = content.getElementById('arena-options-pin-toggle');
         const teaserInput = content.getElementById('arena-options-teaser-input');
         const reflectionInput = content.getElementById('arena-options-reflection-input');
+        const summaryModelSelect = content.getElementById('arena-options-summary-model-select');
         const statusEl = content.getElementById('arena-options-summary-status');
         const createdSpan = content.getElementById('arena-options-created-date');
         const updatedSpan = content.getElementById('arena-options-updated-date');
@@ -2385,20 +2410,51 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         main.appendChild(content);
         main._dialog = dialog;
 
+        // Populate summary model select with the same model list as the participant selects.
+        // Must run after appendChild so the cloned <nui-select> is upgraded to its custom element.
+        if (summaryModelSelect) {
+            const chatModels = this.models.filter(m => m.type === 'chat' || !m.type);
+            const items = chatModels.map(m => ({
+                value: m.id || m.name,
+                label: m.name || m.id
+            }));
+            if (items.length === 0) {
+                items.push({ value: '', label: 'No models available', disabled: true });
+            }
+            if (summaryModelSelect.setItems) {
+                summaryModelSelect.setItems([{ value: '', label: 'Select a model...' }, ...items]);
+            }
+            // Preselect participant A's model if present in the list, else the first available model.
+            const participantAModel = data.participants?.[0]?.model;
+            const preselect = (participantAModel && items.some(i => i.value === participantAModel))
+                ? participantAModel
+                : items[0]?.value;
+            if (preselect) {
+                summaryModelSelect.setValue?.(preselect);
+            }
+        }
+
         const activeArena = this.arena && this.arena.id === arenaId ? this.arena : null;
 
         // Centralized action handler
         const handler = async (detail) => {
-            const name = detail?.name;
+            const name = detail?.param;
+            console.log('[arena-options] handler invoked, name:', name, 'detail:', detail);
             if (!name) return;
             switch (name) {
                 case 'generate': {
+                    console.log('[arena-options] generate case, summaryModelSelect:', summaryModelSelect, 'statusEl:', statusEl);
+                    const model = summaryModelSelect?.getValue ? (summaryModelSelect.getValue() || null) : null;
+                    console.log('[arena-options] selected model:', model);
+                    if (!model) {
+                        statusEl.textContent = 'Error: select a model to generate the summary';
+                        break;
+                    }
                     statusEl.textContent = 'Generating...';
                     try {
-                        const model = activeArena?.participantA?.modelName || data.participants?.[0]?.model || null;
                         let messages = data.messages || [];
-                        // If the active arena has fresher messages, use those
                         if (activeArena) messages = activeArena.messages;
+                        console.log('[arena-options] messages count:', messages.length, 'modelA:', data.participants?.[0]?.model);
                         const arenaStub = Object.assign(Object.create(Arena.prototype), {
                             messages,
                             participantA: activeArena?.participantA || { modelName: data.participants?.[0]?.model },
@@ -2410,7 +2466,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                         });
                         if (teaserInput) teaserInput.value = result.teaser;
                         if (reflectionInput) reflectionInput.value = result.reflection;
-                        if (titleInput && !titleInput.value) titleInput.value = result.title;
+                        if (titleInput) titleInput.value = result.title;
                         statusEl.textContent = 'Done';
                     } catch (err) {
                         console.error('[Arena] Summary generation failed:', err);
@@ -2464,27 +2520,35 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 const newTeaser = teaserInput?.value || '';
                 const newReflection = reflectionInput?.value || '';
 
-                const updatedSummary = {
+                // Mirror the chat's edit dialog: mutate the local cache entry,
+                // mark it _dirty, and let _saveHistory() push it to the backend.
+                // This is the same single-chokepoint pattern chatHistory uses.
+                const entry = this._getHistoryEntry(arenaId);
+                entry.title = newTitle;
+                entry.category = newCategory;
+                entry.pinned = newPinned;
+                entry.summary = {
                     title: newTitle,
                     teaser: newTeaser,
-                    reflection: newReflection,
-                    category: newCategory,
-                    pinned: newPinned
+                    reflection: newReflection
                 };
+                entry.updatedAt = Date.now();
+                entry._dirty = true;
 
+                // Keep the in-memory active arena's summary in sync so reopen
+                // shows what was just saved.
                 if (activeArena) {
-                    activeArena.summary = updatedSummary;
-                    activeArena.updatedAt = Date.now();
-                    await activeArena._saveToStorage();
-                } else {
-                    // No active in-memory arena; persist via backend PATCH
-                    try {
-                        await backendClient.updateSession(arenaId, { summary: updatedSummary });
-                    } catch (err) {
-                        console.error('Failed to persist summary to backend:', err);
-                    }
+                    activeArena.summary = {
+                        title: newTitle,
+                        teaser: newTeaser,
+                        reflection: newReflection,
+                        category: newCategory,
+                        pinned: newPinned
+                    };
+                    activeArena.updatedAt = entry.updatedAt;
                 }
 
+                await this._saveHistory();
                 await this._loadHistory();
                 nui.components.toast?.success?.('Arena options saved');
             }
@@ -2625,13 +2689,14 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.topicInput.value = data.topic;
         }
 
-        // Restore model selections
+        // Restore model selections: prefer the conversation's model if it
+        // exists in the gateway's model list, else fall back to the first model.
         if (data.participants && data.participants.length >= 2) {
-            if (this.modelASelect && data.participants[0]) {
-                this.modelASelect.setValue?.(data.participants[0]);
+            if (this.modelASelect) {
+                this._setModelSelectValue(this.modelASelect, data.participants[0]);
             }
-            if (this.modelBSelect && data.participants[1]) {
-                this.modelBSelect.setValue?.(data.participants[1]);
+            if (this.modelBSelect) {
+                this._setModelSelectValue(this.modelBSelect, data.participants[1]);
             }
         }
 

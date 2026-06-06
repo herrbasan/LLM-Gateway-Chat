@@ -46,6 +46,28 @@ export const arenaStorage = {
         const createdAt = s.createdAt ? new Date(s.createdAt).getTime() : Date.now();
         const updatedAt = s.updatedAt ? new Date(s.updatedAt).getTime() : createdAt;
         const summaryRaw = s.summary || null;
+
+        // Fallback: if arenaConfig is missing model names (e.g. legacy imports
+        // or arenas created before model tracking), infer them from the
+        // first two unique non-moderator speakers in the messages.
+        let inferredModels = false;
+        if (!cfg.modelA || !cfg.modelB) {
+            const speakers = [...new Set(
+                msgs.filter(m => m.speaker && m.speaker !== 'moderator')
+                    .map(m => m.speaker)
+            )];
+            if (!cfg.modelA && speakers[0]) { cfg.modelA = speakers[0]; inferredModels = true; }
+            if (!cfg.modelB && speakers[1]) { cfg.modelB = speakers[1]; inferredModels = true; }
+        }
+        // Persist the inferred models back to the backend (one-time fix-up).
+        // This is a soft migration for legacy data; safe to run repeatedly.
+        if (inferredModels && (cfg.modelA || cfg.modelB)) {
+            bc.updateSession(id, {
+                arenaConfig: {
+                    ...cfg
+                }
+            }).catch(err => console.warn('[Arena] Failed to persist inferred models:', err.message));
+        }
         const summary = summaryRaw ? {
             title: summaryRaw.title || '',
             teaser: summaryRaw.teaser || summaryRaw.shortSummary || '',
@@ -59,7 +81,6 @@ export const arenaStorage = {
             mode: 'arena',
             id: s.id,
             sessionId: s.sessionId || s.id,
-            backendChatId: s.id,
             exportedAt: new Date().toISOString(),
             topic: cfg.topic || s.title || '',
             chatInfo: {
@@ -67,8 +88,6 @@ export const arenaStorage = {
                 title: s.title || cfg.topic || 'Arena Session',
                 createdAt,
                 updatedAt,
-                model: cfg.modelA || '',
-                systemPrompt: '',
                 category: s.category || '',
                 pinned: !!s.pinned
             },
@@ -86,10 +105,6 @@ export const arenaStorage = {
                     systemPrompt: cfg.systemPromptB || null
                 }
             ],
-            participantNames: [
-                cfg.modelA ? cfg.modelA.split('/').pop() : 'Model A',
-                cfg.modelB ? cfg.modelB.split('/').pop() : 'Model B'
-            ],
             settings: {
                 maxTurns: cfg.maxTurns,
                 autoAdvance: cfg.autoAdvance,
@@ -101,13 +116,6 @@ export const arenaStorage = {
                 systemPromptB: cfg.systemPromptB || null,
                 targetTokens: cfg.targetTokens
             },
-            contextUsage: msgs.length > 0 ? {
-                participantA: { used_tokens: 0, window_size: null },
-                participantB: { used_tokens: 0, window_size: null }
-            } : {
-                participantA: { used_tokens: 0, window_size: null },
-                participantB: { used_tokens: 0, window_size: null }
-            },
             summary,
             messages: msgs.map(m => ({
                 id: m.id || null,
@@ -115,7 +123,6 @@ export const arenaStorage = {
                 role: m.role || 'assistant',
                 content: m.content || '',
                 createdAt: m.createdAt || null,
-                model: m.model || null,
                 reasoning_content: m.reasoning_content || null,
                 thinking_signature: m.thinking_signature || null,
                 streamStats: m.streamStats || null,

@@ -463,7 +463,7 @@ async function embedQuery(text) {
     }
 }
 
-function buildEmbedText(msg, session) {
+function buildEmbedText(msg, session, msgIdx = -1) {
     const parts = [];
     if (session.mode === 'arena') {
         parts.push(`[Arena: ${(session.title || '').slice(0, 60)}]`);
@@ -473,6 +473,19 @@ function buildEmbedText(msg, session) {
         parts.push(`[${msg.role}]`);
     }
     if (msg.model) parts.push(`[${msg.model}]`);
+    // For the first message of a session, prepend any user-authored summary
+    // (title/teaser/reflection) so semantic search can surface the chat by
+    // themes that may be only loosely represented in the message text itself.
+    if (msgIdx === 0 && session.summary) {
+        const s = session.summary;
+        const summaryBits = [];
+        if (s.title) summaryBits.push(s.title);
+        if (s.teaser) summaryBits.push(s.teaser);
+        if (s.reflection) summaryBits.push(s.reflection);
+        if (summaryBits.length > 0) {
+            parts.push(`[Summary: ${summaryBits.join(' ').slice(0, 800)}]`);
+        }
+    }
     parts.push(msg.content || '');
     return parts.join(' ');
 }
@@ -512,7 +525,7 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         return;
     }
 
-    const rawText = buildEmbedText(msg, session);
+    const rawText = buildEmbedText(msg, session, msgIdx);
     const { text, truncated } = middleTruncateEmbedText(rawText);
 
     if (truncated) {
@@ -1231,6 +1244,7 @@ const routes = {
     if (body.systemPrompt !== undefined) session.systemPrompt = body.systemPrompt;
     if (body.category !== undefined) session.category = body.category;
     if (body.summary !== undefined) session.summary = body.summary;
+    if (body.arenaConfig !== undefined) session.arenaConfig = body.arenaConfig;
     session.updatedAt = new Date().toISOString();
     db.update(session._id, session);
     json(res, session, 200, req);

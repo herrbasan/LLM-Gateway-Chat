@@ -18,7 +18,7 @@ const GATEWAY_URL = CONFIG.gatewayUrl || 'http://localhost:3400';
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
-const TTS_ENDPOINT = CONFIG.ttsEndpoint || 'http://localhost:2244';
+const TTS_ENDPOINT = CONFIG.ttsEndpoint || 'http://localhost:2233';
 const TTS_VOICE = CONFIG.ttsVoice || '';
 const TTS_SPEED = CONFIG.ttsSpeed ?? 1.0;
 const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http://localhost:3500';
@@ -3467,7 +3467,7 @@ function stopTts() {
                 speakerBtn.classList.remove('playing');
                 speakerBtn.setAttribute('title', 'Read Aloud');
                 const icon = speakerBtn.querySelector('nui-icon');
-                if (icon) icon.setAttribute('name', 'speaker');
+                if (icon) icon.setAttribute('name', 'volume');
             }
         }
         currentTtsExchangeId = null;
@@ -4316,8 +4316,9 @@ function renderHistoryList() {
         }
 
         groupedChats[cat].forEach(chat => {
+            const isActive = chat.id === currentChatId;
             const item = document.createElement('div');
-            item.className = 'chat-history-item' + (chat.id === currentChatId ? ' active' : '');
+            item.className = 'chat-history-item' + (isActive ? ' active' : '');
             item.dataset.chatId = chat.id;
 
             const titleDiv = document.createElement('div');
@@ -4337,37 +4338,41 @@ function renderHistoryList() {
             titleSpan.className = 'chat-history-item-title';
             titleSpan.textContent = chat.title || 'New Chat';
             titleSpan.title = chat.summary ? `${chat.title}\n\n${chat.summary}` : chat.title;
-            
+
             topRow.appendChild(titleSpan);
             titleDiv.appendChild(topRow);
 
             const metaDiv = document.createElement('div');
             metaDiv.className = 'chat-history-item-meta';
-            
+
             const dateSpan = document.createElement('span');
             const dateObj = new Date(chat.updatedAt || chat.createdAt || Date.now());
             dateSpan.textContent = dateObj.toLocaleDateString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
-            
+
             const countSpan = document.createElement('span');
             countSpan.textContent = `${chat.messageCount || 0} msgs`;
-            
+
             metaDiv.appendChild(dateSpan);
             metaDiv.appendChild(countSpan);
             titleDiv.appendChild(metaDiv);
-            
+
             const actionsDiv = document.createElement('div');
             actionsDiv.className = 'chat-history-item-actions';
-            
-            const optionsBtn = document.createElement('nui-button');
-            optionsBtn.className = 'chat-history-item-action';
-            optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
-            optionsBtn.title = 'Chat Options';
-            optionsBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                openChatOptions(chat.id);
-            });
-            
-            actionsDiv.appendChild(optionsBtn);
+
+            // Edit button only renders for the active conversation — opening it on an
+            // inactive one is ambiguous (would the edits apply to the active chat or
+            // the clicked one?). Load the conversation first, then edit.
+            if (isActive) {
+                const optionsBtn = document.createElement('nui-button');
+                optionsBtn.className = 'chat-history-item-action';
+                optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+                optionsBtn.title = 'Chat Options';
+                optionsBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openChatOptions(chat.id);
+                });
+                actionsDiv.appendChild(optionsBtn);
+            }
 
             item.appendChild(titleDiv);
             item.appendChild(actionsDiv);
