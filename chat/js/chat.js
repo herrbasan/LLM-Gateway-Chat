@@ -651,6 +651,7 @@ function buildExchangeElement(exchange) {
             assistantEl.dataset.timestampStripped = 'true';
         }
         updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
+        setEmbedStatus(exchange.id, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
 
         if (exchange.assistant.isComplete) {
             finalizeAssistantElement(assistantEl, exchange.id);
@@ -2212,7 +2213,9 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 
                     if (event.tool_calls && event.tool_calls.length > 0 && !isReceivingTool) {
                         isReceivingTool = true;
-                        showPendingToolUI(exchangeId, chatId);
+                        // Sort tool_calls by index if present so pending UI appears in canonical order
+                        const sortedPending = [...event.tool_calls].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+                        showPendingToolUI(exchangeId, chatId, sortedPending.length);
                     }
 
                     // Debounce DOM updates to prevent freezing
@@ -2270,24 +2273,28 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                             if (event.thinking_signature) toolDoneEx.assistant.thinking_signature = event.thinking_signature;
                             toolDoneEx.assistant.tool_calls = event.tool_calls;
                         }
-                        
-                        const toolPromises = [];
-                        for (const tc of event.tool_calls) {
+
+                        // Sort tool_calls by index for canonical ordering. Without this,
+                        // parallel Promise.all appendChilds in non-deterministic resolution
+                        // order, so result bubbles appear before/after the tool-use bubble
+                        // in whatever order they finish.
+                        const orderedToolCalls = [...event.tool_calls].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+
+                        const toolExchangeIds = [];
+                        for (const tc of orderedToolCalls) {
                             try {
                                 const args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
-                                toolPromises.push(handleToolExecution(exchangeId, {
+                                const id = await handleToolExecution(exchangeId, {
                                     name: tc.function.name,
                                     args: args,
                                     id: tc.id
-                                }, chatId, originalUserExchangeId, false)); // false = don't auto-resume stream
+                                }, chatId, originalUserExchangeId, false); // false = don't auto-resume stream
+                                toolExchangeIds.push(id);
                             } catch (err) {
                                 console.error('Failed to parse tool arguments', tc.function.arguments, err);
                             }
                         }
-                        
-                        // We await the Promise.all here inside the async loop so streamResponse doesn't exit early
-                        // This locks the UI from clicking 'Send' while tools execute.
-                        const toolExchangeIds = await Promise.all(toolPromises);
+
                         if (toolExchangeIds.length > 0) {
                             const lastToolExchangeId = toolExchangeIds[toolExchangeIds.length - 1];
                             await streamResponse(lastToolExchangeId, chatId, originalUserExchangeId || exchangeId);
@@ -2329,6 +2336,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                         streamStats: streamStats
                     });
                     finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context, streamStats);
+                    setEmbedStatus(exchangeId, 'pending');
                     scrollToBottom();
                     break;
                 case 'progress':
@@ -2476,6 +2484,7 @@ function renderExchange(exchange, targetContainer = null) {
                 assistantEl.dataset.timestampStripped = 'true';
             }
             updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
+            setEmbedStatus(exchange.id, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
             // In renderExchange, toolEl is already in DOM, so we can insert assistant as sibling
             // This keeps tool and assistant as separate message bubbles
             toolEl.insertAdjacentElement('afterend', assistantEl);
@@ -2578,6 +2587,9 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
     el.innerHTML = `
         <div class="message-header message-header-flex">
             <span>${label}</span>${timestamp ? ` <span class="message-timestamp">${timestamp}</span>` : ''}
+            <span class="embed-status" data-embed-status="unknown" title="Embed status unknown">
+                <span class="embed-status-dot"></span>
+            </span>
             <span class="streaming-indicator visible">
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
@@ -2588,7 +2600,7 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
         <div class="progress-status"></div>
         <div class="message-content"></div>
         <div class="message-actions">
-            <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="speaker"></nui-icon></button></nui-button>
+            <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="volume"></nui-icon></button></nui-button>
             <nui-button class="action-btn regenerate" title="Regenerate"><button type="button"><nui-icon name="sync"></nui-icon></button></nui-button>
             <nui-button class="action-btn prev-version" title="Previous version"><button type="button"><nui-icon name="arrow" class="arrow-rotated"></nui-icon></button></nui-button>
             <span class="version-info"></span>
@@ -3091,6 +3103,20 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             return toolExchangeId;
         }
     }
+}
+
+function setEmbedStatus(exchangeId, status, error = null) {
+    const el = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"] .embed-status`);
+    if (!el) return;
+    el.dataset.embedStatus = status || 'unknown';
+    const tooltip = status === 'embedded'
+        ? 'Embedded in vector search'
+        : status === 'pending'
+            ? 'Embedding queued...'
+            : status === 'failed'
+                ? `Embed failed: ${error || 'unknown'}`
+                : 'Embed status unknown';
+    el.title = tooltip;
 }
 
 function updateAssistantContent(el, content, reasoningContent = null) {
@@ -3871,21 +3897,15 @@ async function exportChatAsJson(chatId, btn) {
     }
 
     try {
-        const chatInfo = chatHistory.get(chatId);
+        const meta = chatHistory.get(chatId) || {};
 
-        // Build complete exchange data, stripping tool args to avoid noise
         const exportExchanges = exchanges.map(ex => {
             if (ex.type === 'tool') {
-                // Strip tool args/content from tool exchanges
                 return {
                     id: ex.id,
                     type: ex.type,
                     timestamp: ex.timestamp,
-                    tool: {
-                        name: ex.tool?.name,
-                        status: ex.tool?.status,
-                        // args and content stripped for cleaner export
-                    },
+                    tool: { name: ex.tool?.name, status: ex.tool?.status },
                     assistant: ex.assistant ? {
                         content: ex.assistant.content,
                         isComplete: ex.assistant.isComplete,
@@ -3899,10 +3919,7 @@ async function exportChatAsJson(chatId, btn) {
                 id: ex.id,
                 type: ex.type,
                 timestamp: ex.timestamp,
-                user: ex.user ? {
-                    content: ex.user.content,
-                    attachments: ex.user.attachments,
-                } : null,
+                user: ex.user ? { content: ex.user.content, attachments: ex.user.attachments } : null,
                 assistant: ex.assistant ? {
                     content: ex.assistant.content,
                     isComplete: ex.assistant.isComplete,
@@ -3914,15 +3931,27 @@ async function exportChatAsJson(chatId, btn) {
         });
 
         const exportData = {
-            chatId,
+            version: 2,
+            mode: 'direct',
+            exportedAt: new Date().toISOString(),
+            id: chatId,
             chatInfo: {
-                id: chatInfo?.id,
-                title: chatInfo?.title,
-                model: chatInfo?.model,
-                sessionId: chatInfo?.sessionId,
-                timestamp: chatInfo?.timestamp,
+                id: meta.id || chatId,
+                title: meta.title || 'New Chat',
+                createdAt: meta.createdAt || Date.now(),
+                updatedAt: meta.updatedAt || Date.now(),
+                model: meta.model || '',
+                systemPrompt: meta.systemPrompt || '',
+                category: meta.category || '',
+                pinned: !!meta.pinned
             },
-            exchanges: exportExchanges,
+            participants: [
+                { name: 'user', model: null, role: 'user', systemPrompt: null },
+                { name: 'assistant', model: meta.model || '', role: 'assistant', systemPrompt: null }
+            ],
+            settings: { model: meta.model || '', systemPrompt: meta.systemPrompt || '' },
+            summary: null,
+            exchanges: exportExchanges
         };
 
         const formattedJson = JSON.stringify(exportData, null, 2);
@@ -3964,18 +3993,13 @@ async function exportChatToFile(chatId) {
     }
 
     try {
-        const exportData = {
-            version: 1,
-            exportedAt: new Date().toISOString(),
-            chatId: chatId,
-            chatInfo: chatHistory.get(chatId) || null,
-            exchanges: []
-        };
-        
+        const meta = chatHistory.get(chatId) || {};
+        const exportExchanges = [];
+
         // Load images for each exchange
         for (const ex of exchanges) {
             const exportExchange = { ...ex };
-            
+
             if (ex.user?.attachments?.some(att => att.hasImage)) {
                 const images = await imageStore.load(ex.id);
                 exportExchange.user = {
@@ -3985,22 +4009,50 @@ async function exportChatToFile(chatId) {
                         if (img) {
                             return {
                                 ...att,
-                                dataUrl: await img.getDataUrl() // Embed full image data
+                                dataUrl: await img.getDataUrl()
                             };
                         }
                         return att;
                     }))
                 };
             }
-            exportData.exchanges.push(exportExchange);
+            exportExchanges.push(exportExchange);
         }
-        
-        // Download as file
+
+        const exportData = {
+            version: 2,
+            mode: 'direct',
+            exportedAt: new Date().toISOString(),
+            id: chatId,
+            chatInfo: {
+                id: meta.id || chatId,
+                title: meta.title || 'New Chat',
+                createdAt: meta.createdAt || Date.now(),
+                updatedAt: meta.updatedAt || Date.now(),
+                model: meta.model || '',
+                systemPrompt: meta.systemPrompt || '',
+                category: meta.category || '',
+                pinned: !!meta.pinned
+            },
+            participants: [
+                { name: 'user', model: null, role: 'user', systemPrompt: null },
+                { name: 'assistant', model: meta.model || '', role: 'assistant', systemPrompt: null }
+            ],
+            settings: {
+                model: meta.model || '',
+                systemPrompt: meta.systemPrompt || ''
+            },
+            summary: null,
+            exchanges: exportExchanges
+        };
+
         const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
-        const chatInfo = exportData.chatInfo;
-        const title = chatInfo?.title ? chatInfo.title.replace(/[^a-z0-9]/gi, '_').toLowerCase() : 'chat';
-        const filename = `chat_export_${title}_${Date.now()}.json`;
+        const title = exportData.chatInfo.title
+            ? exportData.chatInfo.title.replace(/[^a-z0-9]/gi, '_').toLowerCase().substring(0, 30)
+            : 'chat';
+        const date = new Date().toISOString().split('T')[0];
+        const filename = `direct-${title}-${date}.json`;
 
         const a = document.createElement('a');
         a.href = url;
@@ -4022,79 +4074,103 @@ async function handleChatImport(e) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Reset input so same file can be selected again
     e.target.value = '';
 
     try {
         const text = await file.text();
         const importData = JSON.parse(text);
 
-        // Validate format
         if (!importData.exchanges || !Array.isArray(importData.exchanges)) {
             throw new Error('Invalid format: missing exchanges array');
         }
 
-        // Create new chat via chatHistory
         const newChatId = await chatHistory.create();
         const title = importData.chatInfo?.title || 'Imported Chat';
 
-        // Update metadata
         const meta = chatHistory.conversations.find(c => c.id === newChatId);
         if (meta) {
             meta.title = title;
             meta.model = importData.chatInfo?.model || '';
+            meta.systemPrompt = importData.chatInfo?.systemPrompt || '';
+            meta.category = importData.chatInfo?.category || '';
+            meta.pinned = !!importData.chatInfo?.pinned;
+            meta._dirty = true;
         }
         await chatHistory._saveList();
 
-        // Process exchanges - save images to server, store URL references
-        const processedExchanges = [];
+        // Re-upload images to server so dataUrls become server URLs.
+        // Then replay every message to the backend in order via sendMessage.
+        // (storage.saveConversation is a no-op since offline caching was removed;
+        // the backend conversation doc is the source of truth.)
         for (const ex of importData.exchanges) {
-            const processedEx = { ...ex };
-
+            let savedAttachments = null;
             if (ex.user?.attachments?.some(att => att.dataUrl)) {
                 const attachmentImages = ex.user.attachments
                     .filter(att => att.dataUrl)
-                    .map(att => ({
-                        dataUrl: att.dataUrl,
-                        name: att.name,
-                        type: att.type
-                    }));
-
+                    .map(att => ({ dataUrl: att.dataUrl, name: att.name, type: att.type }));
                 if (attachmentImages.length > 0) {
                     const savedFiles = await imageStore.save(ex.id, attachmentImages);
-                    // Store server URL in dataUrl
-                    processedEx.user = {
-                        ...ex.user,
-                        attachments: ex.user.attachments.map((att, idx) => ({
-                            name: att.name,
-                            type: att.type,
-                            hasImage: true,
-                            dataUrl: (savedFiles && savedFiles[idx]?.url) || att.dataUrl
-                        }))
-                    };
-                } else {
-                    processedEx.user = {
-                        ...ex.user,
-                        attachments: ex.user.attachments.map(att => ({
-                            name: att.name,
-                            type: att.type,
-                            hasImage: att.hasImage || !!att.dataUrl
-                        }))
-                    };
+                    savedAttachments = ex.user.attachments.map((att, idx) => ({
+                        name: att.name,
+                        type: att.type,
+                        hasImage: true,
+                        dataUrl: (savedFiles && savedFiles[idx]?.url) || att.dataUrl
+                    }));
                 }
             }
-            processedExchanges.push(processedEx);
+
+            if (ex.type === 'tool') {
+                const toolBody = {
+                    role: 'tool',
+                    content: ex.tool?.content || '',
+                    toolName: ex.tool?.name,
+                    toolArgs: ex.tool?.args,
+                    toolStatus: ex.tool?.status,
+                    toolImages: ex.tool?.images || []
+                };
+                await backendClient.sendMessage(newChatId, toolBody).catch(err => {
+                    console.warn('[Import] tool message failed:', err.message);
+                });
+            } else {
+                if (ex.user?.content) {
+                    await backendClient.sendMessage(newChatId, {
+                        role: 'user',
+                        content: ex.user.content,
+                        attachments: savedAttachments || (ex.user.attachments || []).map(att => ({
+                            name: att.name,
+                            type: att.type,
+                            dataUrl: att.dataUrl
+                        }))
+                    }).catch(err => {
+                        console.warn('[Import] user message failed:', err.message);
+                    });
+                }
+
+                if (ex.assistant?.isComplete && (ex.assistant.content || ex.assistant.reasoning_content || ex.assistant.tool_calls)) {
+                    const metadata = {};
+                    if (ex.assistant.reasoning_content) metadata.reasoning_content = ex.assistant.reasoning_content;
+                    if (ex.assistant.thinking_signature) metadata.thinking_signature = ex.assistant.thinking_signature;
+                    if (ex.assistant.streamStats) metadata.streamStats = ex.assistant.streamStats;
+                    if (ex.assistant.usage) metadata.usage = ex.assistant.usage;
+                    if (ex.assistant.context) metadata.context = ex.assistant.context;
+
+                    await backendClient.sendMessage(newChatId, {
+                        role: 'assistant',
+                        content: ex.assistant.content || '',
+                        model: importData.chatInfo?.model || ex.model || null,
+                        ...metadata
+                    }).catch(err => {
+                        console.warn('[Import] assistant message failed:', err.message);
+                    });
+                }
+            }
         }
 
-        // Save conversation to IndexedDB
-        await storage.saveConversation(newChatId, processedExchanges);
-        
-        // Switch to imported chat
         renderHistoryList();
         await switchChat(newChatId);
-        
+
         nui.components.toast?.success?.('Chat imported successfully');
-        
+
     } catch (err) {
         console.error('Failed to import chat', err);
         nui.components.dialog.alert('Import Failed', `Could not import chat: ${err.message}`);

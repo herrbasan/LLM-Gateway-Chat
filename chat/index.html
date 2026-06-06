@@ -17,7 +17,7 @@
     
 </head>
 <body>
-    <nui-app nui-vars-sidebar_width="16rem" nui-vars-sidebar-right_width="20rem" nui-vars-sidebar_force-breakpoint="75rem" nui-vars-sidebar-right_force-breakpoint="none">
+        <nui-app nui-vars-sidebar_width="16rem" nui-vars-sidebar-right_width="20rem" nui-vars-sidebar_force-breakpoint="75rem" nui-vars-sidebar-right_force-breakpoint="none">
         <nui-app-header>
             <div slot="left">
                 <nui-button data-action="toggle-sidebar">
@@ -26,12 +26,15 @@
                     </button>
                 </nui-button>
                 <h1 class="app-title">LLM Gateway Chat</h1>
+                <a class="app-switch-link" href="/chat-arena/" title="Switch to Chat Arena">
+                    <nui-icon name="article"></nui-icon>
+                    <span>Arena</span>
+                </a>
             </div>
             <div slot="center">
                 <div class="gateway-status" id="gateway-status">
                     <span class="status-dot"></span> <span id="gateway-status-text">Gateway</span>
                 </div>
-
             </div>
             <div slot="right">
                 <nui-button data-action="admin" id="btn-admin" title="User Management" style="display: none;">

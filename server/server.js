@@ -503,7 +503,6 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
     }
 
     if (!embedAvailable) {
-        // Queue for later — the periodic health check loop will retry when endpoint recovers
         if (instance.pendingQueue.length < 500) {
             instance.pendingQueue.push({ msg, session, convNdbId, msgIdx, failCount: _prevFails, nextRetryAt: 0 });
         } else {
@@ -530,11 +529,21 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
                 throw new Error('invalid_vector_shape');
             }
 
-            // Store reference to conversation doc — coordinates, not data
             instance.embeddingsCol.insert(msg.id, vector, JSON.stringify({
                 chatId: session.id, msgIdx
             }));
             instance.needsFlush++;
+
+            // Mark message as embedded in the conversation doc
+            try {
+                const conv = instance.db.find('_id', convNdbId)[0];
+                if (conv?.messages?.[msgIdx]) {
+                    conv.messages[msgIdx].embedStatus = 'embedded';
+                    conv.messages[msgIdx].embedAttempts = attempt + 1;
+                    conv.messages[msgIdx].embedError = null;
+                    instance.db.set(conv._id, 'messages', conv.messages);
+                }
+            } catch (e) {}
 
             L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: text.length, attempt: attempt + 1 }, 'Embed');
             return;
@@ -543,6 +552,14 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
 
             if (err.message?.includes('too many') && err.message?.includes('token')) {
                 L().error('Embed too many tokens', err, { msgId: msg.id, charLen: text.length }, 'Embed');
+                try {
+                    const conv = instance.db.find('_id', convNdbId)[0];
+                    if (conv?.messages?.[msgIdx]) {
+                        conv.messages[msgIdx].embedStatus = 'failed';
+                        conv.messages[msgIdx].embedError = 'too_many_tokens';
+                        instance.db.set(conv._id, 'messages', conv.messages);
+                    }
+                } catch (e) {}
                 break;
             }
 
@@ -554,7 +571,15 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
     }
 
     L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3, prevFails: _prevFails }, 'Embed');
-    // Exponential backoff: 5s → 30s → 2m → 10m → 30m (cap)
+    try {
+        const conv = instance.db.find('_id', convNdbId)[0];
+        if (conv?.messages?.[msgIdx]) {
+            conv.messages[msgIdx].embedStatus = 'failed';
+            conv.messages[msgIdx].embedError = lastError?.message || 'unknown';
+            instance.db.set(conv._id, 'messages', conv.messages);
+        }
+    } catch (e) {}
+
     const delays = [5000, 30000, 120000, 600000, 1800000];
     const newFailCount = _prevFails + 1;
     const delay = delays[Math.min(newFailCount - 1, delays.length - 1)];
@@ -565,6 +590,7 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
     });
     L().info('Embed re-queued with backoff', { msgId: msg.id, failCount: newFailCount, delayMs: delay, nextRetry: new Date(Date.now() + delay).toISOString() }, 'Embed');
 }
+
 
 // ============================================
 // API Routes

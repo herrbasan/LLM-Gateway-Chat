@@ -27,7 +27,8 @@ export const arenaStorage = {
             createdAt: s.createdAt,
             topic: s.title || s.arenaConfig?.topic || '',
             category: s.category || '',
-            summary: s.summary || ''
+            summary: s.summary || '',
+            pinned: !!s.pinned
         }));
     },
 
@@ -41,24 +42,86 @@ export const arenaStorage = {
         if (!data || !data.session) return null;
         const s = data.session;
         const msgs = data.messages || [];
+        const cfg = s.arenaConfig || {};
+        const createdAt = s.createdAt ? new Date(s.createdAt).getTime() : Date.now();
+        const updatedAt = s.updatedAt ? new Date(s.updatedAt).getTime() : createdAt;
+        const summaryRaw = s.summary || null;
+        const summary = summaryRaw ? {
+            title: summaryRaw.title || '',
+            teaser: summaryRaw.teaser || summaryRaw.shortSummary || '',
+            reflection: summaryRaw.reflection || summaryRaw.longSummary || '',
+            category: summaryRaw.category || '',
+            pinned: !!summaryRaw.pinned
+        } : null;
+
         return {
-            version: 1,
+            version: 2,
+            mode: 'arena',
             id: s.id,
-            exportedAt: s.updatedAt || s.createdAt,
-            topic: s.title || s.arenaConfig?.topic || '',
+            sessionId: s.sessionId || s.id,
+            backendChatId: s.id,
+            exportedAt: new Date().toISOString(),
+            topic: cfg.topic || s.title || '',
+            chatInfo: {
+                id: s.id,
+                title: s.title || cfg.topic || 'Arena Session',
+                createdAt,
+                updatedAt,
+                model: cfg.modelA || '',
+                systemPrompt: '',
+                category: s.category || '',
+                pinned: !!s.pinned
+            },
             participants: [
-                s.arenaConfig?.modelA || '',
-                s.arenaConfig?.modelB || ''
+                {
+                    name: cfg.modelA ? cfg.modelA.split('/').pop() : 'Model A',
+                    model: cfg.modelA || '',
+                    role: 'assistant',
+                    systemPrompt: cfg.systemPromptA || null
+                },
+                {
+                    name: cfg.modelB ? cfg.modelB.split('/').pop() : 'Model B',
+                    model: cfg.modelB || '',
+                    role: 'assistant',
+                    systemPrompt: cfg.systemPromptB || null
+                }
             ],
+            participantNames: [
+                cfg.modelA ? cfg.modelA.split('/').pop() : 'Model A',
+                cfg.modelB ? cfg.modelB.split('/').pop() : 'Model B'
+            ],
+            settings: {
+                maxTurns: cfg.maxTurns,
+                autoAdvance: cfg.autoAdvance,
+                temperature: cfg.temperature,
+                reasoningEffort: cfg.reasoningEffort || null,
+                modelA: cfg.modelA || '',
+                modelB: cfg.modelB || '',
+                systemPromptA: cfg.systemPromptA || null,
+                systemPromptB: cfg.systemPromptB || null,
+                targetTokens: cfg.targetTokens
+            },
+            contextUsage: msgs.length > 0 ? {
+                participantA: { used_tokens: 0, window_size: null },
+                participantB: { used_tokens: 0, window_size: null }
+            } : {
+                participantA: { used_tokens: 0, window_size: null },
+                participantB: { used_tokens: 0, window_size: null }
+            },
+            summary,
             messages: msgs.map(m => ({
+                id: m.id || null,
                 speaker: m.speaker || '',
                 role: m.role || 'assistant',
                 content: m.content || '',
                 createdAt: m.createdAt || null,
-                model: m.model || null
-            })),
-            summary: s.summary || null,
-            settings: s.arenaConfig || {}
+                model: m.model || null,
+                reasoning_content: m.reasoning_content || null,
+                thinking_signature: m.thinking_signature || null,
+                streamStats: m.streamStats || null,
+                usage: m.usage || null,
+                context: m.context || null
+            }))
         };
     },
 

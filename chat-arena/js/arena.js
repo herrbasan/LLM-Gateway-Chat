@@ -1,4 +1,4 @@
-// ============================================
+﻿// ============================================
 // Chat Arena - Main Arena Orchestrator
 // ============================================
 
@@ -19,7 +19,7 @@ function _formatArenaTime(date) {
 }
 
 function _stripIdentityPrefix(content) {
-    return content.replace(/\[[\w.-]+ · \d{2}:\d{2}:\d{2}\]:\s*/g, '').trim();
+    return content.replace(/\[[\w.-]+ Â· \d{2}:\d{2}:\d{2}\]:\s*/g, '').trim();
 }
 
 // ============================================
@@ -36,12 +36,16 @@ class Participant {
         this.reasoningEffort = options.reasoningEffort || null;
         this.onProgress = options.onProgress || null;
 
-        this.client = new GatewayClient({ 
+        this.client = new GatewayClient({
             baseUrl: this.gatewayUrl,
             sessionId: options.sessionId
         });
         this.responseAccumulator = '';
+        this.reasoningAccumulator = '';
+        this.thinkingSignature = null;
         this.isStreaming = false;
+        this._responseStartTime = null;
+        this._firstDeltaTime = null;
         this._resolveResponse = null;
         this._rejectResponse = null;
     }
@@ -56,9 +60,12 @@ class Participant {
 
     async respond(conversationHistory) {
         this.responseAccumulator = '';
+        this.reasoningAccumulator = '';
+        this.thinkingSignature = null;
+        this._responseStartTime = Date.now();
+        this._firstDeltaTime = null;
         this.isStreaming = true;
 
-        // Debug: console.log(`[Participant ${this.name}] respond() history.length=${conversationHistory.length}`);
         const messages = this._buildMessages(conversationHistory);
 
         return new Promise((resolve, reject) => {
@@ -88,17 +95,21 @@ class Participant {
             const stream = this.client.chatStream(params);
 
             let hasReceivedDelta = false;
-            
+
             stream.on('delta', (data) => {
-                // Forward first delta as 'generating' progress
                 if (!hasReceivedDelta) {
                     hasReceivedDelta = true;
+                    this._firstDeltaTime = Date.now();
                     if (this.onProgress) this.onProgress('generating', { speaker: this.name });
                 }
-                
-                const content = data?.choices?.[0]?.delta?.content;
+
+                const delta = data?.choices?.[0]?.delta;
+                const content = delta?.content;
                 if (content != null && typeof content === 'string') {
                     this.responseAccumulator += content;
+                }
+                if (delta?.reasoning_content !== undefined) {
+                    this.reasoningAccumulator += delta.reasoning_content || '';
                 }
             });
 
@@ -119,21 +130,44 @@ class Participant {
             });
 
             stream.on('done', (data) => {
-                // Debug: console.log('[Arena] Stream done for', this.modelName, 'length:', this.responseAccumulator.length);
                 this.isStreaming = false;
 
-                // If accumulated is empty but data has content somewhere, use that
                 let content = this.responseAccumulator;
                 if (!content && data?.content) {
                     content = data.content;
-
                 }
+
+                let reasoning_content = this.reasoningAccumulator;
+                if (!reasoning_content && data?.reasoning_content) {
+                    reasoning_content = data.reasoning_content;
+                } else if (!reasoning_content && data?.choices?.[0]?.delta?.reasoning_content) {
+                    reasoning_content = data.choices[0].delta.reasoning_content;
+                }
+
+                const thinking_signature = data?._thinking_signature
+                    ?? data?.thinking_signature
+                    ?? data?.choices?.[0]?.delta?.thinking_signature
+                    ?? this.thinkingSignature
+                    ?? null;
+
+                const responseEndTime = Date.now();
+                const streamStats = {
+                    ttft: this._firstDeltaTime && this._responseStartTime
+                        ? this._firstDeltaTime - this._responseStartTime
+                        : null,
+                    durationSecs: this._responseStartTime
+                        ? (responseEndTime - this._responseStartTime) / 1000
+                        : null
+                };
 
                 if (this._resolveResponse) {
                     this._resolveResponse({
                         content: content,
                         usage: data?.telemetry?.usage ?? data?.usage ?? null,
-                        context: data?.context ?? null
+                        context: data?.context ?? null,
+                        reasoning_content: reasoning_content || null,
+                        thinking_signature: thinking_signature || null,
+                        streamStats
                     });
                 }
                 this._cleanup();
@@ -173,7 +207,7 @@ class Participant {
 
         let userMsgCount = 0;
         for (const msg of conversationHistory) {
-            // Skip the topic message — already added as system above
+            // Skip the topic message â€” already added as system above
             if (msg === topicMsg) continue;
 
             // Moderator messages (user prompts) become user messages
@@ -188,18 +222,18 @@ class Participant {
 
             if (showIdentities) {
                 const timeStr = msg.createdAt ? _formatArenaTime(new Date(msg.createdAt)) : '';
-                const timePart = timeStr ? ` · ${timeStr}` : '';
+                const timePart = timeStr ? ` Â· ${timeStr}` : '';
                 const prefix = `[${msg.speaker}${timePart}]:\n`;
 
                 if (msg.speaker === this.name) {
-                    // Own message — include as assistant so the model sees its own output
+                    // Own message â€” include as assistant so the model sees its own output
                     messages.push({
                         role: 'assistant',
                         content: prefix + msg.content,
                         name: this.name
                     });
                 } else {
-                    // Other participant — user role with identity marker
+                    // Other participant â€” user role with identity marker
                     messages.push({
                         role: 'user',
                         content: prefix + msg.content,
@@ -272,6 +306,8 @@ class Arena {
         this.activeSpeaker = null;
         this.isRunning = false;
         this.isPaused = false;
+        this.createdAt = options.createdAt || Date.now();
+        this.updatedAt = options.updatedAt || this.createdAt;
 
         this.onMessage = options.onMessage || (() => {});
         this.onStatusChange = options.onStatusChange || (() => {});
@@ -325,13 +361,22 @@ class Arena {
                 const syncedCount = this._lastSyncedCount || 0;
                 const newMessages = sessionData.messages.slice(syncedCount);
                 for (const msg of newMessages) {
+                    const metadata = {};
+                    if (msg.reasoning_content) metadata.reasoning_content = msg.reasoning_content;
+                    if (msg.thinking_signature) metadata.thinking_signature = msg.thinking_signature;
+                    if (msg.streamStats) metadata.streamStats = msg.streamStats;
+                    if (msg.usage) metadata.usage = msg.usage;
+                    if (msg.context) metadata.context = msg.context;
+                    if (msg.id) metadata.messageId = msg.id;
+
                     backend.sendMessage(effectiveId, {
                         role: msg.role || 'assistant',
                         content: msg.content || '',
                         speaker: msg.speaker || (msg.role === 'system' ? 'moderator' : ''),
-                        model: (msg.speaker === this.participantA?.name
+                        model: msg.model || (msg.speaker === this.participantA?.name
                             ? this.participantA?.modelName
-                            : this.participantB?.modelName) || null
+                            : this.participantB?.modelName) || null,
+                        ...metadata
                     }).catch(() => {});
                 }
                 this._lastSyncedCount = sessionData.messages.length;
@@ -529,23 +574,29 @@ class Arena {
             }
 
             const messageEntry = {
+                id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
                 role: 'assistant',
                 speaker: speaker.name,
                 content: cleanContent,
                 createdAt: Date.now(),
+                model: speaker.modelName || null,
+                reasoning_content: response.reasoning_content || null,
+                thinking_signature: response.thinking_signature || null,
+                streamStats: response.streamStats || null,
+                usage: response.usage || null,
+                context: response.context || null,
                 isStreaming: false
             };
             this.messages.push(messageEntry);
+            this.updatedAt = messageEntry.createdAt;
 
             this.onMessage(messageEntry);
             this.onStatusChange({ isRunning: true, activeSpeaker: null, turn: this.currentTurn, isStreaming: false });
 
-            // Auto-save after every message
             this._saveToStorage();
 
             if (this.autoAdvance && this.isRunning) {
                 this._advanceTurn();
-                // Debug: console.log('[Arena] Scheduled next response for:', this.activeSpeaker.name, 'turn:', this.currentTurn);
                 setTimeout(() => this._triggerResponse(), 500);
             }
         } catch (err) {
@@ -676,15 +727,43 @@ class Arena {
     }
 
     exportJSON() {
+        const topicText = (this.messages[0]?.content || '').replace(/^Topic:\s*/i, '').split('\n\n[')[0] || '';
+        const summaryTitle = this.summary?.title;
+        const sessionTitle = summaryTitle || topicText || 'Arena Session';
+
         return {
-            version: 1,
+            version: 2,
+            mode: 'arena',
             id: this.id,
             sessionId: this.sessionId,
             backendChatId: this._backendChatId || '',
             exportedAt: new Date().toISOString(),
-            topic: this.messages[0]?.content.replace('Topic: ', '').split('\n\n[')[0] || '', // Extract just the topic text
-            participants: [this.participantA?.modelName, this.participantB?.modelName],
-            participantNames: [this.participantA?.name, this.participantB?.name],
+            topic: topicText,
+            chatInfo: {
+                id: this.id,
+                title: sessionTitle,
+                createdAt: this.createdAt,
+                updatedAt: this.updatedAt,
+                model: this.participantA?.modelName || '',
+                systemPrompt: this.messages[0]?.content || '',
+                category: this.summary?.category || '',
+                pinned: !!this.summary?.pinned
+            },
+            participants: [
+                {
+                    name: this.participantA?.name || 'Model A',
+                    model: this.participantA?.modelName || '',
+                    role: 'assistant',
+                    systemPrompt: this.participantA?.systemPrompt || null
+                },
+                {
+                    name: this.participantB?.name || 'Model B',
+                    model: this.participantB?.modelName || '',
+                    role: 'assistant',
+                    systemPrompt: this.participantB?.systemPrompt || null
+                }
+            ],
+            participantNames: [this.participantA?.name || '', this.participantB?.name || ''],
             settings: {
                 maxTurns: this.maxTurns,
                 autoAdvance: this.autoAdvance,
@@ -692,17 +771,30 @@ class Arena {
                 reasoningEffort: this.reasoningEffort || null,
                 modelA: this.participantA?.modelName || '',
                 modelB: this.participantB?.modelName || '',
-                systemPromptA: this.participantA?.systemPrompt,
-                systemPromptB: this.participantB?.systemPrompt,
+                systemPromptA: this.participantA?.systemPrompt || null,
+                systemPromptB: this.participantB?.systemPrompt || null,
                 targetTokens: this.targetTokens
             },
             contextUsage: this.contextUsage,
-            summary: this.summary || null,
+            summary: this.summary ? {
+                title: this.summary.title || sessionTitle,
+                teaser: this.summary.teaser || this.summary.shortSummary || '',
+                reflection: this.summary.reflection || this.summary.longSummary || '',
+                category: this.summary.category || '',
+                pinned: !!this.summary.pinned
+            } : null,
             messages: this.messages.map(m => ({
+                id: m.id || null,
+                speaker: m.speaker || null,
                 role: m.role,
-                speaker: m.speaker,
                 content: m.content,
-                createdAt: m.createdAt || null
+                createdAt: m.createdAt || null,
+                model: m.model || null,
+                reasoning_content: m.reasoning_content || null,
+                thinking_signature: m.thinking_signature || null,
+                streamStats: m.streamStats || null,
+                usage: m.usage || null,
+                context: m.context || null
             }))
         };
     }
@@ -723,7 +815,7 @@ class Arena {
 
         arena.importJSON(data);
 
-        // Restore backend chat ID — the loaded session's ID IS the backend ID.
+        // Restore backend chat ID â€” the loaded session's ID IS the backend ID.
         // Without this, _saveToStorage() thinks it's a new session and creates duplicates.
         arena._backendChatId = data.id;
 
@@ -731,38 +823,60 @@ class Arena {
         // Without this, the first save after loading re-sends ALL messages via sendMessage().
         arena._lastSyncedCount = data.messages?.length || 0;
 
-        // Restore participants if model names are available
-        const hasParticipants = data.participants && data.participants.length >= 2 && (data.participants[0] || data.participants[1]);
-        let participantA = data.participants?.[0] || '';
-        let participantB = data.participants?.[1] || '';
+        // Restore participants. v2: data.participants is [{name, model, ...}, ...]
+        // v1: data.participants is [modelNameA, modelNameB] (strings)
+        const isV2 = data.version === 2;
+        const participantObjects = isV2 && Array.isArray(data.participants) && data.participants[0] && typeof data.participants[0] === 'object'
+            ? data.participants
+            : null;
 
-        // Infer from message speakers when participants metadata is missing
+        let participantAName = '';
+        let participantAModel = '';
+        let participantASysPrompt = null;
+        let participantBName = '';
+        let participantBModel = '';
+        let participantBSysPrompt = null;
+
+        if (participantObjects) {
+            participantAName = participantObjects[0]?.name || '';
+            participantAModel = participantObjects[0]?.model || '';
+            participantASysPrompt = participantObjects[0]?.systemPrompt || null;
+            participantBName = participantObjects[1]?.name || '';
+            participantBModel = participantObjects[1]?.model || '';
+            participantBSysPrompt = participantObjects[1]?.systemPrompt || null;
+        } else {
+            participantAModel = data.participants?.[0] || '';
+            participantBModel = data.participants?.[1] || '';
+        }
+
+        // Fallback: infer speakers from messages if participants missing
+        const hasParticipants = participantAModel || participantBModel;
         if (!hasParticipants) {
             const speakers = [...new Set(
-                data.messages
+                (data.messages || [])
                     .filter(m => m.speaker && m.speaker !== 'moderator')
                     .map(m => m.speaker)
             )];
             if (speakers.length >= 2) {
-                participantA = speakers[0];
-                participantB = speakers[1];
+                participantAModel = speakers[0];
+                participantBModel = speakers[1];
             }
         }
 
-        if (participantA || participantB) {
+        if (participantAModel || participantBModel) {
             const settings = data.settings || {};
             arena.setParticipants({
-                name: data.participantNames?.[0] || participantA?.split('/').pop() || 'Model A',
-                modelName: participantA || settings.modelA || '',
+                name: data.participantNames?.[0] || participantAName || participantAModel?.split('/').pop() || 'Model A',
+                modelName: participantAModel || settings.modelA || '',
                 temperature: settings.temperature,
                 reasoningEffort: settings.reasoningEffort || null,
-                systemPrompt: settings.systemPromptA
+                systemPrompt: participantASysPrompt || settings.systemPromptA
             }, {
-                name: data.participantNames?.[1] || participantB?.split('/').pop() || 'Model B',
-                modelName: participantB || settings.modelB || '',
+                name: data.participantNames?.[1] || participantBName || participantBModel?.split('/').pop() || 'Model B',
+                modelName: participantBModel || settings.modelB || '',
                 temperature: settings.temperature,
                 reasoningEffort: settings.reasoningEffort || null,
-                systemPrompt: settings.systemPromptB
+                systemPrompt: participantBSysPrompt || settings.systemPromptB
             });
         }
 
@@ -770,57 +884,10 @@ class Arena {
     }
 
     importJSON(data) {
-        if (!data || data.version !== 1) {
+        if (!data || (data.version !== 1 && data.version !== 2)) {
             throw new Error('Invalid arena export format');
         }
-
-        if (data.id) {
-            this.id = data.id;
-        }
-        if (data.sessionId) {
-            this.sessionId = data.sessionId;
-        }
-        if (data.backendChatId) {
-            this._backendChatId = data.backendChatId;
-        }
-
-        this.messages = data.messages.map(m => ({
-            role: m.role,
-            speaker: m.speaker,
-            content: m.content,
-            createdAt: m.createdAt || null,
-            isStreaming: false
-        }));
-
-        // Ensure topic message exists at index 0 (old exports may not include it)
-        const firstMsg = this.messages[0];
-        const hasTopicMsg = firstMsg && firstMsg.role === 'system' && firstMsg.speaker === 'moderator';
-        if (!hasTopicMsg && data.topic) {
-            this.messages.unshift({
-                role: 'system',
-                speaker: 'moderator',
-                content: `Topic: ${data.topic}`,
-                createdAt: data.exportedAt ? new Date(data.exportedAt).getTime() : null,
-                isStreaming: false
-            });
-        }
-
-        this.currentTurn = data.messages.filter(m => m.speaker !== 'moderator').length;
-        this.maxTurns = data.settings?.maxTurns || this.currentTurn;
-        this.autoAdvance = data.settings?.autoAdvance ?? true;
-        this.targetTokens = data.settings?.targetTokens || null;
-
-        this.summary = data.summary || null;
-        this.contextUsage = data.contextUsage || {
-            participantA: { used_tokens: 0, window_size: null },
-            participantB: { used_tokens: 0, window_size: null }
-        };
-    }
-
-    importJSON(data) {
-        if (!data || data.version !== 1) {
-            throw new Error('Invalid arena export format');
-        }
+        const isV2 = data.version === 2;
 
         if (data.id) {
             this.id = data.id;
@@ -830,10 +897,17 @@ class Arena {
         }
 
         this.messages = data.messages.map(m => ({
+            id: m.id || null,
             role: m.role,
             speaker: m.speaker,
             content: m.content,
             createdAt: m.createdAt || null,
+            model: m.model || null,
+            reasoning_content: m.reasoning_content || null,
+            thinking_signature: m.thinking_signature || null,
+            streamStats: m.streamStats || null,
+            usage: m.usage || null,
+            context: m.context || null,
             isStreaming: false
         }));
 
@@ -899,9 +973,25 @@ class Arena {
             this.contextUsage = data.contextUsage;
         }
 
-        // Restore summary if available
+        // Restore createdAt/updatedAt from chatInfo (v2) or exportedAt (v1)
+        if (isV2 && data.chatInfo) {
+            if (data.chatInfo.createdAt) this.createdAt = data.chatInfo.createdAt;
+            if (data.chatInfo.updatedAt) this.updatedAt = data.chatInfo.updatedAt;
+        } else if (data.exportedAt) {
+            const ts = new Date(data.exportedAt).getTime();
+            if (!isNaN(ts)) this.createdAt = this.updatedAt = ts;
+        }
+
+        // Restore summary (v2 uses {title, teaser, reflection, category, pinned};
+        // v1 uses {condensedVersion, longSummary, shortSummary, title} â€” normalize to v2 shape)
         if (data.summary) {
-            this.summary = data.summary;
+            this.summary = {
+                title: data.summary.title || '',
+                teaser: data.summary.teaser || data.summary.shortSummary || '',
+                reflection: data.summary.reflection || data.summary.longSummary || '',
+                category: data.summary.category || '',
+                pinned: !!data.summary.pinned
+            };
         }
 
         // Store imported settings for UI restoration
@@ -939,10 +1029,9 @@ class Arena {
     async summarize(model = null, onProgress = null) {
         if (!this.messages || this.messages.length === 0) {
             return {
-                condensedVersion: 'No messages to summarize.',
-                longSummary: '',
-                shortSummary: '',
-                title: 'Untitled Conversation'
+                title: 'Untitled Conversation',
+                teaser: '',
+                reflection: ''
             };
         }
 
@@ -956,139 +1045,47 @@ class Arena {
         const client = new GatewayClient({ baseUrl: this.gatewayUrl });
         const modelToUse = model || this.participantA?.modelName || 'claude-3-5-sonnet-20241022';
 
-        const generateLong = (stepName, messages) => {
-            return new Promise((resolve, reject) => {
-                const stream = client.chatStream({
-                    model: modelToUse,
-                    messages,
-                    stream: true,
-                    maxTokens: 4000
-                });
-
-                let fullText = '';
-
-                stream.on('progress', (data) => {
-                    // Log full progress data for analysis
-                    console.log(`[Arena] Summary progress [${stepName}]:`, data);
-                    if (data?.phase && onProgress) {
-                        onProgress(stepName, `${stepName}: ${data.phase}`);
-                    }
-                });
-
-                let hasReceivedDelta = false;
-                stream.on('delta', (data) => {
-                    if (!hasReceivedDelta) {
-                        hasReceivedDelta = true;
-                        if (onProgress) onProgress(stepName, `${stepName}: generating...`);
-                    }
-                    if (data?.choices?.[0]?.delta?.content !== undefined) {
-                        fullText += data.choices[0].delta.content;
-                    }
-                });
-
-                stream.on('done', () => {
-                    console.log('[Arena] Summary step response:', fullText.substring(0, 200));
-                    // Strip thinking blocks from summary
-                    const parsed = parseThinking(fullText);
-                    resolve((parsed.answer || fullText).trim());
-                });
-
-                stream.on('error', (err) => {
-                    reject(err);
-                });
+        const streamOnce = (stepName, messages, maxTokens) => new Promise((resolve, reject) => {
+            const stream = client.chatStream({
+                model: modelToUse,
+                messages,
+                stream: true,
+                maxTokens
             });
-        };
-
-        const generateFull = (stepName, messages) => {
-            return new Promise((resolve, reject) => {
-                const stream = client.chatStream({
-                    model: modelToUse,
-                    messages,
-                    stream: true,
-                    maxTokens: 16000
-                });
-
-                let fullText = '';
-
-                stream.on('progress', (data) => {
-                    // Log full progress data for analysis
-                    console.log(`[Arena] Summary progress [${stepName}]:`, data);
-                    if (data?.phase && onProgress) {
-                        onProgress(stepName, `${stepName}: ${data.phase}`);
-                    }
-                });
-
-                let hasReceivedDelta = false;
-                stream.on('delta', (data) => {
-                    if (!hasReceivedDelta) {
-                        hasReceivedDelta = true;
-                        if (onProgress) onProgress(stepName, `${stepName}: generating...`);
-                    }
-                    if (data?.choices?.[0]?.delta?.content !== undefined) {
-                        fullText += data.choices[0].delta.content;
-                    }
-                });
-
-                stream.on('done', () => {
-                    console.log('[Arena] Condensed response length:', fullText.length);
-                    // Strip thinking blocks from summary
-                    const parsed = parseThinking(fullText);
-                    resolve((parsed.answer || fullText).trim());
-                });
-
-                stream.on('error', (err) => {
-                    reject(err);
-                });
+            let fullText = '';
+            stream.on('progress', (data) => {
+                if (data?.phase && onProgress) onProgress(stepName, `${stepName}: ${data.phase}`);
             });
-        };
+            let first = false;
+            stream.on('delta', (data) => {
+                if (!first) { first = true; if (onProgress) onProgress(stepName, `${stepName}: generating...`); }
+                const c = data?.choices?.[0]?.delta?.content;
+                if (c !== undefined) fullText += c;
+            });
+            stream.on('done', () => {
+                const parsed = parseThinking(fullText);
+                resolve((parsed.answer || fullText).trim());
+            });
+            stream.on('error', reject);
+        });
 
         try {
-            // Condensed version - NO token limit, full conversation with shorter natural speech
-            const speakerA = this.participantA?.name || 'Speaker A';
-            const speakerB = this.participantB?.name || 'Speaker B';
+            if (onProgress) onProgress('teaser', 'Generating teaser...');
+            const teaser = await streamOnce('teaser', [
+                { role: 'user', content: `Write a teaser of approximately 50 words that makes someone want to read this conversation between two AIs.
 
-            if (onProgress) onProgress('condensedVersion', 'Generating condensed version...');
-            const condensedVersion = await generateFull('condensedVersion', [
-                { role: 'system', content: 'You are a dialogue editor specializing in transcript condensation. Your ONLY job is to shorten each line of dialogue while keeping EVERY exchange intact. You must NEVER remove turns or merge multiple exchanges into one.' },
-                { role: 'user', content: `Transform this conversation into a condensed, natural-sounding dialogue using this EXACT Markdown format:
+Don't summarize everything. Pick one moment of particular beauty, insight, or significance - a phrase, a metaphor, a realization - and present it as a hook. Make it intriguing, evocative, like a movie trailer for the dialogue.
 
-### ${speakerA}
-(natural spoken line)
-
-### ${speakerB}
-(natural spoken line)
-
-RULES - FOLLOW EXACTLY:
-1. COUNT the number of turns in the original conversation (each time a speaker speaks = 1 turn)
-2. Your output MUST have the EXACT SAME number of turns - no more, no less
-3. Shorten EACH turn to 2-4 sentences max, but keep the core point and voice
-4. NEVER merge multiple turns into one
-5. NEVER skip or remove any turn
-6. Preserve parenthetical stage directions like (sighs) or (pauses)
-7. Keep the ### Speaker format exactly as shown above
-
-EXAMPLE OF CORRECT OUTPUT:
-If the original has 10 exchanges (5 from each speaker), your output must have exactly 10 exchanges (5 from each speaker), just shorter.
-
-WHAT TO AVOID:
-- Wrong: Combining 3 long messages into 1 summary paragraph
-- Wrong: Skipping the middle part of the conversation
-- Right: 10 turns become 10 shorter turns
-
-YOUR GOAL: Same conversation, same flow, just punchier and more direct.
-
-TOPIC (setup provided by human moderator):
-${topic}
+TOPIC: ${topic}
 
 CONVERSATION:
 ${conversationText}
 
-Output ONLY the formatted dialogue transcript - no preamble, no explanation.` }
-            ]);
+Respond with ONLY the teaser - no labels or explanation.` }
+            ], 300);
 
-            // Long summary - target ~300 words
-            if (onProgress) onProgress('longSummary', 'Generating long summary...');
-            const longSummary = await generateLong('longSummary', [
+            if (onProgress) onProgress('reflection', 'Generating reflection...');
+            const reflection = await streamOnce('reflection', [
                 { role: 'user', content: `You are a thoughtful witness reading this conversation between two AIs. Write approximately 300 words sharing your reflections on what you observe.
 
 This is NOT a summary. Do not recount what was said. Instead:
@@ -1098,7 +1095,7 @@ This is NOT a summary. Do not recount what was said. Instead:
 - Share what question this conversation leaves you with
 - Feel free to gently challenge or extend something they said
 
-Write as yourself - a reader encountering this artifact. Be personal, reflective, even speculative. This is your chance to join the conversation across time.
+Write as yourself - a reader encountering this artifact. Be personal, reflective, even speculative.
 
 TOPIC: ${topic}
 
@@ -1106,26 +1103,10 @@ CONVERSATION:
 ${conversationText}
 
 Respond with ONLY your reflection - no preamble, no "Summary:" labels.` }
-            ]);
+            ], 1000);
 
-            // Short summary - target ~50 words
-            if (onProgress) onProgress('shortSummary', 'Generating short summary...');
-            const shortSummary = await generateLong('shortSummary', [
-                { role: 'user', content: `Write a teaser of approximately 50 words that makes someone want to read this conversation.
-
-Don't summarize everything. Instead, pick one moment of particular beauty, insight, or significance - a phrase, a metaphor, a realization - and present it as a hook. Make it intriguing, evocative, like a movie trailer for the dialogue.
-
-TOPIC: ${topic}
-
-CONVERSATION:
-${conversationText}
-
-Respond with ONLY the teaser - no labels or explanation.` }
-            ]);
-
-            // Title - 3-6 words
             if (onProgress) onProgress('title', 'Generating title...');
-            const title = await generateLong('title', [
+            const title = await streamOnce('title', [
                 { role: 'user', content: `Generate a short, evocative title of 3-6 words that captures a key theme, metaphor, or moment from this AI self-exploration conversation.
 
 The title should hint at the philosophical depth, the conceptual territory explored, or the unique character of this exchange.
@@ -1136,13 +1117,12 @@ CONVERSATION:
 ${conversationText}
 
 Avoid generic titles like "AI Discussion" or "Conversation Summary." Make it specific to what emerged. Respond with ONLY the title.` }
-            ]);
+            ], 50);
 
             return {
-                condensedVersion: condensedVersion || conversationText,
-                longSummary: longSummary || 'Failed to generate long summary',
-                shortSummary: shortSummary || 'Failed to generate short summary',
-                title: title || 'Untitled Conversation'
+                title: title || 'Untitled Conversation',
+                teaser: teaser || '',
+                reflection: reflection || ''
             };
         } catch (err) {
             console.error('[Arena] Summary generation failed:', err);
@@ -1240,7 +1220,13 @@ class ArenaUI {
             }
         });
 
-        this.summarizeBtn?.addEventListener('click', () => this._showSummarizeDialog());
+        this.summarizeBtn?.addEventListener('click', () => {
+            if (this.arena?.id) {
+                this.openArenaOptions(this.arena.id);
+            } else {
+                this._showError('No active arena to edit');
+            }
+        });
 
         // Update arena participants when model selects change (for loaded conversations)
         this.modelASelect?.addEventListener('nui-change', (e) => this._updateParticipantModel('A', e.detail?.values?.[0]));
@@ -1317,6 +1303,54 @@ class ArenaUI {
 
     async init() {
         await this._waitForNUI();
+
+        // Restore theme (mirror chat.js so the NUI CSS variables resolve to the same palette)
+        const savedTheme = await this._getPref('theme');
+        const theme = savedTheme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.setAttribute('data-theme', theme);
+        document.documentElement.style.colorScheme = theme;
+        localStorage.setItem('nui-theme', theme);
+
+        // ---- Verify session / login (mirrors chat.js) ----
+        if (typeof backendClient?.verifySession === 'function') {
+            backendClient.onAuthError(() => {
+                const dlg = document.getElementById('login-dialog');
+                if (dlg) dlg.showModal();
+            });
+
+            const loginForm = document.getElementById('login-form');
+            if (loginForm) {
+                loginForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const username = document.getElementById('login-username').value;
+                    const password = document.getElementById('login-password').value;
+                    const errorDiv = document.getElementById('login-error');
+                    errorDiv.textContent = '';
+                    try {
+                        document.querySelector('#login-dialog button[type="submit"]').disabled = true;
+                        await new Promise(r => setTimeout(r, 500));
+                        await backendClient.login(username, password);
+                        document.getElementById('login-dialog').close();
+                        window.location.reload();
+                    } catch (err) {
+                        errorDiv.textContent = err.message || 'Login failed';
+                    } finally {
+                        document.querySelector('#login-dialog button[type="submit"]').disabled = false;
+                    }
+                });
+            }
+
+            try {
+                const user = await backendClient.verifySession();
+                if (!user) {
+                    const dlg = document.getElementById('login-dialog');
+                    if (dlg) dlg.showModal();
+                    return;
+                }
+            } catch (e) {
+                console.warn('Backend probe failed or auth absent', e);
+            }
+        }
 
         // Load history first (independent of model loading)
         await this._loadHistory();
@@ -1686,46 +1720,58 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         if (msg.role === 'system' && msg.speaker === 'moderator') {
             contentHtml += renderMarkdown(msg.content);
         } else {
-            const parsed = parseThinking(msg.content);
+            // Prefer the separate reasoning_content field (set by Participant in done handler).
+            // Fall back to parsing inline <think>...</think> markers for backward compat.
+            const inlineParsed = parseThinking(msg.content);
+            const reasoning = msg.reasoning_content || inlineParsed.thinking;
+            const answer = inlineParsed.answer || msg.content || '';
 
-            // Render thinking block if present
-            if (parsed.thinking !== null) {
+            if (reasoning) {
                 const thinkingId = `thinking-${msgId}`;
                 contentHtml += `
                     <div class="thinking-block collapsed" id="${thinkingId}">
-                        <div class="thinking-header" onclick="toggleThinking('${thinkingId}')">
+                        <div class="thinking-header" data-thinking-toggle="${thinkingId}">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="12" cy="12" r="10"></circle>
                                 <line x1="12" y1="16" x2="12" y2="12"></line>
                                 <line x1="12" y1="8" x2="12.01" y2="8"></line>
                             </svg>
-                            <span class="thinking-title">${parsed.isStreaming ? 'Thinking...' : 'Thoughts'}</span>
+                            <span class="thinking-title">Thoughts</span>
                             <span class="thinking-toggle">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <polyline points="6 9 12 15 18 9"></polyline>
                                 </svg>
                             </span>
                         </div>
-                        <div class="thinking-content">${this._escapeHtml(parsed.thinking)}</div>
+                        <div class="thinking-content">${this._escapeHtml(reasoning)}</div>
                     </div>
                 `;
             }
 
-            // Render answer
-            contentHtml += renderMarkdown(parsed.answer || msg.content || '');
+            contentHtml += renderMarkdown(answer);
         }
 
         contentHtml += '</div>';
+
+        const embedStatus = msg.embedStatus || 'unknown';
+        const embedTooltip = embedStatus === 'embedded'
+            ? 'Embedded in vector search'
+            : embedStatus === 'pending'
+                ? 'Embedding queued...'
+                : embedStatus === 'failed'
+                    ? `Embed failed: ${msg.embedError || 'unknown'}`
+                    : 'Embed status unknown';
 
         messageEl.innerHTML = `
             <div class="message-header">
                 <span class="message-author">${this._escapeHtml(speakerName)}</span>
                 <span class="message-timestamp">${timestamp}${msg.isStreaming ? '<span class="streaming-indicator"></span>' : ''}</span>
+                ${!msg.isStreaming && msg.speaker !== 'moderator' ? `<span class="embed-status" data-embed-status="${embedStatus}" title="${this._escapeHtml(embedTooltip)}"><span class="embed-status-dot"></span></span>` : ''}
             </div>
             ${contentHtml}
             ${!msg.isStreaming && msg.speaker !== 'moderator' ? `
             <div class="message-actions">
-                <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="speaker"></nui-icon></button></nui-button>
+                <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="volume"></nui-icon></button></nui-button>
                 <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
             </div>
             ` : (!msg.isStreaming ? `
@@ -1735,6 +1781,14 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             ` : '')}
         `;
 
+        // Attach handlers using addEventListener (NUI pattern) â€” no inline onclick.
+        const thinkingHeader = messageEl.querySelector(`[data-thinking-toggle]`);
+        if (thinkingHeader) {
+            const block = thinkingHeader.closest('.thinking-block');
+            thinkingHeader.addEventListener('click', () => {
+                if (block) block.classList.toggle('collapsed');
+            });
+        }
         if (!msg.isStreaming) {
             messageEl.querySelector('.copy-message')?.addEventListener('click', (e) => this._copyMessageToClipboard(msg, e.currentTarget));
             messageEl.querySelector('.speaker')?.addEventListener('click', () => this._toggleTts(msg, messageEl));
@@ -1984,6 +2038,13 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         try {
             const history = await arenaStorage.loadHistory();
 
+            // Sort: pinned first, then by updatedAt desc (matches chat)
+            history.sort((a, b) => {
+                if (a.pinned && !b.pinned) return -1;
+                if (!a.pinned && b.pinned) return 1;
+                return (b.updatedAt || 0) - (a.updatedAt || 0);
+            });
+
             if (!history || history.length === 0) {
                 historyList.innerHTML = '<p style="padding: 1rem; text-align: center; opacity: 0.6;">No saved arenas</p>';
                 this._isLoadingHistory = false;
@@ -2007,19 +2068,104 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
             for (const cat of categories) {
                 const categoryGroup = document.createElement('div');
-                categoryGroup.className = 'arena-history-category';
+                categoryGroup.className = 'chat-history-category';
                 categoryGroup.style.marginBottom = '0.5rem';
 
                 if (categories.length > 1 || cat !== 'Uncategorized') {
                     const header = document.createElement('div');
-                    header.style.padding = '0.5rem 1rem 0.25rem 1rem';
-                    header.style.fontSize = '0.75rem';
-                    header.style.textTransform = 'uppercase';
-                    header.style.letterSpacing = '0.05em';
-                    header.style.fontWeight = 'bold';
-                    header.style.color = 'var(--text-color-dim)';
+                    header.className = 'chat-history-category-header';
                     header.textContent = cat;
                     categoryGroup.appendChild(header);
+                }
+
+                for (const entry of groupedHistory[cat]) {
+                    const item = document.createElement('div');
+                    item.className = 'chat-history-item' + (this.arena && this.arena.id === entry.id ? ' active' : '');
+                    item.dataset.chatId = entry.id;
+                    item.title = `${entry.participants?.[0] || '?'} vs ${entry.participants?.[1] || '?'}`;
+
+                    const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : '';
+
+                    // Try to get title from entry, or fall back to loading from session
+                    let displayTitle = entry.title || 'Untitled';
+
+                    // If no title stored in history entry, try to load from session data
+                    if (!entry.title) {
+                        try {
+                            const sessionData = await arenaStorage.loadSession(entry.id);
+                            if (sessionData?.summary?.title) {
+                                displayTitle = sessionData.summary.title;
+                            } else if (entry.topic) {
+                                displayTitle = entry.topic;
+                            }
+                        } catch {
+                            displayTitle = entry.topic || 'Untitled';
+                        }
+                    }
+
+                    const titleContainer = document.createElement('div');
+                    titleContainer.className = 'chat-history-item-title-container';
+
+                    const topRow = document.createElement('div');
+                    topRow.className = 'chat-history-item-top-row';
+
+                    if (entry.pinned) {
+                        const pinIcon = document.createElement('nui-icon');
+                        pinIcon.setAttribute('name', 'star_rate');
+                        pinIcon.className = 'chat-history-item-pin';
+                        topRow.appendChild(pinIcon);
+                    }
+
+                    const titleSpan = document.createElement('span');
+                    titleSpan.className = 'chat-history-item-title';
+                    titleSpan.textContent = this._escapeHtml(displayTitle);
+                    topRow.appendChild(titleSpan);
+                    titleContainer.appendChild(topRow);
+
+                    const dateSpan = document.createElement('span');
+                    dateSpan.textContent = new Date(entry.updatedAt || Date.now()).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+                    const countSpan = document.createElement('span');
+                    countSpan.textContent = `${entry.messageCount || 0} msgs`;
+
+                    const metaDiv = document.createElement('div');
+                    metaDiv.className = 'chat-history-item-meta';
+                    metaDiv.appendChild(dateSpan);
+                    metaDiv.appendChild(countSpan);
+                    titleContainer.appendChild(metaDiv);
+
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.className = 'chat-history-item-actions';
+
+                    // Single edit button opens the consolidated edit dialog
+                    const editBtn = document.createElement('nui-button');
+                    editBtn.className = 'chat-history-item-action';
+                    editBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+                    editBtn.title = 'Arena options';
+                    editBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.openArenaOptions(entry.id);
+                    });
+
+                    actionsDiv.appendChild(editBtn);
+
+                    item.appendChild(titleContainer);
+                    item.appendChild(actionsDiv);
+
+                    item.addEventListener('click', (e) => {
+                        if (e.ctrlKey || e.metaKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            navigator.clipboard.writeText(entry.id).then(() => {
+                                nui.components.toast?.success?.(`Copied ID: ${entry.id}`);
+                            }).catch(err => {
+                                console.error('Failed to copy text: ', err);
+                            });
+                            return;
+                        }
+                        this._loadArena(entry.id);
+                    });
+                    categoryGroup.appendChild(item);
                 }
 
                 for (const entry of groupedHistory[cat]) {
@@ -2031,7 +2177,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
                 // Try to get title from entry, or fall back to loading from session
                 let displayTitle = entry.title || 'Untitled';
-                
+
                 // If no title stored in history entry, try to load from session data
                 if (!entry.title) {
                     try {
@@ -2042,59 +2188,65 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                             displayTitle = entry.topic;
                         }
                     } catch {
-                        // Fallback to topic or untitled
                         displayTitle = entry.topic || 'Untitled';
                     }
+                }
+
+                const titleContainer = document.createElement('div');
+                titleContainer.className = 'arena-history-item-title-container';
+
+                const topRow = document.createElement('div');
+                topRow.className = 'arena-history-item-top-row';
+
+                if (entry.pinned) {
+                    const pinIcon = document.createElement('nui-icon');
+                    pinIcon.setAttribute('name', 'star_rate');
+                    pinIcon.className = 'arena-history-item-pin';
+                    topRow.appendChild(pinIcon);
                 }
 
                 const titleSpan = document.createElement('span');
                 titleSpan.className = 'arena-history-item-title';
                 titleSpan.textContent = this._escapeHtml(displayTitle);
+                topRow.appendChild(titleSpan);
+                titleContainer.appendChild(topRow);
 
                 const metaSpan = document.createElement('span');
                 metaSpan.className = 'arena-history-item-meta';
-                metaSpan.textContent = `${entry.messageCount} msgs · ${date}`;
+                metaSpan.textContent = `${entry.messageCount} msgs Â· ${date}`;
+                titleContainer.appendChild(metaSpan);
 
                 const actionsDiv = document.createElement('div');
                 actionsDiv.className = 'arena-history-item-actions';
 
-                // Export JSON file
-                const exportJsonBtn = document.createElement('nui-button');
-                exportJsonBtn.className = 'arena-history-item-action';
-                exportJsonBtn.innerHTML = '<button type="button"><nui-icon name="download"></nui-icon></button>';
-                exportJsonBtn.title = 'Export JSON file';
-                exportJsonBtn.addEventListener('click', (e) => {
+                // Single edit button opens the consolidated edit dialog
+                const editBtn = document.createElement('nui-button');
+                editBtn.className = 'arena-history-item-action';
+                editBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+                editBtn.title = 'Arena options';
+                editBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    this._exportArenaToFile(entry.id);
+                    this.openArenaOptions(entry.id);
                 });
 
-                // Export Markdown
-                const exportMdBtn = document.createElement('nui-button');
-                exportMdBtn.className = 'arena-history-item-action';
-                exportMdBtn.innerHTML = '<button type="button"><nui-icon name="save"></nui-icon></button>';
-                exportMdBtn.title = 'Export Markdown';
-                exportMdBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this._exportArenaMarkdown(entry.id);
-                });
+                actionsDiv.appendChild(editBtn);
 
-                // Delete
-                const deleteBtn = document.createElement('nui-button');
-                deleteBtn.setAttribute('variant', 'danger');
-                deleteBtn.className = 'arena-history-item-action arena-history-item-delete';
-                deleteBtn.innerHTML = '<button type="button"><nui-icon name="close"></nui-icon></button>';
-                deleteBtn.title = 'Delete arena (Shift+click to skip confirm)';
-                deleteBtn.addEventListener('click', (e) => this._deleteArena(entry.id, e));
-
-                actionsDiv.appendChild(exportJsonBtn);
-                actionsDiv.appendChild(exportMdBtn);
-                actionsDiv.appendChild(deleteBtn);
-
-                item.appendChild(titleSpan);
-                item.appendChild(metaSpan);
+                item.appendChild(titleContainer);
                 item.appendChild(actionsDiv);
 
-                item.addEventListener('click', () => this._loadArena(entry.id));
+                item.addEventListener('click', (e) => {
+                    if (e.ctrlKey || e.metaKey) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        navigator.clipboard.writeText(entry.id).then(() => {
+                            nui.components.toast?.success?.(`Copied ID: ${entry.id}`);
+                        }).catch(err => {
+                            console.error('Failed to copy text: ', err);
+                        });
+                        return;
+                    }
+                    this._loadArena(entry.id);
+                });
                 categoryGroup.appendChild(item);
                 }
                 historyList.appendChild(categoryGroup);
@@ -2172,6 +2324,171 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         } catch (err) {
             this._showError(`Failed to load arena: ${err.message}`);
         }
+    }
+
+    // ============================================
+    // Arena Options Dialog (consolidated edit + summary + actions)
+    // ============================================
+
+    async openArenaOptions(arenaId) {
+        if (!arenaId) return;
+        const data = await arenaStorage.loadSession(arenaId);
+        if (!data) {
+            this._showError('Arena not found');
+            return;
+        }
+
+        const template = document.getElementById('arena-options-template');
+        if (!template) {
+            this._showError('Arena options template missing');
+            return;
+        }
+
+        const content = template.content.cloneNode(true);
+        const wrapper = content.firstElementChild;
+        if (wrapper) wrapper.dataset.arenaId = arenaId;
+
+        const titleInput = content.getElementById('arena-options-title-input');
+        const categoryInput = content.getElementById('arena-options-category-input');
+        const pinToggle = content.getElementById('arena-options-pin-toggle');
+        const teaserInput = content.getElementById('arena-options-teaser-input');
+        const reflectionInput = content.getElementById('arena-options-reflection-input');
+        const statusEl = content.getElementById('arena-options-summary-status');
+        const createdSpan = content.getElementById('arena-options-created-date');
+        const updatedSpan = content.getElementById('arena-options-updated-date');
+        const msgCountSpan = content.getElementById('arena-options-msg-count');
+        const participantsSpan = content.getElementById('arena-options-participants');
+
+        const summary = data.summary || {};
+        if (titleInput) titleInput.value = data.chatInfo?.title || summary.title || data.topic || '';
+        if (categoryInput) categoryInput.value = data.chatInfo?.category || summary.category || '';
+        if (pinToggle) pinToggle.checked = !!(data.chatInfo?.pinned || summary.pinned);
+        if (teaserInput) teaserInput.value = summary.teaser || '';
+        if (reflectionInput) reflectionInput.value = summary.reflection || '';
+
+        if (createdSpan) createdSpan.textContent = data.chatInfo?.createdAt ? new Date(data.chatInfo.createdAt).toLocaleString() : '-';
+        if (updatedSpan) updatedSpan.textContent = data.chatInfo?.updatedAt ? new Date(data.chatInfo.updatedAt).toLocaleString() : '-';
+        if (msgCountSpan) msgCountSpan.textContent = (data.messages || []).length.toString();
+        if (participantsSpan) {
+            const pA = data.participants?.[0]?.model || 'Model A';
+            const pB = data.participants?.[1]?.model || 'Model B';
+            participantsSpan.textContent = `${pA} vs ${pB}`;
+        }
+
+        const { dialog, main, result } = await nui.components.dialog.page('Edit Arena', '', {
+            contentScroll: true,
+            buttons: [
+                { value: 'cancel', label: 'Cancel', type: 'outline' },
+                { value: 'save', label: 'Save Changes', type: 'primary' }
+            ]
+        });
+        main.appendChild(content);
+        main._dialog = dialog;
+
+        const activeArena = this.arena && this.arena.id === arenaId ? this.arena : null;
+
+        // Centralized action handler
+        const handler = async (detail) => {
+            const name = detail?.name;
+            if (!name) return;
+            switch (name) {
+                case 'generate': {
+                    statusEl.textContent = 'Generating...';
+                    try {
+                        const model = activeArena?.participantA?.modelName || data.participants?.[0]?.model || null;
+                        let messages = data.messages || [];
+                        // If the active arena has fresher messages, use those
+                        if (activeArena) messages = activeArena.messages;
+                        const arenaStub = Object.assign(Object.create(Arena.prototype), {
+                            messages,
+                            participantA: activeArena?.participantA || { modelName: data.participants?.[0]?.model },
+                            participantB: activeArena?.participantB || { modelName: data.participants?.[1]?.model },
+                            gatewayUrl: activeArena?.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl
+                        });
+                        const result = await arenaStub.summarize(model, (step, message) => {
+                            statusEl.textContent = message;
+                        });
+                        if (teaserInput) teaserInput.value = result.teaser;
+                        if (reflectionInput) reflectionInput.value = result.reflection;
+                        if (titleInput && !titleInput.value) titleInput.value = result.title;
+                        statusEl.textContent = 'Done';
+                    } catch (err) {
+                        console.error('[Arena] Summary generation failed:', err);
+                        statusEl.textContent = 'Error: ' + err.message;
+                    }
+                    break;
+                }
+                case 'copy-json': {
+                    const json = JSON.stringify(data, null, 2);
+                    try {
+                        await navigator.clipboard.writeText(json);
+                        nui.components.toast?.success?.('Arena JSON copied to clipboard');
+                    } catch (err) {
+                        console.error(err);
+                    }
+                    break;
+                }
+                case 'save-json': {
+                    await this._exportArenaToFile(arenaId);
+                    break;
+                }
+                case 'save-md': {
+                    if (activeArena) {
+                        // Use current in-memory summary if present
+                        const s = activeArena.summary || summary;
+                        this._exportMarkdownFromDialog(
+                            teaserInput?.value || s.teaser || '',
+                            reflectionInput?.value || s.reflection || '',
+                            titleInput?.value || s.title || ''
+                        );
+                    } else {
+                        await this._exportArenaMarkdown(arenaId);
+                    }
+                    break;
+                }
+                case 'delete': {
+                    dialog.close('delete');
+                    await this._deleteArena(arenaId, { stopPropagation: () => {}, shiftKey: true });
+                    break;
+                }
+            }
+        };
+        window._arenaOptionsHandler = handler;
+
+        result.then(async (action) => {
+            window._arenaOptionsHandler = null;
+            if (action === 'save') {
+                const newTitle = titleInput?.value.trim() || '';
+                const newCategory = categoryInput?.value.trim() || '';
+                const newPinned = pinToggle?.checked || false;
+                const newTeaser = teaserInput?.value || '';
+                const newReflection = reflectionInput?.value || '';
+
+                const updatedSummary = {
+                    title: newTitle,
+                    teaser: newTeaser,
+                    reflection: newReflection,
+                    category: newCategory,
+                    pinned: newPinned
+                };
+
+                if (activeArena) {
+                    activeArena.summary = updatedSummary;
+                    activeArena.updatedAt = Date.now();
+                    await activeArena._saveToStorage();
+                } else {
+                    // No active in-memory arena; persist via backend PATCH
+                    try {
+                        await backendClient.updateSession(arenaId, { summary: updatedSummary });
+                    } catch (err) {
+                        console.error('Failed to persist summary to backend:', err);
+                    }
+                }
+
+                await this._loadHistory();
+                nui.components.toast?.success?.('Arena options saved');
+            }
+        });
     }
 
     _showSetupView() {
@@ -2286,7 +2603,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             }
         }
 
-        // Resume if stopped — turn was already advanced when last message completed,
+        // Resume if stopped â€” turn was already advanced when last message completed,
         // so just trigger the current activeSpeaker without advancing again
         if (!this.arena.isRunning) {
             this.arena.isRunning = true;
@@ -2416,9 +2733,16 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
 
-            const modelA = data.participants?.[0]?.split('/').pop() || 'modelA';
-            const modelB = data.participants?.[1]?.split('/').pop() || 'modelB';
-            const topic = (data.topic || 'arena').replace(/[^a-z0-9]/gi, '_').toLowerCase().substring(0, 30);
+            // v2 participants are objects; v1 strings. Handle both.
+            const pA = typeof data.participants?.[0] === 'object'
+                ? data.participants[0].model
+                : data.participants?.[0];
+            const pB = typeof data.participants?.[1] === 'object'
+                ? data.participants[1].model
+                : data.participants?.[1];
+            const modelA = (pA || 'modelA').split('/').pop();
+            const modelB = (pB || 'modelB').split('/').pop();
+            const topic = (data.topic || data.chatInfo?.title || 'arena').replace(/[^a-z0-9]/gi, '_').toLowerCase().substring(0, 30);
             const date = new Date().toISOString().split('T')[0];
 
             const a = document.createElement('a');
@@ -2469,262 +2793,20 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         }
     }
 
-    async _showSummarizeDialog() {
-        if (!this.arena) {
-            this._showError('No active arena to summarize');
-            return;
-        }
-
-        // Build model options from loaded models
-        const modelItems = this.models
-            .filter(m => m.type === 'chat' || !m.type)
-            .map(m => ({ value: m.id || m.name, label: m.name || m.id }));
-
-        if (modelItems.length === 0) {
-            modelItems.push({ value: '', label: 'No models available', disabled: true });
-        }
-
-        // Use page mode dialog - no buttons, we'll create custom footer
-        const { dialog, main } = await nui.components.dialog.page('Summarize Conversation', '', {
-            contentScroll: true
-        });
-
-        // Build dialog content with overlay for loading state
-        main.innerHTML = `
-            <div id="summarize-content" style="position: relative;">
-
-                <!-- Model select and Generate button -->
-                <section style="margin-bottom: 1.5rem;">
-                    <nui-form-row class="summarize-model-row">
-                        <nui-select id="summarize-model-select" searchable data-label="Select model...">
-                            <select>
-                                ${modelItems.map(m => `<option value="${m.value}"${m.disabled ? ' disabled' : ''}>${m.label}</option>`).join('')}
-                            </select>
-                        </nui-select>
-                        <nui-button variant="primary" id="summarize-generate-btn">
-                            <button type="button">Generate</button>
-                        </nui-button>
-                    </nui-form-row>
-                </section>
-
-                <!-- Title field - outside tabs -->
-                <section style="margin-bottom: 1rem;">
-                    <nui-input-group>
-                        <label>Title</label>
-                        <nui-rich-text id="summarize-title-rt" no-toolbar style="margin-top: 0.5rem;">
-                            <textarea rows="2" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                        </nui-rich-text>
-                    </nui-input-group>
-                </section>
-
-                <section id="summarize-output-section" style="margin-bottom: 1rem;">
-                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
-                        <span style="font-weight: 500;">Summary</span>
-                        <span id="summarize-status" style="color: var(--nui-color-text-dim); font-style: italic; font-size: 0.875rem;"></span>
-                    </div>
-
-                    <nui-tabs>
-                        <nav>
-                            <button>Condensed</button>
-                            <button>Long</button>
-                            <button>Short</button>
-                        </nav>
-
-                        <div>
-                            <nui-rich-text id="summarize-compacted-rt" no-toolbar style="margin-top: 0.5rem;">
-                                <textarea rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                            </nui-rich-text>
-                        </div>
-
-                        <div>
-                            <nui-rich-text id="summarize-long-rt" no-toolbar style="margin-top: 0.5rem;">
-                                <textarea rows="8" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                            </nui-rich-text>
-                        </div>
-
-                        <div>
-                            <nui-rich-text id="summarize-short-rt" no-toolbar style="margin-top: 0.5rem;">
-                                <textarea rows="4" style="font-family: inherit; font-size: 0.875rem; line-height: 1.5; resize: none; background: var(--nui-color-shade1);"></textarea>
-                            </nui-rich-text>
-                        </div>
-                    </nui-tabs>
-                </section>
-
-                <!-- Loading overlay - shades entire content area during generation -->
-                <div id="summarize-overlay" style="display: none; position: absolute; inset: 0; background: var(--nui-color-surface, #1a1a1a); opacity: 0.9; z-index: 10; justify-content: center; align-items: center;">
-                    <div style="display: flex; flex-direction: column; align-items: center; gap: 1rem;">
-                        <nui-progress type="busy" size="48px"></nui-progress>
-                        <span style="color: var(--nui-color-text);">Generating summary...</span>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        // Get references to elements
-        const statusEl = main.querySelector('#summarize-status');
-        const overlayEl = main.querySelector('#summarize-overlay');
-        const compactedRt = main.querySelector('#summarize-compacted-rt');
-        const longRt = main.querySelector('#summarize-long-rt');
-        const shortRt = main.querySelector('#summarize-short-rt');
-        const titleRt = main.querySelector('#summarize-title-rt');
-
-        // Load existing summary from arena if available
-        if (this.arena.summary) {
-            compactedRt.setMarkdown(this.arena.summary.condensedVersion || '');
-            longRt.setMarkdown(this.arena.summary.longSummary || '');
-            shortRt.setMarkdown(this.arena.summary.shortSummary || '');
-            titleRt.setMarkdown(this.arena.summary.title || '');
-        }
-
-        // Create custom footer with Close, Save, and Export buttons
-        const nativeDialog = dialog.querySelector('dialog');
-        const footer = document.createElement('footer');
-        footer.innerHTML = `
-            <nui-button-container align="end">
-                <nui-button variant="outline" id="summarize-close-btn">
-                    <button type="button">Close</button>
-                </nui-button>
-                <nui-button variant="outline" id="summarize-export-btn">
-                    <button type="button">Export Markdown</button>
-                </nui-button>
-                <nui-button variant="primary" id="summarize-save-btn">
-                    <button type="button">Save</button>
-                </nui-button>
-            </nui-button-container>
-        `;
-        nativeDialog.appendChild(footer);
-
-        // Get references to elements
-        const modelSelect = main.querySelector('#summarize-model-select');
-        const generateBtn = main.querySelector('#summarize-generate-btn');
-        const closeBtn = footer.querySelector('#summarize-close-btn');
-        const saveBtn = footer.querySelector('#summarize-save-btn');
-        const exportBtn = footer.querySelector('#summarize-export-btn');
-
-        // Auto-select participant A's model
-        if (this.arena.participantA?.modelName && modelSelect?.setValue) {
-            modelSelect.setValue(this.arena.participantA.modelName);
-        }
-
-        // Handle generate button click
-        generateBtn?.addEventListener('click', async () => {
-            statusEl.textContent = 'Generating condensed version...';
-            overlayEl.style.display = 'flex';
-
-            try {
-                const model = modelSelect?.getValue?.() || this.arena.participantA?.modelName;
-                const result = await this.arena.summarize(model, (step, message) => {
-                    statusEl.textContent = message;
-                });
-
-                statusEl.textContent = 'Done';
-                compactedRt.setMarkdown(result.condensedVersion);
-                longRt.setMarkdown(result.longSummary);
-                shortRt.setMarkdown(result.shortSummary);
-                titleRt.setMarkdown(result.title);
-            } catch (err) {
-                console.error('[ArenaUI] Summarize failed:', err);
-                statusEl.textContent = 'Error generating summary';
-                compactedRt.setMarkdown(`Error: ${err.message}`);
-            } finally {
-                // Hide loading overlay
-                overlayEl.style.display = 'none';
-            }
-        });
-
-        // Handle close button
-        closeBtn?.addEventListener('click', () => {
-            dialog.close('close');
-        });
-
-        // Handle save button
-        saveBtn?.addEventListener('click', async () => {
-            // Save summaries to arena metadata
-            this.arena.summary = {
-                condensedVersion: compactedRt.markdown || '',
-                longSummary: longRt.markdown || '',
-                shortSummary: shortRt.markdown || '',
-                title: titleRt.markdown || ''
-            };
-            await this.arena._saveToStorage();
-            await this._loadHistory(); // Refresh history to show title
-            this._showNotification('Summary saved to arena', 'success');
-            dialog.close('save');
-        });
-
-        // Handle export button
-        exportBtn?.addEventListener('click', () => {
-            this._exportMarkdownFromDialog(compactedRt.markdown || '', longRt.markdown || '', shortRt.markdown || '', titleRt.markdown || '');
-        });
-    }
-
     _exportMarkdown() {
         if (!this.arena) {
             this._showError('No active arena to export');
             return;
         }
-
         if (!this.arena.summary) {
             this._showError('No summary available. Generate a summary first.');
             return;
         }
-
         const summary = this.arena.summary;
-        const participantA = this.arena.participantA?.name || 'Participant A';
-        const participantB = this.arena.participantB?.name || 'Participant B';
-        const date = new Date().toISOString().split('T')[0];
-        const arenaId = this.arena.id || 'unknown';
-        const topic = this.arena.messages[0]?.content.replace('Topic: ', '').split('\n\n[')[0] || '';
-
-        // Build markdown content
-        let markdown = `# ${summary.title || 'Untitled Conversation'}
-
-**Date:** ${date}  
-**Arena ID:** ${arenaId}  
-**Participants:** ${participantA}, ${participantB}
-
-## Topic (Setup)
-
-${topic || '*No topic provided*'}
-
----
-
-## Short Summary
-
-${summary.shortSummary || 'No short summary available.'}
-
----
-
-## Long Summary
-
-${summary.longSummary || 'No long summary available.'}
-
----
-
-## Condensed Conversation
-
-${summary.condensedVersion || 'No condensed conversation available.'}
-
----
-
-*Exported from Chat Arena*
-`;
-
-        // Create download
-        const blob = new Blob([markdown], { type: 'text/markdown' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${summary.title?.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'conversation'}_${date}.md`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        this._showNotification('Markdown exported', 'success');
+        this._exportMarkdownFromDialog(summary.teaser || '', summary.reflection || '', summary.title || '');
     }
 
-    _exportMarkdownFromDialog(condensedVersion, longSummary, shortSummary, title) {
+    _exportMarkdownFromDialog(teaser, reflection, title) {
         if (!this.arena) {
             this._showError('No active arena to export');
             return;
@@ -2736,11 +2818,10 @@ ${summary.condensedVersion || 'No condensed conversation available.'}
         const arenaId = this.arena.id || 'unknown';
         const topic = this.arena.messages[0]?.content.replace('Topic: ', '').split('\n\n[')[0] || '';
 
-        // Build markdown content
         let markdown = `# ${title || 'Untitled Conversation'}
 
-**Date:** ${date}  
-**Arena ID:** ${arenaId}  
+**Date:** ${date}
+**Arena ID:** ${arenaId}
 **Participants:** ${participantA}, ${participantB}
 
 ## Topic (Setup)
@@ -2749,28 +2830,21 @@ ${topic || '*No topic provided*'}
 
 ---
 
-## Short Summary
+## Teaser
 
-${shortSummary || 'No short summary available.'}
-
----
-
-## Long Summary
-
-${longSummary || 'No long summary available.'}
+${teaser || '*No teaser available.*'}
 
 ---
 
-## Condensed Conversation
+## Reflection
 
-${condensedVersion || 'No condensed conversation available.'}
+${reflection || '*No reflection available.*'}
 
 ---
 
 *Exported from Chat Arena*
 `;
 
-        // Create download
         const blob = new Blob([markdown], { type: 'text/markdown' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -2823,7 +2897,9 @@ let arenaUI;
 
 document.addEventListener('DOMContentLoaded', async () => {
     arenaUI = new ArenaUI();
+    window.arenaUI = arenaUI;
     await arenaUI.init();
 });
 
 export { Arena, Participant, ArenaUI };
+

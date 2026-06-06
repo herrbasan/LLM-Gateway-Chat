@@ -17,7 +17,7 @@
     <link rel="stylesheet" href="js/arena.css">
 </head>
 <body>
-    <nui-app nui-vars-sidebar_width="16rem" nui-vars-sidebar_force-breakpoint="50rem" nui-vars-sidebar-right_width="20rem" nui-vars-sidebar-right_force-breakpoint="none">
+        <nui-app nui-vars-sidebar_width="16rem" nui-vars-sidebar_force-breakpoint="50rem" nui-vars-sidebar-right_width="20rem" nui-vars-sidebar-right_force-breakpoint="none">
         <nui-app-header>
             <div slot="left">
                 <nui-button data-action="toggle-sidebar">
@@ -25,13 +25,21 @@
                         <nui-icon name="menu"></nui-icon>
                     </button>
                 </nui-button>
-            </div>
-            <div slot="center">
                 <h1 class="app-title">Chat Arena</h1>
+                <a class="app-switch-link" href="/chat/" title="Switch to standard chat">
+                    <nui-icon name="article"></nui-icon>
+                    <span>Chat</span>
+                </a>
             </div>
+            <div slot="center"></div>
             <div slot="right">
+                <nui-button data-action="logout" id="btn-logout" title="Log Out">
+                    <button type="button" aria-label="Log Out">
+                        <nui-icon name="logout"></nui-icon>
+                    </button>
+                </nui-button>
                 <nui-button data-action="toggle-theme" id="theme-toggle">
-                    <button type="button" aria-label="Toggle theme">
+                    <button type="button" aria-label="Toggle light/dark theme">
                         <nui-icon name="brightness"></nui-icon>
                     </button>
                 </nui-button>
@@ -240,7 +248,7 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                                     Stop
                                 </button>
                             </nui-button>
-                            <nui-button variant="outline" size="small" id="summarize-btn" title="Summarize conversation">
+                            <nui-button variant="outline" size="small" id="summarize-btn" title="Edit / Summarize">
                                 <button type="button">
                                         <nui-icon name="article"></nui-icon>
                                 </button>
@@ -293,12 +301,32 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                     break;
                 case 'toggle-theme':
                     e.preventDefault();
-                    if (app) app.toggleTheme();
+                    if (app) {
+                        const current = document.documentElement.getAttribute('data-theme') || 'light';
+                        const next = current === 'dark' ? 'light' : 'dark';
+                        document.documentElement.setAttribute('data-theme', next);
+                        document.documentElement.style.colorScheme = next;
+                        localStorage.setItem('nui-theme', next);
+                        window.arenaUI?._setPref?.('theme', next);
+                    }
+                    break;
+                case 'logout':
+                    e.preventDefault();
+                    (async () => {
+                        try { await backendClient.logout(); } catch (err) { console.warn('Logout failed', err); }
+                        window.location.reload();
+                    })();
                     break;
             }
         });
 
-        // Toggle thinking block visibility
+        // Centralized arena-options action handler (mirrors chat's handleChatOptionsAction)
+        document.addEventListener('nui-action-arena-options', (e) => {
+            const handler = window._arenaOptionsHandler;
+            if (handler) handler(e.detail);
+        });
+
+        // Toggle thinking block visibility (kept for any historical messages that still call it)
         window.toggleThinking = function(id) {
             const el = document.getElementById(id);
             if (el) {
@@ -306,5 +334,113 @@ Speak naturally as if in a thoughtful conversation.</textarea>
             }
         };
     </script>
+
+    <!-- Login Dialog -->
+    <nui-dialog id="login-dialog">
+        <dialog>
+            <div style="padding: 1rem; max-width: 400px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; margin-top: 5vh;">
+                <h2 style="margin: 0;">Chat Arena - Login</h2>
+                <p style="color: var(--text-color-dim); text-align: center; margin-top: 0;">Please log in to access your arenas.</p>
+                <form id="login-form" style="display: flex; flex-direction: column; gap: 1rem;">
+                    <nui-input-group>
+                        <label for="login-username">Username</label>
+                        <nui-input>
+                            <input type="text" id="login-username" name="username" required autocomplete="username">
+                        </nui-input>
+                    </nui-input-group>
+                    <nui-input-group>
+                        <label for="login-password">Password</label>
+                        <nui-input>
+                            <input type="password" id="login-password" name="password" required autocomplete="current-password">
+                        </nui-input>
+                    </nui-input-group>
+                    <div id="login-error" style="color: var(--color-error); font-size: 0.85rem; min-height: 1rem; text-align: center;"></div>
+                    <nui-button variant="primary" style="margin-top: 0.5rem;">
+                        <button type="submit">Log In</button>
+                    </nui-button>
+                </form>
+            </div>
+        </dialog>
+    </nui-dialog>
+
+    <!-- Arena Options Template (consolidated edit + summary + actions dialog) -->
+    <template id="arena-options-template">
+        <div data-arena-id="" style="padding: var(--nui-space); display: flex; flex-direction: column; gap: var(--nui-space);">
+
+            <div class="sidebar-section">
+                <label>Arena Info</label>
+                <div style="background: var(--color-shade2); padding: 0.75rem; border-radius: var(--border-radius1); font-size: 0.875rem; color: var(--text-color-dim); display: flex; flex-direction: column; gap: 0.25rem;">
+                    <div><strong>Created:</strong> <span id="arena-options-created-date">-</span></div>
+                    <div><strong>Last Updated:</strong> <span id="arena-options-updated-date">-</span></div>
+                    <div><strong>Messages:</strong> <span id="arena-options-msg-count">-</span></div>
+                    <div><strong>Participants:</strong> <span id="arena-options-participants">-</span></div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <nui-input-group>
+                        <label for="arena-options-title-input">Title</label>
+                        <nui-input>
+                            <input type="text" id="arena-options-title-input" placeholder="Enter title...">
+                        </nui-input>
+                    </nui-input-group>
+                    <nui-input-group>
+                        <label for="arena-options-category-input">Category</label>
+                        <nui-input>
+                            <input type="text" id="arena-options-category-input" placeholder="Enter category...">
+                        </nui-input>
+                    </nui-input-group>
+                </div>
+                <nui-checkbox title="Pin this arena to the top of the history list" style="margin-top: 0.5rem;">
+                    <input type="checkbox" id="arena-options-pin-toggle"> Pin to Top
+                </nui-checkbox>
+            </div>
+
+            <div class="sidebar-section">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+                    <label style="margin: 0;">AI Summary</label>
+                    <nui-button size="small" id="arena-options-generate-btn">
+                        <button type="button" data-action="arena-options:generate"><nui-icon name="auto_awesome"></nui-icon> Generate</button>
+                    </nui-button>
+                </div>
+                <div id="arena-options-summary-status" style="color: var(--text-color-dim); font-style: italic; font-size: 0.875rem; min-height: 1.25rem;"></div>
+                <nui-input-group>
+                    <label for="arena-options-teaser-input">Teaser</label>
+                    <nui-textarea>
+                        <textarea id="arena-options-teaser-input" rows="3" placeholder="A short hook..."></textarea>
+                    </nui-textarea>
+                </nui-input-group>
+                <nui-input-group>
+                    <label for="arena-options-reflection-input">Reflection</label>
+                    <nui-textarea>
+                        <textarea id="arena-options-reflection-input" rows="10" placeholder="A long-form reflection on the conversation..."></textarea>
+                    </nui-textarea>
+                </nui-input-group>
+            </div>
+
+            <div class="sidebar-section">
+                <label>Actions &amp; Export</label>
+                <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                    <nui-button title="Copy arena JSON to clipboard">
+                        <button type="button" data-action="arena-options:copy-json"><nui-icon name="content_copy"></nui-icon> Copy JSON</button>
+                    </nui-button>
+                    <nui-button title="Export to file">
+                        <button type="button" data-action="arena-options:save-json"><nui-icon name="download"></nui-icon> Save JSON</button>
+                    </nui-button>
+                    <nui-button title="Export Markdown">
+                        <button type="button" data-action="arena-options:save-md"><nui-icon name="download"></nui-icon> Save Markdown</button>
+                    </nui-button>
+                </div>
+            </div>
+
+            <div class="sidebar-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-shade1);">
+                <label style="color: var(--color-danger);">Danger Zone</label>
+                <nui-button variant="danger">
+                    <button type="button" data-action="arena-options:delete"><nui-icon name="delete"></nui-icon> Delete Arena</button>
+                </nui-button>
+            </div>
+        </div>
+    </template>
 </body>
 </html>

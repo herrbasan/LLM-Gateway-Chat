@@ -4,12 +4,6 @@
 body { margin: 0; padding: 0; overflow: hidden; height: 100vh; }
 nui-app:not(.nui-ready) { display: none; }
 
-.app-title {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 500;
-}
-
 /* Sidebar layout - match chat app */
 .sidebar-layout {
     display: flex;
@@ -80,86 +74,7 @@ nui-sidebar[position="right"] .sidebar-content {
     padding-right: 1rem;
 }
 
-.arena-history-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-shrink: 0;
-    padding: 0.5rem 0.75rem;
-    background: var(--nui-color-shade1, #1a1a1a);
-    border: thin solid var(--nui-color-shade2, #333);
-    border-radius: 0.25rem;
-    cursor: pointer;
-    font-size: 0.875rem;
-    transition: all 0.2s;
-    position: relative;
-    overflow: hidden;
-}
-
-.arena-history-item:hover {
-    background: var(--nui-color-shade2, #2a2a2a);
-}
-
-.arena-history-item:hover .arena-history-item-meta {
-    opacity: 0;
-}
-
-.arena-history-item:hover .arena-history-item-actions {
-    opacity: 1;
-    pointer-events: auto;
-}
-
-.arena-history-item.active {
-    border-color: var(--nui-color-highlight, #0066cc);
-    background: var(--nui-color-base, #0a0a0a);
-    font-weight: 500;
-}
-
-.arena-history-item-title {
-    flex: 1;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    margin-right: 0.5rem;
-    word-break: break-word; /* prevent long unbroken strings stretching the box */
-}
-
-.arena-history-item-meta {
-    font-size: 0.75rem;
-    opacity: 0.6;
-    white-space: nowrap;
-    transition: opacity 0.2s;
-}
-
-/* Action buttons for history items */
-.arena-history-item-actions {
-    position: absolute;
-    right: 0.5rem;
-    display: flex;
-    gap: 0.25rem;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s;
-    background: var(--nui-color-shade2, #2a2a2a);
-    padding-left: 0.5rem;
-}
-
-.arena-history-item-action {
-    --nui-button-padding: 0.25rem;
-    --nui-button-min-height: 1.5rem;
-}
-
-.arena-history-item-action button {
-    padding: 0.25rem;
-    min-height: 1.5rem;
-    min-width: 1.5rem;
-}
-
-.arena-history-item-action nui-icon {
-    font-size: 0.875rem;
-}
+/* History list styling is shared with the chat app via chat.css (chat-history-item, etc.) */
 
 /* Scroll to bottom button */
 .scroll-to-bottom {
@@ -487,13 +402,6 @@ nui-app[nui-vars-sidebar_width] nui-content>nui-main {
 /* Extend turns button */
 #extend-turns-btn {
     animation: pulse 1s infinite;
-}
-
-/* Arena history item improvements */
-.arena-history-item-meta {
-    font-size: 0.75rem;
-    opacity: 0.6;
-    white-space: nowrap;
 }
 
 /* Responsive adjustments */

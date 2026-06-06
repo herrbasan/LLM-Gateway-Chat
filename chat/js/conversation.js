@@ -44,6 +44,36 @@ export class Conversation {
     }
 
     // ============================================
+    // Defensive Cleanup (Qwen model artifacts)
+    // ============================================
+
+    // Qwen sometimes emits literal "null" tokens inside its reasoning stream
+    // (produces strings like "...\nnullnullnullnullnull"), and occasionally
+    // leaks the </think> terminator as content. Strip these so the UI
+    // doesn't render them.
+    _cleanModelArtifacts(reasoning, content) {
+        if (typeof reasoning === 'string' && reasoning.length > 0) {
+            reasoning = reasoning
+                .replace(/null+/g, '')
+                .replace(/[ \t]+\n/g, '\n')
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
+        } else {
+            reasoning = '';
+        }
+        if (typeof content === 'string' && content.length > 0) {
+            content = content
+                .replace(/\s*<\/think>\s*$/i, '')
+                .replace(/<think>/gi, '')
+                .replace(/^null+\s*/i, '')
+                .trim();
+        } else {
+            content = '';
+        }
+        return { reasoning, content };
+    }
+
+    // ============================================
     // Timestamp Formatting
     // ============================================
     
@@ -236,6 +266,16 @@ export class Conversation {
         // Clean content - remove any duplicate timestamps the LLM may have generated
         const cleanedContent = this._stripExtraTimestamps(exchange.assistant.content);
         exchange.assistant.content = cleanedContent;
+
+        // Defensive cleanup for Qwen model artifacts:
+        // - reasoning_content may contain literal "null" tokens
+        // - content may leak the </think> terminator or a leading "null..." prefix
+        const artifacts = this._cleanModelArtifacts(
+            exchange.assistant.reasoning_content || '',
+            exchange.assistant.content || ''
+        );
+        exchange.assistant.reasoning_content = artifacts.reasoning || null;
+        exchange.assistant.content = artifacts.content;
 
         // Save this version only if it's unique to prevent accidental double-pushes
         if (!exchange.assistant.versions.some(v => v.content === cleanedContent)) {
@@ -787,6 +827,12 @@ export class Conversation {
                         }
                         if (msg.model) {
                             target.model = msg.model;
+                        }
+                        if (msg.embedStatus) {
+                            target.assistant.embedStatus = msg.embedStatus;
+                        }
+                        if (msg.embedError) {
+                            target.assistant.embedError = msg.embedError;
                         }
                         target.assistant.isComplete = true;
                         if (!target.assistant.versions.length) target.assistant.versions = [{ content, timestamp: Date.now(), streamStats: msg.streamStats || null, usage: msg.usage || null, context: msg.context || null }];
