@@ -316,6 +316,7 @@ class Arena {
         this.onSave = options.onSave || (() => {});
         this.onContextUpdate = options.onContextUpdate || (() => {});
         this.onProgress = options.onProgress || (() => {});
+        this.onMessagePersisted = options.onMessagePersisted || (() => {});
 
         // Context tracking for both participants
         this.contextUsage = {
@@ -364,7 +365,9 @@ class Arena {
             if (backend) {
                 const syncedCount = this._lastSyncedCount || 0;
                 const newMessages = sessionData.messages.slice(syncedCount);
-                for (const msg of newMessages) {
+                let contiguousSuccess = syncedCount;
+                for (let mi = 0; mi < newMessages.length; mi++) {
+                    const msg = newMessages[mi];
                     const metadata = {};
                     if (msg.reasoning_content) metadata.reasoning_content = msg.reasoning_content;
                     if (msg.thinking_signature) metadata.thinking_signature = msg.thinking_signature;
@@ -373,17 +376,30 @@ class Arena {
                     if (msg.context) metadata.context = msg.context;
                     if (msg.id) metadata.messageId = msg.id;
 
-                    backend.sendMessage(this.id, {
-                        role: msg.role || 'assistant',
-                        content: msg.content || '',
-                        speaker: msg.speaker || (msg.role === 'system' ? 'moderator' : ''),
-                        model: msg.model || (msg.speaker === this.participantA?.name
-                            ? this.participantA?.modelName
-                            : this.participantB?.modelName) || null,
-                        ...metadata
-                    }).catch(() => {});
+                    try {
+                        const persisted = await backend.sendMessage(this.id, {
+                            role: msg.role || 'assistant',
+                            content: msg.content || '',
+                            speaker: msg.speaker || (msg.role === 'system' ? 'moderator' : ''),
+                            model: msg.model || (msg.speaker === this.participantA?.name
+                                ? this.participantA?.modelName
+                                : this.participantB?.modelName) || null,
+                            ...metadata
+                        });
+                        // Update the in-memory message entry with the backend-assigned ID
+                        const msgIdx = syncedCount + mi;
+                        if (this.messages[msgIdx]) {
+                            this.messages[msgIdx].id = persisted.id;
+                            this.messages[msgIdx].embedStatus = persisted.embedStatus || 'pending';
+                            this.onMessagePersisted(this.messages[msgIdx]);
+                        }
+                        contiguousSuccess = syncedCount + mi + 1;
+                    } catch (e) {
+                        // Stop contiguous sync on first failure — retry next _saveToStorage
+                        break;
+                    }
                 }
-                this._lastSyncedCount = sessionData.messages.length;
+                this._lastSyncedCount = contiguousSuccess;
             }
 
             // Metadata (title, category, pinned, summary) is persisted through
@@ -900,6 +916,8 @@ class Arena {
             streamStats: m.streamStats || null,
             usage: m.usage || null,
             context: m.context || null,
+            embedStatus: m.embedStatus || null,
+            embedError: m.embedError || null,
             isStreaming: false
         }));
 
@@ -1459,7 +1477,8 @@ class ArenaUI {
             onMaxTurnsReached: (maxTurns) => this._showExtendOption(maxTurns),
             onContextUpdate: (contextData) => this._updateContextDisplay(contextData),
             onSave: () => this._loadHistory(),
-            onProgress: (progress) => this._updateGenerationProgress(progress)
+            onProgress: (progress) => this._updateGenerationProgress(progress),
+            onMessagePersisted: (msg) => this._onMessagePersisted(msg)
         });
 
         const systemPromptTemplate = `You are in a conversation. Your identity: {modelName}.
@@ -1527,9 +1546,11 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         });
 
         this.arena.start();
+        this._startEmbedPoll();
     }
 
     _stopConversation() {
+        this._stopEmbedPoll();
         if (this.arena) {
             this.arena.stop();
         }
@@ -1720,6 +1741,8 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
         const messageEl = document.createElement('div');
         messageEl.className = `chat-message ${msg.speaker === 'moderator' ? 'moderator' : 'assistant'}`;
+        messageEl.dataset.messageId = msg.id || '';
+        messageEl.dataset.messageIdx = this.arena?.messages?.indexOf(msg) ?? '';
 
         const speakerName = msg.speaker === 'moderator' ? 'Moderator' : (msg.speaker || 'Unknown');
         const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1809,6 +1832,64 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         // Only auto-scroll if user is near bottom (same logic as chat app)
         if (this._isNearBottom()) {
             this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+        }
+    }
+
+    _updateEmbedStatus(messageId, status, error = null) {
+        const el = this.messagesContainer?.querySelector(`.chat-message[data-message-id="${messageId}"] .embed-status`);
+        if (!el) return;
+        el.dataset.embedStatus = status || 'unknown';
+        const tooltip = status === 'embedded'
+            ? 'Embedded in vector search'
+            : status === 'pending'
+                ? 'Embedding queued...'
+                : status === 'failed'
+                    ? `Embed failed: ${error || 'unknown'}`
+                    : 'Embed status unknown';
+        el.title = tooltip;
+    }
+
+    _startEmbedPoll() {
+        this._stopEmbedPoll();
+        const config = window.CHAT_CONFIG || {};
+        if (!config.enableBackend || !this.arena?.id) return;
+        this._embedPollChatId = this.arena.id;
+        const base = config.backendUrl || '';
+        const url = `${base}/api/embed-events?chatId=${encodeURIComponent(this.arena.id)}`;
+        const es = new EventSource(url);
+        es.addEventListener('embed-status', (e) => {
+            try {
+                const event = JSON.parse(e.data);
+                if (!event || event.chatId !== this._embedPollChatId) return;
+                this._updateEmbedStatus(event.messageId, event.embedStatus, event.embedError);
+            } catch (err) {}
+        });
+        es.onerror = () => {
+            if (es.readyState === EventSource.CLOSED) {
+                console.warn('[Arena Embed] SSE connection closed permanently for:', this._embedPollChatId);
+            }
+        };
+        this._embedEventSource = es;
+    }
+
+    _stopEmbedPoll() {
+        if (this._embedEventSource) {
+            this._embedEventSource.close();
+            this._embedEventSource = null;
+        }
+        this._embedPollChatId = null;
+    }
+
+    _onMessagePersisted(msg) {
+        // Update the DOM element's data-message-id after backend assigns an ID
+        if (!msg.id || !this.messagesContainer) return;
+        const idx = this.arena?.messages?.indexOf(msg);
+        if (idx === undefined || idx < 0) return;
+        const children = this.messagesContainer.querySelectorAll('.chat-message');
+        const target = children[idx];
+        if (target && !target.dataset.messageId) {
+            target.dataset.messageId = msg.id;
+            this._updateEmbedStatus(msg.id, msg.embedStatus || 'pending', msg.embedError);
         }
     }
 
@@ -2300,6 +2381,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this.arena.onContextUpdate = (contextData) => this._updateContextDisplay(contextData);
             this.arena.onSave = () => this._loadHistory();
             this.arena.onProgress = (progress) => this._updateGenerationProgress(progress);
+            this.arena.onMessagePersisted = (msg) => this._onMessagePersisted(msg);
 
             // Restore settings to UI
             const topicMsg = arena.messages.find(m => m.role === 'system' && m.speaker === 'moderator');
@@ -2344,6 +2426,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 turn: this.arena.currentTurn
             });
 
+            this._startEmbedPoll();
             await this._loadHistory();
         } catch (err) {
             this._showError(`Failed to load arena: ${err.message}`);

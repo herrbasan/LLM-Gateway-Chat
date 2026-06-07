@@ -389,6 +389,10 @@ const activeConversations = new Map(); // chatId -> Conversation
 // Chats that received new content while in background (cleared when viewed)
 const chatsWithNewContent = new Set();
 
+// Embed status — SSE event source for real-time updates
+let _embedEventSource = null;
+let _embedEventChatId = null;
+
 let client = new GatewayClient({ baseUrl: GATEWAY_URL });
 let models = [];
 let currentModel = '';
@@ -619,6 +623,9 @@ function buildExchangeElement(exchange) {
     userEl.innerHTML = `
         <div class="message-header">
             You <span class="message-timestamp">${userTimestamp}</span>
+            <span class="embed-status" data-embed-status="unknown" title="Embed status unknown">
+                <span class="embed-status-dot"></span>
+            </span>
             <span class="user-pending-indicator visible">
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
@@ -634,6 +641,10 @@ function buildExchangeElement(exchange) {
         conversation.deleteExchange(exchange.id);
         renderConversation();
     });
+
+    // Set embed status directly on detached element (not in DOM yet)
+    const userEmbedEl = userEl.querySelector('.embed-status');
+    if (userEmbedEl) _applyEmbedStatusAttrs(userEmbedEl, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError);
 
     // Assistant message - return as sibling in fragment, not child
     if (exchange.assistant?.content || exchange.assistant?.isStreaming) {
@@ -651,7 +662,11 @@ function buildExchangeElement(exchange) {
             assistantEl.dataset.timestampStripped = 'true';
         }
         updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
-        setEmbedStatus(exchange.id, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
+        // Set embed status directly on detached elements (not in DOM yet)
+        const uEmbed = userEl.querySelector('.embed-status');
+        if (uEmbed) _applyEmbedStatusAttrs(uEmbed, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError);
+        const aEmbed = assistantEl.querySelector('.embed-status');
+        if (aEmbed) _applyEmbedStatusAttrs(aEmbed, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
 
         if (exchange.assistant.isComplete) {
             finalizeAssistantElement(assistantEl, exchange.id);
@@ -850,6 +865,7 @@ async function init() {
     const initContainer = getOrCreateContainer(currentChatId);
     initContainer.style.display = 'flex'; // show the active chat
     renderConversation();
+    connectEmbedEvents(currentChatId);
 
     // Check gateway status
     checkGatewayStatus();
@@ -2337,6 +2353,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     });
                     finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context, streamStats);
                     setEmbedStatus(exchangeId, 'pending');
+                    connectEmbedEvents(chatId);
                     scrollToBottom();
                     break;
                 case 'progress':
@@ -2485,6 +2502,7 @@ function renderExchange(exchange, targetContainer = null) {
             }
             updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
             setEmbedStatus(exchange.id, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
+            setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
             // In renderExchange, toolEl is already in DOM, so we can insert assistant as sibling
             // This keeps tool and assistant as separate message bubbles
             toolEl.insertAdjacentElement('afterend', assistantEl);
@@ -2520,6 +2538,9 @@ function renderExchange(exchange, targetContainer = null) {
     userEl.innerHTML = `
         <div class="message-header">
             You <span class="message-timestamp">${userTimestamp}</span>
+            <span class="embed-status" data-embed-status="unknown" title="Embed status unknown">
+                <span class="embed-status-dot"></span>
+            </span>
             <span class="user-pending-indicator visible">
                 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
             </span>
@@ -2539,6 +2560,8 @@ function renderExchange(exchange, targetContainer = null) {
     });
 
     container?.appendChild(userEl);
+
+    setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
 
     // Initialize Lightbox declarative handlers for attached images
     if (exchange.user?.attachments?.length > 0) {
@@ -2571,6 +2594,7 @@ function renderExchange(exchange, targetContainer = null) {
             assistantEl.dataset.timestampStripped = 'true';
         }
         updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
+        setEmbedStatus(exchange.id, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
         getActiveContainer()?.appendChild(assistantEl);
 
         if (exchange.assistant.isComplete) {
@@ -3105,9 +3129,14 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     }
 }
 
-function setEmbedStatus(exchangeId, status, error = null) {
-    const el = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"] .embed-status`);
+function setEmbedStatus(exchangeId, status, error = null, role = 'assistant') {
+    const el = document.querySelector(`.chat-message.${role}[data-exchange-id="${exchangeId}"] .embed-status`);
     if (!el) return;
+    _applyEmbedStatusAttrs(el, status, error);
+}
+
+// Direct attribute set on an embed-status element (no DOM query — for detached elements)
+function _applyEmbedStatusAttrs(el, status, error = null) {
     el.dataset.embedStatus = status || 'unknown';
     const tooltip = status === 'embedded'
         ? 'Embedded in vector search'
@@ -3117,6 +3146,87 @@ function setEmbedStatus(exchangeId, status, error = null) {
                 ? `Embed failed: ${error || 'unknown'}`
                 : 'Embed status unknown';
     el.title = tooltip;
+}
+
+function connectEmbedEvents(chatId) {
+    disconnectEmbedEvents();
+    if (!chatId || CONFIG.enableBackend !== true) return;
+    _embedEventChatId = chatId;
+    const base = CONFIG.backendUrl || '';
+    const url = `${base}/api/embed-events?chatId=${encodeURIComponent(chatId)}`;
+    const es = new EventSource(url);
+    es.addEventListener('embed-status', (e) => {
+        try {
+            const event = JSON.parse(e.data);
+            if (!event || event.chatId !== _embedEventChatId) return;
+            _applyEmbedEvent(event);
+        } catch (err) {}
+    });
+    es.onerror = () => {
+        // EventSource auto-reconnects; log only on hard failures
+        if (es.readyState === EventSource.CLOSED) {
+            console.warn('[Embed] SSE connection closed permanently for chat:', chatId);
+        }
+    };
+    _embedEventSource = es;
+}
+
+function disconnectEmbedEvents() {
+    if (_embedEventSource) {
+        _embedEventSource.close();
+        _embedEventSource = null;
+    }
+    _embedEventChatId = null;
+}
+
+function _applyEmbedEvent(event) {
+    // event: { chatId, msgIdx, messageId, embedStatus, embedError }
+    const conv = activeConversations.get(event.chatId);
+    if (!conv || !conv.exchanges) return;
+
+    // Try exact msgIdx match first (works for loaded exchanges with _asstMsgIdx/_userMsgIdx)
+    for (const ex of conv.exchanges) {
+        if (ex._asstMsgIdx === event.msgIdx) {
+            if (ex.assistant && ex.assistant.embedStatus !== event.embedStatus) {
+                ex.assistant.embedStatus = event.embedStatus;
+                ex.assistant.embedError = event.embedError || null;
+            }
+            setEmbedStatus(ex.id, event.embedStatus, event.embedError);
+            return;
+        }
+        if (ex._userMsgIdx === event.msgIdx) {
+            setEmbedStatus(ex.id, event.embedStatus, event.embedError, 'user');
+            return;
+        }
+    }
+
+    // Fallback: positional matching for live exchanges that don't have msgIdx set yet
+    // (SSE event may arrive before _syncMessage's .then() sets _asstMsgIdx)
+    const asstExchanges = conv.exchanges.filter(ex =>
+        ex.assistant && (ex.assistant.content || ex.assistant.isComplete)
+    );
+    const userExchanges = conv.exchanges.filter(ex =>
+        ex.user && ex.user.content
+    );
+
+    // Estimate exchange index from msgIdx: even=user, odd=assistant (simple chats)
+    // For tool exchanges, this is approximate but works as a fallback
+    const estIdx = Math.floor(event.msgIdx / 2);
+    const isUser = event.msgIdx % 2 === 0;
+
+    if (isUser && estIdx < userExchanges.length) {
+        const ex = userExchanges[estIdx];
+        if (ex._userMsgIdx === undefined) ex._userMsgIdx = event.msgIdx;
+        setEmbedStatus(ex.id, event.embedStatus, event.embedError, 'user');
+    } else if (!isUser && estIdx < asstExchanges.length) {
+        const ex = asstExchanges[estIdx];
+        if (ex._asstMsgIdx === undefined) ex._asstMsgIdx = event.msgIdx;
+        if (ex.assistant && ex.assistant.embedStatus !== event.embedStatus) {
+            ex.assistant.embedStatus = event.embedStatus;
+            ex.assistant.embedError = event.embedError || null;
+        }
+        setEmbedStatus(ex.id, event.embedStatus, event.embedError);
+    }
 }
 
 function updateAssistantContent(el, content, reasoningContent = null) {
@@ -3833,6 +3943,9 @@ async function switchChat(targetChatId) {
         const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${targetChatId}"]`);
         if (item) item.classList.remove('new-content');
     }
+
+    // Start embed polling for the newly active chat
+    connectEmbedEvents(targetChatId);
 
     console.log('%c📋 DISPLAY %c' + (chatInfo?.title || 'New Chat') + ' %c' + targetChatId,
         'font-weight:bold;color:#4fc3f7', 'color:#aaa', 'color:#666');

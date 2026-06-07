@@ -2,6 +2,7 @@ const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { EventEmitter } = require('events');
 
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
@@ -313,15 +314,22 @@ function getOrLoadUserDb(dbPath) {
             const sessions = {};
             for (const s of db.find('_type', 'session')) sessions[s.id] = s;
             const stale = [];
+            const missingStatus = {}; // convNdbId -> Set of msg indices needing status backfill
             for (const c of db.find('_type', 'conversation')) {
                 if (!c.messages) continue;
+                const missing = [];
                 for (let idx = 0; idx < c.messages.length; idx++) {
                     const m = c.messages[idx];
                     if (!m.id) continue;
                     if (!embeddingsCol.get(m.id)) {
                         stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+                    } else if (!m.embedStatus || m.embedStatus === 'pending') {
+                        // Message is in nVDB but embedStatus was never written (legacy data)
+                        // or the status update failed silently after a successful embed
+                        missing.push(idx);
                     }
                 }
+                if (missing.length > 0) missingStatus[c._id] = missing;
             }
             if (stale.length > 0) {
                 logger.info('Lazy reconciliation', { count: stale.length, dbPath }, 'Server');
@@ -335,15 +343,26 @@ function getOrLoadUserDb(dbPath) {
                     }
                 })();
             }
+            if (Object.keys(missingStatus).length > 0) {
+                let count = 0;
+                for (const [convNdbId, indices] of Object.entries(missingStatus)) {
+                    for (const idx of indices) {
+                        db.set(convNdbId, `messages.${idx}.embedStatus`, 'embedded');
+                        db.set(convNdbId, `messages.${idx}.embedError`, null);
+                        count++;
+                    }
+                }
+                logger.info('Embed status backfilled', { count, dbPath }, 'Server');
+            }
         }, 3000);
     }
     
     return instance;
 }
 
-// ============================================
-// Auth & Routing
-// ============================================
+// Embed event bus — SSE clients subscribe to receive real-time embed status updates
+const embedEvents = new EventEmitter();
+embedEvents.setMaxListeners(100);
 
 const L = () => logger || { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -547,16 +566,18 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
             }));
             instance.needsFlush++;
 
-            // Mark message as embedded in the conversation doc
+            // Mark message as embedded in the conversation doc (atomic field writes — no read-modify-write race)
             try {
-                const conv = instance.db.find('_id', convNdbId)[0];
-                if (conv?.messages?.[msgIdx]) {
-                    conv.messages[msgIdx].embedStatus = 'embedded';
-                    conv.messages[msgIdx].embedAttempts = attempt + 1;
-                    conv.messages[msgIdx].embedError = null;
-                    instance.db.set(conv._id, 'messages', conv.messages);
-                }
-            } catch (e) {}
+                instance.db.set(conv._id, `messages.${msgIdx}.embedStatus`, 'embedded');
+                instance.db.set(conv._id, `messages.${msgIdx}.embedAttempts`, attempt + 1);
+                instance.db.set(conv._id, `messages.${msgIdx}.embedError`, null);
+                embedEvents.emit('status', {
+                    chatId: session.id, msgIdx, messageId: msg.id,
+                    embedStatus: 'embedded', embedError: null
+                });
+            } catch (e) {
+                L().error('Failed to persist embed status', e, { msgId: msg.id, convNdbId }, 'Embed');
+            }
 
             L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: text.length, attempt: attempt + 1 }, 'Embed');
             return;
@@ -566,13 +587,15 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
             if (err.message?.includes('too many') && err.message?.includes('token')) {
                 L().error('Embed too many tokens', err, { msgId: msg.id, charLen: text.length }, 'Embed');
                 try {
-                    const conv = instance.db.find('_id', convNdbId)[0];
-                    if (conv?.messages?.[msgIdx]) {
-                        conv.messages[msgIdx].embedStatus = 'failed';
-                        conv.messages[msgIdx].embedError = 'too_many_tokens';
-                        instance.db.set(conv._id, 'messages', conv.messages);
-                    }
-                } catch (e) {}
+                    instance.db.set(conv._id, `messages.${msgIdx}.embedStatus`, 'failed');
+                    instance.db.set(conv._id, `messages.${msgIdx}.embedError`, 'too_many_tokens');
+                    embedEvents.emit('status', {
+                        chatId: session.id, msgIdx, messageId: msg.id,
+                        embedStatus: 'failed', embedError: 'too_many_tokens'
+                    });
+                } catch (e) {
+                    L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
+                }
                 break;
             }
 
@@ -585,13 +608,15 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
 
     L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3, prevFails: _prevFails }, 'Embed');
     try {
-        const conv = instance.db.find('_id', convNdbId)[0];
-        if (conv?.messages?.[msgIdx]) {
-            conv.messages[msgIdx].embedStatus = 'failed';
-            conv.messages[msgIdx].embedError = lastError?.message || 'unknown';
-            instance.db.set(conv._id, 'messages', conv.messages);
-        }
-    } catch (e) {}
+        instance.db.set(conv._id, `messages.${msgIdx}.embedStatus`, 'failed');
+        instance.db.set(conv._id, `messages.${msgIdx}.embedError`, lastError?.message || 'unknown');
+        embedEvents.emit('status', {
+            chatId: session.id, msgIdx, messageId: msg.id,
+            embedStatus: 'failed', embedError: lastError?.message || 'unknown'
+        });
+    } catch (e) {
+        L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
+    }
 
     const delays = [5000, 30000, 120000, 600000, 1800000];
     const newFailCount = _prevFails + 1;
@@ -616,6 +641,51 @@ const routes = {
     json(res, {
       status: 'ok',
       version: '1.0.0'
+    });
+  },
+
+  // SSE endpoint for real-time embed status updates
+  'GET /api/embed-events': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+
+    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const chatId = parsedUrl.searchParams.get('chatId');
+    if (!chatId) {
+      json(res, { error: 'Missing chatId query param' }, 400, req);
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+
+    // Send initial comment to establish connection
+    res.write(':ok\n\n');
+
+    const onStatus = (event) => {
+      if (event.chatId !== chatId) return;
+      try {
+        res.write(`event: embed-status\ndata: ${JSON.stringify(event)}\n\n`);
+      } catch (e) {
+        // Client disconnected — clean up below
+      }
+    };
+
+    embedEvents.on('status', onStatus);
+
+    // Keepalive every 15s
+    const keepalive = setInterval(() => {
+      try { res.write(':keepalive\n\n'); } catch (e) {}
+    }, 15000);
+
+    // Cleanup on disconnect
+    req.on('close', () => {
+      embedEvents.off('status', onStatus);
+      clearInterval(keepalive);
     });
   },
 

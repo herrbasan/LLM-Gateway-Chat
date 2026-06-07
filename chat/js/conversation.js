@@ -33,8 +33,16 @@ export class Conversation {
         if (metadata) Object.assign(body, metadata);
         console.log('[Conversation] Syncing to backend:', role, 'sessionId:', this.sessionId);
         backendClient.sendMessage(this.sessionId, body)
-            .then(() => {
+            .then((msg) => {
                 console.log('[Conversation] Backend sync OK:', role, 'sessionId:', this.sessionId);
+                // Track backend msgIdx on exchange for SSE embed event matching
+                if (exchangeId && msg && msg.idx !== undefined) {
+                    const ex = this.exchanges.find(e => e.id === exchangeId);
+                    if (ex) {
+                        if (role === 'user') ex._userMsgIdx = msg.idx;
+                        else if (role === 'assistant') ex._asstMsgIdx = msg.idx;
+                    }
+                }
                 if (exchangeId) this._pendingBackendSync.delete(exchangeId);
             })
             .catch(err => {
@@ -782,7 +790,8 @@ export class Conversation {
                     regularExchange = {
                         id: 'ex_' + (Date.now() + Math.random()),
                         timestamp: new Date(msg.createdAt).getTime() || Date.now(),
-                        user: { role: 'user', content: msg.content || '', attachments: msg.attachments || [] },
+                        _userMsgIdx: msg.idx,
+                        user: { role: 'user', content: msg.content || '', attachments: msg.attachments || [], embedStatus: msg.embedStatus || null, embedError: msg.embedError || null },
                         assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
                     };
                 } else if (msg.role === 'tool') {
@@ -807,6 +816,7 @@ export class Conversation {
                     if (!content && !msg.reasoning_content) continue;
                     const target = lastToolExchange || regularExchange;
                     if (target) {
+                        target._asstMsgIdx = msg.idx;
                         if (content) {
                             target.assistant.content = target.assistant.content ? target.assistant.content + '\n' + content : content;
                         }

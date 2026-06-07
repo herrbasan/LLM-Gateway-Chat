@@ -190,11 +190,12 @@ The server auto-restarts when files change (nodemon or similar). The share is at
 └──────┬──────┘                      └──────┬──────┘               └─────────────┘
        │                                    │
        │ REST (configurable port)           │ /v1/embeddings
-       ▼                                    ▼
-┌─────────────┐                    ┌─────────────┐
-│ Chat Backend│◄──── nDB/nVDB ───►│ Rust DBs    │
-│ (Node.js)   │                    │ (portable)  │
-└─────────────┘                    └─────────────┘
+       │ + SSE (embed events)               ▼
+       ▼                            ┌─────────────┐
+┌─────────────┐                    │ Rust DBs    │
+│ Chat Backend│◄──── nDB/nVDB ───►│ (portable)  │
+│ (Node.js)   │                    └─────────────┘
+└─────────────┘
        │
        │ SSE (EventSource)
        ▼
@@ -207,7 +208,7 @@ The server auto-restarts when files change (nodemon or similar). The share is at
 
 | Module | Purpose |
 |--------|---------|
-| `chat.js` | UI controller, event handlers, message rendering, streaming logic, archive tools, login, presets, admin UI |
+| `chat.js` | UI controller, event handlers, message rendering, streaming logic, archive tools, login, presets, admin UI, embed status monitoring via SSE |
 | `client-sdk.js` | `GatewayClient` class - dual-mode (SSE + WebSocket) transport, JSON-RPC 2.0, auto-reconnect, stream registry |
 | `api-client.js` | `BackendClient` class - REST calls to Node backend (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`, `/api/user/settings`) |
 | `conversation.js` | `Conversation` class - message history, versioning, API message formatting, backend sync, `thinking_signature` propagation |
@@ -270,7 +271,7 @@ Key variables:
 | Data Type | Storage | Key |
 |-----------|---------|-----|
 | Sessions | nDB | `_type: 'session'`, `id: chat_xxx` |
-| Conversation messages | nDB | `_type: 'conversation'`, `id: chat_xxx`, inline `messages` array |
+| Conversation messages | nDB | `_type: 'conversation'`, `id: chat_xxx`, inline `messages` array, each with `embedStatus` (`pending`/`embedded`/`failed`) |
 | Embedding vectors | nVDB | `chatId` + `msgIdx` payload, keyed by message ID |
 | User settings | nDB | `_type: 'user_settings'`, `id: {userId}` — operationMode, temperature, language, presets, etc. |
 | User auth | nDB (`users_db`) | `_type: 'user'` — username, passwordHash, dbPath, rights, userToken |
@@ -280,7 +281,15 @@ Key variables:
 | MCP server config | localStorage | `mcp-servers`, `mcp-enabledTools` |
 | Image files | nDB Buckets | `/api/buckets/images/{sessionId}/{filename}`, garbage-collected on chat delete |
 
-**Data model**: One conversation document per session. Messages are an inline array indexed by `idx`. nVDB stores vectors keyed by message ID with `{ chatId, msgIdx }` payload for back-reference.
+**Data model**: One conversation document per session. Messages are an inline array indexed by `idx`. nVDB stores vectors keyed by message ID with `{ chatId, msgIdx }` payload for back-reference. Each message carries an `embedStatus` field (`pending` → `embedded` → `failed`) updated by the server and pushed to the frontend in real-time via SSE.
+
+### Embedding & Monitoring
+
+- **Async Fire-and-Forget**: `embedMessageAsync` runs after each `POST /api/chats/:id/messages`, embedding user and assistant messages (tool messages skipped).
+- **Self-Healing**: On startup, the server reconciles nDB messages against nVDB — missing vectors are re-embedded, orphaned `pending`/missing `embedStatus` fields are backfilled.
+- **Real-Time SSE Notifications**: `GET /api/embed-events?chatId=xxx` streams `embed-status` events as each message transitions from `pending` → `embedded`/`failed`. Chat uses `msgIdx` matching; Arena uses `messageId` (direct DOM attribute).
+- **Visual Indicators**: Small colored dots in message headers — 🟡 yellow pulse (pending), 🟢 green (embedded), 🔴 red (failed), ⚪ gray (unknown). Shown on both user and assistant bubbles for monitoring.
+- **Retry & Backoff**: Failed embeddings retry 3× with exponential backoff, then enter a persistent queue with escalating delays (5s → 30s → 2min → 10min → 30min).
 
 ### Image Storage & Garbage Collection Architecture
 - **Zero JSON Bloat:** MCP tool responses returning large base64 images are intercepted by the frontend. The base64 is uploaded via `/api/buckets/images/...`, returning a lightweight URL string replacing the massive base64 blob in the JSON response sent to the Gateway.

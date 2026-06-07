@@ -41,7 +41,7 @@ export class ChatHistory {
         if (USE_BACKEND && backendClient.user) {
             for (const conv of this.conversations) {
                 if (conv._dirty) {
-                    backendClient.updateSession(conv.sessionId || conv.id, { 
+                    backendClient.updateSession(conv.id, { 
                         pinned: !!conv.pinned,
                         title: conv.title,
                         model: conv.model,
@@ -60,7 +60,6 @@ export class ChatHistory {
             const updatedAt = new Date(session.updatedAt).getTime();
             return {
                 id: session.id,
-                sessionId: session.id,
                 title: session.title || 'New Chat',
                 createdAt: !isNaN(createdAt) ? createdAt : Date.now(),
                 updatedAt: !isNaN(updatedAt) ? updatedAt : Date.now(),
@@ -80,10 +79,8 @@ export class ChatHistory {
 
     async create() {
         const id = 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-        const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
         const conversation = {
             id,
-            sessionId,
             title: 'New Chat',
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -102,7 +99,6 @@ export class ChatHistory {
                 const serverSession = await backendClient.createSession({ title: 'New Chat' });
                 console.log('[ChatHistory] Backend session created:', serverSession.id, '(local was:', id, ')');
                 conversation.id = serverSession.id;
-                conversation.sessionId = serverSession.id;
                 conversation.createdAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.createdAt).getTime());
                 conversation.updatedAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.updatedAt).getTime());
                 this.activeId = serverSession.id;
@@ -185,18 +181,7 @@ export class ChatHistory {
         return this.conversations.find(c => c.id === id);
     }
 
-    getSessionId(id) {
-        const meta = this.conversations.find(c => c.id === id);
-        return meta?.sessionId || null;
-    }
 
-    updateSessionId(id, sessionId) {
-        const meta = this.conversations.find(c => c.id === id);
-        if (!meta) return false;
-        meta.sessionId = sessionId;
-        this._saveList();
-        return true;
-    }
 
     async getActiveId() {
         return await storage.getActiveChatId();

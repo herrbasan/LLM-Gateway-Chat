@@ -127,7 +127,9 @@ export const arenaStorage = {
                 thinking_signature: m.thinking_signature || null,
                 streamStats: m.streamStats || null,
                 usage: m.usage || null,
-                context: m.context || null
+                context: m.context || null,
+                embedStatus: m.embedStatus || null,
+                embedError: m.embedError || null
             }))
         };
     },
