@@ -2170,11 +2170,13 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this._historyCache = history.map(h => ({ ...h, _dirty: false }));
             this._historyLoaded = true;
 
-            // Sort: pinned first, then by updatedAt desc (matches chat)
+            // Sort: pinned first, then by updatedAt desc, createdAt tiebreaker
             const sorted = [...this._historyCache].sort((a, b) => {
                 if (a.pinned && !b.pinned) return -1;
                 if (!a.pinned && b.pinned) return 1;
-                return (b.updatedAt || 0) - (a.updatedAt || 0);
+                const diff = (b.updatedAt || 0) - (a.updatedAt || 0);
+                if (diff !== 0) return diff;
+                return (b.createdAt || 0) - (a.createdAt || 0);
             });
 
             if (!sorted || sorted.length === 0) {
@@ -2566,7 +2568,17 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                         await navigator.clipboard.writeText(json);
                         nui.components.toast?.success?.('Arena JSON copied to clipboard');
                     } catch (err) {
-                        console.error(err);
+                        // Fallback for insecure origins (HTTP)
+                        try {
+                            const ta = document.createElement('textarea');
+                            ta.value = json; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                            document.body.appendChild(ta); ta.focus(); ta.select();
+                            document.execCommand('copy'); document.body.removeChild(ta);
+                            nui.components.toast?.success?.('Arena JSON copied to clipboard');
+                        } catch (e) {
+                            console.error('Failed to copy:', e);
+                            nui.components.toast?.error?.('Copy failed — check console');
+                        }
                     }
                     break;
                 }

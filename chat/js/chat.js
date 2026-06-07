@@ -1253,7 +1253,7 @@ async function populateModelSelect() {
         
         // Bind change event via NUI
         elements.modelSelect.addEventListener('nui-change', (e) => {
-            currentModel = e.detail.values[0] || '';
+            currentModel = (e.detail?.values?.[0]) || e.detail?.value || '';
             storage.setPref('default-model', currentModel).catch(() => {});
             updateOverallContext();
             updateVisionToggleVisibility();
@@ -1434,7 +1434,7 @@ function setupEventListeners() {
 
     // TTS voice
     elements.ttsVoiceSelect?.addEventListener('nui-change', (e) => {
-        ttsVoice = e.detail.values[0] || '';
+        ttsVoice = (e.detail?.values?.[0]) || e.detail?.value || '';
         storage.setPref('tts-voice', ttsVoice).catch(() => {});
     });
 
@@ -4080,9 +4080,11 @@ async function exportChatAsJson(chatId, btn) {
 
         const formattedJson = JSON.stringify(exportData, null, 2);
         try {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                await navigator.clipboard.writeText(formattedJson);
-            } else {
+            await navigator.clipboard.writeText(formattedJson);
+            nui.components.toast?.success?.('JSON copied to clipboard');
+        } catch (clipErr) {
+            // Clipboard API may fail on insecure origins (HTTP) — fall back to textarea
+            try {
                 const textArea = document.createElement('textarea');
                 textArea.value = formattedJson;
                 textArea.style.position = 'fixed';
@@ -4092,12 +4094,12 @@ async function exportChatAsJson(chatId, btn) {
                 textArea.select();
                 document.execCommand('copy');
                 document.body.removeChild(textArea);
+                nui.components.toast?.success?.('JSON copied to clipboard');
+            } catch (fallbackErr) {
+                console.error('Failed to copy JSON to clipboard', fallbackErr);
+                console.log(formattedJson);
+                nui.components.toast?.success?.('JSON logged to console');
             }
-            nui.components.toast?.success?.('JSON copied to clipboard');
-        } catch (clipErr) {
-            console.error('Failed to copy JSON to clipboard', clipErr);
-            console.log(formattedJson);
-            nui.components.toast?.success?.('JSON logged to console');
         }
     } catch (e) {
         console.error('Failed to parse chat data', e);
