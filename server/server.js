@@ -568,9 +568,9 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
 
             // Mark message as embedded in the conversation doc (atomic field writes — no read-modify-write race)
             try {
-                instance.db.set(conv._id, `messages.${msgIdx}.embedStatus`, 'embedded');
-                instance.db.set(conv._id, `messages.${msgIdx}.embedAttempts`, attempt + 1);
-                instance.db.set(conv._id, `messages.${msgIdx}.embedError`, null);
+                instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'embedded');
+                instance.db.set(convNdbId, `messages.${msgIdx}.embedAttempts`, attempt + 1);
+                instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, null);
                 embedEvents.emit('status', {
                     chatId: session.id, msgIdx, messageId: msg.id,
                     embedStatus: 'embedded', embedError: null
@@ -587,8 +587,8 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
             if (err.message?.includes('too many') && err.message?.includes('token')) {
                 L().error('Embed too many tokens', err, { msgId: msg.id, charLen: text.length }, 'Embed');
                 try {
-                    instance.db.set(conv._id, `messages.${msgIdx}.embedStatus`, 'failed');
-                    instance.db.set(conv._id, `messages.${msgIdx}.embedError`, 'too_many_tokens');
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, 'too_many_tokens');
                     embedEvents.emit('status', {
                         chatId: session.id, msgIdx, messageId: msg.id,
                         embedStatus: 'failed', embedError: 'too_many_tokens'
@@ -608,8 +608,8 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
 
     L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3, prevFails: _prevFails }, 'Embed');
     try {
-        instance.db.set(conv._id, `messages.${msgIdx}.embedStatus`, 'failed');
-        instance.db.set(conv._id, `messages.${msgIdx}.embedError`, lastError?.message || 'unknown');
+        instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
+        instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, lastError?.message || 'unknown');
         embedEvents.emit('status', {
             chatId: session.id, msgIdx, messageId: msg.id,
             embedStatus: 'failed', embedError: lastError?.message || 'unknown'

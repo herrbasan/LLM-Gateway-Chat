@@ -2502,11 +2502,13 @@ function renderExchange(exchange, targetContainer = null) {
                 assistantEl.dataset.timestampStripped = 'true';
             }
             updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
-            setEmbedStatus(exchange.id, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
-            setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
+            const aEmbed = assistantEl.querySelector('.embed-status');
+            if (aEmbed) _applyEmbedStatusAttrs(aEmbed, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
             // In renderExchange, toolEl is already in DOM, so we can insert assistant as sibling
             // This keeps tool and assistant as separate message bubbles
             toolEl.insertAdjacentElement('afterend', assistantEl);
+            // User embed status: userEl is already in DOM at this point, so setEmbedStatus works
+            setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
             if (exchange.assistant.isComplete) {
                 finalizeAssistantElement(assistantEl, exchange.id);
             }
@@ -2595,7 +2597,8 @@ function renderExchange(exchange, targetContainer = null) {
             assistantEl.dataset.timestampStripped = 'true';
         }
         updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
-        setEmbedStatus(exchange.id, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
+        const aEmbed = assistantEl.querySelector('.embed-status');
+        if (aEmbed) _applyEmbedStatusAttrs(aEmbed, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
         getActiveContainer()?.appendChild(assistantEl);
 
         if (exchange.assistant.isComplete) {
