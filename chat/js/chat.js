@@ -3484,14 +3484,17 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     if (finalContext) {
         updateUsageDisplay(el, finalContext, finalUsage, finalStats);
     } else if (exchange && exchange.assistant?.content) {
-        // If we lack explicit context stats, fallback to a heuristic estimation if it's rendered in history
-        const userContent = exchange.user ? (typeof exchange.user.content === 'string' ? exchange.user.content : '') : '';
-        let assistantContent = typeof exchange.assistant.content === 'string' ? exchange.assistant.content : '';
-        
-        // Strip <think>...</think> blocks
-        assistantContent = assistantContent.replace(/<think>[\s\S]*?<\/think>/g, '');
-        
-        const roughTokens = Math.ceil((userContent.length + assistantContent.length) / 4);
+        // Fallback: estimate cumulative tokens by summing all exchanges up to this one
+        let cumulativeChars = 0;
+        const allExchanges = conversation.getAll();
+        for (const ex of allExchanges) {
+            const userText = ex.user && typeof ex.user.content === 'string' ? ex.user.content : '';
+            let asstText = ex.assistant && typeof ex.assistant.content === 'string' ? ex.assistant.content : '';
+            asstText = asstText.replace(/<think>[\s\S]*?<\/think>/g, '');
+            cumulativeChars += userText.length + asstText.length;
+            if (ex.id === exchange.id) break;
+        }
+        const roughTokens = Math.ceil(cumulativeChars / 4);
         updateUsageDisplay(el, { used_tokens: roughTokens, isEstimate: true });
     }
 
