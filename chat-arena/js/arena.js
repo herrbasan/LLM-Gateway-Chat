@@ -1789,7 +1789,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
         contentHtml += '</div>';
 
-        const embedStatus = msg.embedStatus || 'unknown';
+        const embedStatus = msg.embedStatus || 'pending';
         const embedTooltip = embedStatus === 'embedded'
             ? 'Embedded in vector search'
             : embedStatus === 'pending'
@@ -1841,7 +1841,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     _updateEmbedStatus(messageId, status, error = null) {
         const el = this.messagesContainer?.querySelector(`.chat-message[data-message-id="${messageId}"] .embed-status`);
         if (!el) return;
-        el.dataset.embedStatus = status || 'unknown';
+        el.dataset.embedStatus = status || 'pending';
         const tooltip = status === 'embedded'
             ? 'Embedded in vector search'
             : status === 'pending'
