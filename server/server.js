@@ -322,10 +322,10 @@ function getOrLoadUserDb(dbPath) {
                     const m = c.messages[idx];
                     if (!m.id) continue;
                     if (!embeddingsCol.get(m.id)) {
+                        // Not in nVDB at all — needs full re-embed
                         stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-                    } else if (!m.embedStatus || m.embedStatus === 'pending') {
-                        // Message is in nVDB but embedStatus was never written (legacy data)
-                        // or the status update failed silently after a successful embed
+                    } else if (!m.embedStatus || m.embedStatus === 'pending' || m.embedStatus === 'failed') {
+                        // In nVDB but status was never written, still pending, or previously failed — backfill to embedded
                         missing.push(idx);
                     }
                 }
