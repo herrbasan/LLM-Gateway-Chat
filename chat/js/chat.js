@@ -4025,6 +4025,8 @@ async function exportChatAsJson(chatId, btn) {
                         isStreaming: ex.assistant.isStreaming,
                         usage: ex.assistant.usage,
                         context: ex.assistant.context,
+                        embedStatus: ex.assistant.embedStatus || null,
+                        embedError: ex.assistant.embedError || null,
                     } : null,
                 };
             }
@@ -4032,13 +4034,18 @@ async function exportChatAsJson(chatId, btn) {
                 id: ex.id,
                 type: ex.type,
                 timestamp: ex.timestamp,
-                user: ex.user ? { content: ex.user.content, attachments: ex.user.attachments } : null,
+                user: ex.user ? { content: ex.user.content, attachments: ex.user.attachments, embedStatus: ex.user.embedStatus || null, embedError: ex.user.embedError || null } : null,
                 assistant: ex.assistant ? {
                     content: ex.assistant.content,
                     isComplete: ex.assistant.isComplete,
                     isStreaming: ex.assistant.isStreaming,
                     usage: ex.assistant.usage,
                     context: ex.assistant.context,
+                    embedStatus: ex.assistant.embedStatus || null,
+                    embedError: ex.assistant.embedError || null,
+                    reasoning_content: ex.assistant.reasoning_content || null,
+                    thinking_signature: ex.assistant.thinking_signature || null,
+                    streamStats: ex.assistant.streamStats || null,
                 } : null,
             };
         });
