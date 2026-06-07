@@ -56,6 +56,16 @@ the "operation mode" select does not save the setting to the database. On reload
 
 Status: Resolved — Changed event listener from `change` on inner `<select>` to `nui-change` on `<nui-select>` component. Fixed setting initial value on reload to use `.setValue(opMode)`.
 
+## LLM Gateway Issues (external project)
+
+Thinking on the Qwen model produces `nullnullnullnullnullnullnullnullnullnull` as output. This is an issue with the model response parsing in the LLM Gateway. Frontend workaround exists in `Conversation._cleanModelArtifacts`.
+
+The `</think>` content terminator leaks into the response content. Same fix: gateway should split reasoning from content at the `</think>` marker rather than emitting the terminator as content.
+
+Status: Open — requires LLM Gateway backend changes.
+
+---
+
 ## Feature - Allow different sortings
 
 This could possibly something we allow to configure in the config pane. Or we add a sort select (using the nui-select component) to the top of the chat list, allowing users to choose how they want their chats sorted (by created time or last updated time or name of the chat).
