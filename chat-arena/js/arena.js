@@ -1620,8 +1620,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this._updateTtsVoiceSelects();
             this._showTtsStatus(null);
         } catch (error) {
-            console.warn('[Arena TTS] Failed to load voices:', error.message);
-            this._showTtsStatus('Failed to load voices. Check endpoint.');
+            // Silently disable TTS on connection failure — service may not be running
+            this._ttsVoices = [];
+            this._showTtsStatus('TTS unavailable');
         }
     }
 

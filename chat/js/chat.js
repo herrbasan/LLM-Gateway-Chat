@@ -1323,7 +1323,8 @@ async function loadTtsVoices() {
         updateTtsVoiceSelect();
         showTtsStatus(null);
     } catch (error) {
-        console.warn('[TTS] Failed to load voices:', error.message);
+        // Silently disable TTS on connection failure — service may not be running
+        ttsVoices = [];
     }
 }
 
