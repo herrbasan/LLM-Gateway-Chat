@@ -1671,6 +1671,11 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
         prompt = prompt + '\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.';
     }
 
+    // Memory tool reminder: only when memory.* tools are available via MCP
+    if (areMemoryToolsAvailable()) {
+        prompt = prompt + '\n\n## Memory Tools — Use Proactively\n\nThis chat app has persistent memory. Start every session with `memory.overview` to see what is already known, then use the tools below.\n\n- `memory.overview` — See your current memory map and top-priority facts. Run this at the start of each session.\n- `memory.store` — Save anything useful: user preferences, project facts, decisions, failures, plans, context. Store aggressively.\n- `memory.recall` — Search memory by meaning. Use before big decisions or when you need prior context.\n- `memory.get` — Retrieve one specific memory by ID.\n- `memory.list` — Browse all memories, optionally filtered by category.\n- `memory.update` / `memory.forget` — Edit or remove outdated memories.\n\nGuideline: Begin with `memory.overview`. If something would help future-you give a better answer, store it. If you need prior context, recall it.';
+    }
+
     return prompt;
 }
 
@@ -1813,6 +1818,13 @@ function areVisionToolsAvailable() {
     const analyzeTool = getVisionToolName('vision_analyze');
     return mcpClient.toolRegistry.has(createSessionTool) && 
            mcpClient.toolRegistry.has(analyzeTool);
+}
+
+function areMemoryToolsAvailable() {
+    for (const llmName of mcpClient.toolRegistry.keys()) {
+        if (llmName.startsWith('memory.')) return true;
+    }
+    return false;
 }
 
 async function analyzeImagesWithVision(images) {
