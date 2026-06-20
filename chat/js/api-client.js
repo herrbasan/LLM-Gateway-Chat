@@ -213,6 +213,11 @@ export class BackendClient {
         return this._request('POST', `/api/chats/${encodeURIComponent(sessionId)}/messages`, body);
     }
 
+    // Replace the entire messages array (used by delete/edit/truncate persistence)
+    async replaceMessages(sessionId, messages) {
+        return this._request('PUT', `/api/chats/${encodeURIComponent(sessionId)}/messages`, { messages });
+    }
+
     // ============================================
     // Search
     // ============================================

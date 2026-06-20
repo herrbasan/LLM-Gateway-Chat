@@ -1416,6 +1416,46 @@ const routes = {
     json(res, message, 201, req);
   },
   
+  // Replace entire messages array (for delete/edit/truncate persistence)
+  'PUT /api/chats/:id/messages': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const { db } = dbInstance;
+
+    const body = await readBody(req);
+    if (!Array.isArray(body.messages)) {
+      json(res, { error: 'Expected { messages: [...] }' }, 400, req);
+      return;
+    }
+
+    const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
+    if (convs.length === 0) {
+      json(res, { error: 'Conversation not found' }, 404, req);
+      return;
+    }
+    const conv = convs[0];
+
+    // Re-index messages sequentially and replace the array atomically
+    const newMessages = body.messages.map((m, idx) => ({ ...m, idx }));
+    conv.messages = newMessages;
+    conv.messageCount = newMessages.length;
+    conv.updatedAt = new Date().toISOString();
+    db.update(conv._id, conv);
+
+    // Sync session metadata
+    const session = db.find('id', params.id).find(s => s._type === 'session');
+    if (session) {
+      session.messageCount = newMessages.length;
+      session.updatedAt = conv.updatedAt;
+      db.set(session._id, 'messageCount', session.messageCount);
+      db.set(session._id, 'updatedAt', session.updatedAt);
+    }
+
+    L().info('Messages replaced', { sessionId: params.id, count: newMessages.length }, 'Message');
+    json(res, { success: true, messageCount: newMessages.length }, 200, req);
+  },
+  
   // Delete session
   'DELETE /api/chats/:id': async (req, res, params) => {
     const authResult = requireAuth(req, res);

@@ -3790,8 +3790,8 @@ function commitEdit(exchangeId, role, newContent, editConv, editChatId) {
         const timestamp = conv._formatTimestamp(new Date(exchange.timestamp));
         exchange.user.content = `${timestamp} ${newContent}`;
 
-        // 2. Save and render - keep existing assistant response intact
-        conv.save();
+        // 2. Sync full state (content changed in-place, not append) and render
+        conv._syncFullState();
         renderConversation();
     } else {
         // 1. Update content for assistant with timestamp

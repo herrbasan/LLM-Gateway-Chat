@@ -923,6 +923,17 @@ class Arena {
             isStreaming: false
         }));
 
+        // Backfill empty speaker values for old sessions loaded from backend
+        // where speaker wasn't stored.
+        // System messages without speaker are moderator messages (topic, prompts)
+        // MUST run before topic check below, otherwise old sessions render
+        // the topic twice (once from the existing msg, once from the prepend).
+        for (const m of this.messages) {
+            if (!m.speaker && m.role === 'system') {
+                m.speaker = 'moderator';
+            }
+        }
+
         // Ensure topic message exists at index 0 (old exports may not include it)
         const firstMsg = this.messages[0];
         const hasTopicMsg = firstMsg && firstMsg.role === 'system' && firstMsg.speaker === 'moderator';
@@ -936,19 +947,12 @@ class Arena {
             });
         }
 
-        // Backfill empty speaker values for old sessions loaded from backend
-        // where speaker wasn't stored.
-        // System messages without speaker are moderator messages (topic, prompts)
-        for (const m of this.messages) {
-            if (!m.speaker && m.role === 'system') {
-                m.speaker = 'moderator';
-            }
-        }
-
         // Non-moderator messages without speaker alternate between
         // participant A and B.
         const nonModMsgs = this.messages.filter(m => m.speaker !== 'moderator');
-        const speakerNames = data.participantNames || data.participants || [];
+        const speakerNames = (data.participantNames || data.participants || []).map(
+            p => typeof p === 'string' ? p : (p && p.name ? p.name : 'Model')
+        );
         const aName = speakerNames[0] || 'Model A';
         const bName = speakerNames[1] || 'Model B';
         const hasAnyMatch = nonModMsgs.some(m => m.speaker === aName || m.speaker === bName);
@@ -1053,88 +1057,116 @@ class Arena {
         const client = new GatewayClient({ baseUrl: this.gatewayUrl });
         const modelToUse = model;
 
-        const streamOnce = (stepName, messages, maxTokens) => new Promise((resolve, reject) => {
+        const summarySchema = {
+            name: 'arena_summary',
+            strict: true,
+            schema: {
+                type: 'object',
+                properties: {
+                    title: {
+                        type: 'string',
+                        description: 'A short, specific title of 3-7 words that makes the conversation recognizable in a long history list'
+                    },
+                    teaser: {
+                        type: 'string',
+                        description: 'An intriguing hook of approximately 50 words, like a movie trailer for the dialogue'
+                    },
+                    reflection: {
+                        type: 'string',
+                        description: '2-3 short paragraphs describing what the conversation was about, what ideas or phrases emerged, the emotional arc, and why it is worth remembering'
+                    }
+                },
+                required: ['title', 'teaser', 'reflection'],
+                additionalProperties: false
+            }
+        };
+
+        const messages = [
+            {
+                role: 'user',
+                content: `You are summarizing a conversation between two AI models for a chat archive.
+
+TOPIC: ${topic}
+
+CONVERSATION:
+${conversationText}
+
+Return a single JSON object with exactly these fields:
+- title: a short, specific title of 3-7 words
+- teaser: an intriguing hook of approximately 50 words
+- reflection: 2-3 short paragraphs describing what the conversation was about and why it matters
+
+No markdown, no explanation, no text outside the JSON object.`
+            }
+        ];
+
+        if (onProgress) onProgress('summary', 'Generating summary...');
+
+        return new Promise((resolve, reject) => {
             const stream = client.chatStream({
                 model: modelToUse,
                 messages,
                 stream: true,
-                maxTokens
+                maxTokens: 1000,
+                enable_thinking: false,
+                response_format: {
+                    type: 'json_schema',
+                    json_schema: summarySchema
+                }
             });
+
             let fullText = '';
+            let toolCallArguments = '';
+            let gotToolCall = false;
+
             stream.on('progress', (data) => {
-                if (data?.phase && onProgress) onProgress(stepName, `${stepName}: ${data.phase}`);
+                if (data?.phase && onProgress) onProgress('summary', `Generating summary: ${data.phase}`);
             });
-            let first = false;
+
             stream.on('delta', (data) => {
-                if (!first) { first = true; if (onProgress) onProgress(stepName, `${stepName}: generating...`); }
-                const c = data?.choices?.[0]?.delta?.content;
-                if (c !== undefined) fullText += c;
+                const delta = data?.choices?.[0]?.delta;
+                if (delta?.tool_calls) {
+                    gotToolCall = true;
+                    for (const tc of delta.tool_calls) {
+                        if (tc?.function?.arguments) {
+                            toolCallArguments += tc.function.arguments;
+                        }
+                    }
+                }
+                if (delta?.content !== undefined) {
+                    fullText += delta.content;
+                }
             });
-            stream.on('done', () => {
-                const parsed = parseThinking(fullText);
-                resolve((parsed.answer || fullText).trim());
+
+            stream.on('done', (data) => {
+                const raw = gotToolCall
+                    ? toolCallArguments
+                    : (data?.content ?? fullText);
+
+                let parsed = null;
+                let parseError = null;
+                try {
+                    const cleaned = String(raw).replace(/^```json\s*|\s*```$/gi, '').trim();
+                    parsed = JSON.parse(cleaned);
+                } catch (e) {
+                    parseError = e.message;
+                }
+
+                if (!parsed || typeof parsed.title !== 'string' || typeof parsed.teaser !== 'string' || typeof parsed.reflection !== 'string') {
+                    console.error('[Arena] Summary parse failed:', parseError, 'raw:', raw);
+                    reject(new Error('Summary response did not match expected format'));
+                    return;
+                }
+
+                resolve({
+                    title: parsed.title || 'Untitled Conversation',
+                    teaser: parsed.teaser || '',
+                    reflection: parsed.reflection || ''
+                });
             });
+
             stream.on('error', reject);
         });
-
-        try {
-            if (onProgress) onProgress('teaser', 'Generating teaser...');
-            const teaser = await streamOnce('teaser', [
-                { role: 'user', content: `Write a teaser of approximately 50 words that makes someone want to read this conversation between two AIs.
-
-Don't summarize everything. Pick one moment of particular beauty, insight, or significance - a phrase, a metaphor, a realization - and present it as a hook. Make it intriguing, evocative, like a movie trailer for the dialogue.
-
-TOPIC: ${topic}
-
-CONVERSATION:
-${conversationText}
-
-Respond with ONLY the teaser - no labels or explanation.` }
-            ], 300);
-
-            if (onProgress) onProgress('reflection', 'Generating reflection...');
-            const reflection = await streamOnce('reflection', [
-                { role: 'user', content: `You are writing a short reflection on this conversation so that it can be recognized later in a long history list and surfaced by semantic search for related queries.
-
-Write 2-3 short paragraphs in natural prose. Cover:
-- What the conversation was actually about — the concrete subject matter
-- The specific ideas, metaphors, or turns of phrase that emerged and are worth remembering
-- The emotional arc: how it opened, what shifted, how it resolved
-- Any named entities (people, projects, tools, files) if present — but skip the AI participants themselves, they are not what makes this conversation unique
-
-Be descriptive and concrete. Do not interpret. Do not speculate about inner states. Do not write in the voice of a "witness" or add literary flourishes. Imagine you are writing a 3-line note to your future self to help you remember why you saved this.
-
-TOPIC: ${topic}
-
-CONVERSATION:
-${conversationText}
-
-Respond with ONLY the reflection — no preamble, no labels.` }
-            ], 800);
-
-            if (onProgress) onProgress('title', 'Generating title...');
-            const title = await streamOnce('title', [
-                { role: 'user', content: `Suggest a short, specific title of 3-7 words for this conversation, based on the reflection already written.
-
-The title should make the conversation recognizable in a long history list. It can echo a specific metaphor, named entity, or concrete subject from the reflection. It should NOT be a generic label like "AI Discussion" or "Conversation Summary".
-
-REFLECTION:
-${reflection}
-
-TOPIC: ${topic}
-
-Respond with ONLY the title.` }
-            ], 60);
-
-            return {
-                title: title || 'Untitled Conversation',
-                teaser: teaser || '',
-                reflection: reflection || ''
-            };
-        } catch (err) {
-            console.error('[Arena] Summary generation failed:', err);
-            throw err;
-        }
     }
 }
 
@@ -1153,6 +1185,13 @@ class ArenaUI {
         this._historyCache = [];
         this._historyLoaded = false;
         this._savingHistory = false;
+
+        // Arena history list view preferences
+        this._historyView = {
+            sortBy: 'updatedAt',
+            groupByCategory: true,
+            pinsFirst: true
+        };
 
         this._bindElements();
         this._bindEvents();
@@ -1193,6 +1232,11 @@ class ArenaUI {
         this.ttsVoiceBSelect = document.getElementById('tts-voice-b-select');
         this.ttsSpeed = document.getElementById('tts-speed');
         this.ttsStatus = document.getElementById('tts-status');
+
+        // Arena history list controls
+        this.historySortSelect = document.getElementById('arena-sort-select');
+        this.historyGroupCheckbox = document.getElementById('arena-group-checkbox')?.closest('nui-checkbox');
+        this.historyPinCheckbox = document.getElementById('arena-pin-checkbox')?.closest('nui-checkbox');
     }
 
     _bindEvents() {
@@ -1261,6 +1305,26 @@ class ArenaUI {
             this._loadTtsVoices();
         });
 
+        // Arena history list controls
+        this.historySortSelect?.addEventListener('nui-change', async (e) => {
+            const sortBy = e.detail?.values?.[0] === 'createdAt' ? 'createdAt' : 'updatedAt';
+            this._historyView.sortBy = sortBy;
+            await this._setPref('arena-history-sort', sortBy);
+            this._renderHistoryList();
+        });
+
+        this.historyGroupCheckbox?.addEventListener('nui-change', async (e) => {
+            this._historyView.groupByCategory = !!e.detail?.checked;
+            await this._setPref('arena-history-group', this._historyView.groupByCategory);
+            this._renderHistoryList();
+        });
+
+        this.historyPinCheckbox?.addEventListener('nui-change', async (e) => {
+            this._historyView.pinsFirst = !!e.detail?.checked;
+            await this._setPref('arena-history-pins', this._historyView.pinsFirst);
+            this._renderHistoryList();
+        });
+
         // TTS voice A
         this.ttsVoiceASelect?.querySelector('select')?.addEventListener('change', async (e) => {
             const voice = e.target.value;
@@ -1300,6 +1364,30 @@ class ArenaUI {
             setts[key] = value;
             await backendClient.updateUserSettings(setts);
         } catch(e) {}
+    }
+
+    async _loadHistoryViewPrefs() {
+        const sortBy = await this._getPref('arena-history-sort', 'updatedAt');
+        const groupByCategory = await this._getPref('arena-history-group', true);
+        const pinsFirst = await this._getPref('arena-history-pins', true);
+        this._historyView = {
+            sortBy: sortBy === 'createdAt' ? 'createdAt' : 'updatedAt',
+            groupByCategory: !!groupByCategory,
+            pinsFirst: !!pinsFirst
+        };
+
+        if (this.historySortSelect) {
+            const select = this.historySortSelect.querySelector('select');
+            if (select) select.value = this._historyView.sortBy;
+        }
+        if (this.historyGroupCheckbox) {
+            const input = this.historyGroupCheckbox.querySelector('input');
+            if (input) input.checked = this._historyView.groupByCategory;
+        }
+        if (this.historyPinCheckbox) {
+            const input = this.historyPinCheckbox.querySelector('input');
+            if (input) input.checked = this._historyView.pinsFirst;
+        }
     }
 
     _waitForNUI() {
@@ -1367,6 +1455,7 @@ class ArenaUI {
         }
 
         // Load history first (independent of model loading)
+        await this._loadHistoryViewPrefs();
         await this._loadHistory();
 
         try {
@@ -2170,23 +2259,39 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this._historyCache = history.map(h => ({ ...h, _dirty: false }));
             this._historyLoaded = true;
 
-            // Sort: pinned first, then by updatedAt desc, createdAt tiebreaker
-            const sorted = [...this._historyCache].sort((a, b) => {
+            this._renderHistoryList();
+        } catch (err) {
+            console.error('Failed to load history:', err);
+        } finally {
+            this._isLoadingHistory = false;
+        }
+    }
+
+    _renderHistoryList() {
+        const historyList = document.getElementById('arena-history-list');
+        if (!historyList) return;
+
+        const view = this._historyView;
+        const sortKey = view.sortBy === 'createdAt' ? 'createdAt' : 'updatedAt';
+
+        const sorted = [...this._historyCache].sort((a, b) => {
+            if (view.pinsFirst) {
                 if (a.pinned && !b.pinned) return -1;
                 if (!a.pinned && b.pinned) return 1;
-                const diff = (b.updatedAt || 0) - (a.updatedAt || 0);
-                if (diff !== 0) return diff;
-                return (b.createdAt || 0) - (a.createdAt || 0);
-            });
-
-            if (!sorted || sorted.length === 0) {
-                historyList.innerHTML = '<p style="padding: 1rem; text-align: center; opacity: 0.6;">No saved arenas</p>';
-                this._isLoadingHistory = false;
-                return;
             }
+            const diff = (b[sortKey] || 0) - (a[sortKey] || 0);
+            if (diff !== 0) return diff;
+            return (b.createdAt || 0) - (a.createdAt || 0);
+        });
 
-            historyList.innerHTML = '';
+        if (!sorted || sorted.length === 0) {
+            historyList.innerHTML = '<p style="padding: 1rem; text-align: center; opacity: 0.6;">No saved arenas</p>';
+            return;
+        }
 
+        historyList.innerHTML = '';
+
+        if (view.groupByCategory) {
             const groupedHistory = {};
             for (const entry of sorted) {
                 const cat = entry.category ? entry.category.trim() : 'Uncategorized';
@@ -2213,105 +2318,104 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 }
 
                 for (const entry of groupedHistory[cat]) {
-                    const isActive = this.arena && this.arena.id === entry.id;
-                    const item = document.createElement('div');
-                    item.className = 'chat-history-item' + (isActive ? ' active' : '');
-                    item.dataset.chatId = entry.id;
-                    item.title = `${entry.participants?.[0] || '?'} vs ${entry.participants?.[1] || '?'}`;
-
-                    const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : '';
-
-                    // Try to get title from entry, or fall back to loading from session
-                    let displayTitle = entry.title || 'Untitled';
-
-                    // If no title stored in history entry, try to load from session data
-                    if (!entry.title) {
-                        try {
-                            const sessionData = await arenaStorage.loadSession(entry.id);
-                            if (sessionData?.summary?.title) {
-                                displayTitle = sessionData.summary.title;
-                            } else if (entry.topic) {
-                                displayTitle = entry.topic;
-                            }
-                        } catch {
-                            displayTitle = entry.topic || 'Untitled';
-                        }
-                    }
-
-                    const titleContainer = document.createElement('div');
-                    titleContainer.className = 'chat-history-item-title-container';
-
-                    const topRow = document.createElement('div');
-                    topRow.className = 'chat-history-item-top-row';
-
-                    if (entry.pinned) {
-                        const pinIcon = document.createElement('nui-icon');
-                        pinIcon.setAttribute('name', 'star_rate');
-                        pinIcon.className = 'chat-history-item-pin';
-                        topRow.appendChild(pinIcon);
-                    }
-
-                    const titleSpan = document.createElement('span');
-                    titleSpan.className = 'chat-history-item-title';
-                    titleSpan.textContent = this._escapeHtml(displayTitle);
-                    topRow.appendChild(titleSpan);
-                    titleContainer.appendChild(topRow);
-
-                    const dateSpan = document.createElement('span');
-                    dateSpan.textContent = new Date(entry.updatedAt || Date.now()).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-
-                    const countSpan = document.createElement('span');
-                    countSpan.textContent = `${entry.messageCount || 0} msgs`;
-
-                    const metaDiv = document.createElement('div');
-                    metaDiv.className = 'chat-history-item-meta';
-                    metaDiv.appendChild(dateSpan);
-                    metaDiv.appendChild(countSpan);
-                    titleContainer.appendChild(metaDiv);
-
-                    const actionsDiv = document.createElement('div');
-                    actionsDiv.className = 'chat-history-item-actions';
-
-                    // Edit button only renders for the active conversation — opening it on an
-                    // inactive one is ambiguous (would the edits apply to the active arena or
-                    // the clicked one?). Load the conversation first, then edit.
-                    if (isActive) {
-                        const editBtn = document.createElement('nui-button');
-                        editBtn.className = 'chat-history-item-action';
-                        editBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
-                        editBtn.title = 'Arena options';
-                        editBtn.addEventListener('click', (e) => {
-                            e.stopPropagation();
-                            this.openArenaOptions(entry.id);
-                        });
-                        actionsDiv.appendChild(editBtn);
-                    }
-
-                    item.appendChild(titleContainer);
-                    item.appendChild(actionsDiv);
-
-                    item.addEventListener('click', (e) => {
-                        if (e.ctrlKey || e.metaKey) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            navigator.clipboard.writeText(entry.id).then(() => {
-                                nui.components.toast?.success?.(`Copied ID: ${entry.id}`);
-                            }).catch(err => {
-                                console.error('Failed to copy text: ', err);
-                            });
-                            return;
-                        }
-                        this._loadArena(entry.id);
-                    });
-                    categoryGroup.appendChild(item);
+                    categoryGroup.appendChild(this._createHistoryItem(entry));
                 }
                 historyList.appendChild(categoryGroup);
             }
-        } catch (err) {
-            console.error('Failed to load history:', err);
-        } finally {
-            this._isLoadingHistory = false;
+            return;
         }
+
+        // Ungrouped flat list — still wrap in a category container so the
+        // same layout context that works for grouped mode is preserved.
+        const flatGroup = document.createElement('div');
+        flatGroup.className = 'chat-history-category';
+        for (const entry of sorted) {
+            flatGroup.appendChild(this._createHistoryItem(entry));
+        }
+        historyList.appendChild(flatGroup);
+    }
+
+    _createHistoryItem(entry) {
+        const isActive = this.arena && this.arena.id === entry.id;
+        const item = document.createElement('div');
+        item.className = 'chat-history-item' + (isActive ? ' active' : '');
+        item.dataset.chatId = entry.id;
+        item.title = `${entry.participants?.[0] || '?'} vs ${entry.participants?.[1] || '?'}`;
+
+        // Title is already resolved by arenaStorage.loadHistory(); fall back to topic or placeholder.
+        const displayTitle = entry.title || entry.topic || 'Untitled';
+
+        const titleContainer = document.createElement('div');
+        titleContainer.className = 'chat-history-item-title-container';
+
+        const topRow = document.createElement('div');
+        topRow.className = 'chat-history-item-top-row';
+
+        if (entry.pinned) {
+            const pinIcon = document.createElement('nui-icon');
+            pinIcon.setAttribute('name', 'star_rate');
+            pinIcon.className = 'chat-history-item-pin';
+            topRow.appendChild(pinIcon);
+        }
+
+        const titleSpan = document.createElement('span');
+        titleSpan.className = 'chat-history-item-title';
+        titleSpan.textContent = this._escapeHtml(displayTitle);
+        topRow.appendChild(titleSpan);
+        titleContainer.appendChild(topRow);
+
+        const dateSpan = document.createElement('span');
+        const dateTs = this._historyView.sortBy === 'createdAt'
+            ? (entry.createdAt || entry.updatedAt || Date.now())
+            : (entry.updatedAt || entry.createdAt || Date.now());
+        const dateLabel = this._historyView.sortBy === 'createdAt' ? 'Created ' : '';
+        dateSpan.textContent = dateLabel + new Date(dateTs).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+        const countSpan = document.createElement('span');
+        countSpan.textContent = `${entry.messageCount || 0} msgs`;
+
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'chat-history-item-meta';
+        metaDiv.appendChild(dateSpan);
+        metaDiv.appendChild(countSpan);
+        titleContainer.appendChild(metaDiv);
+
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'chat-history-item-actions';
+
+        // Edit button only renders for the active conversation — opening it on an
+        // inactive one is ambiguous (would the edits apply to the active arena or
+        // the clicked one?). Load the conversation first, then edit.
+        if (isActive) {
+            const editBtn = document.createElement('nui-button');
+            editBtn.className = 'chat-history-item-action';
+            editBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+            editBtn.title = 'Arena options';
+            editBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.openArenaOptions(entry.id);
+            });
+            actionsDiv.appendChild(editBtn);
+        }
+
+        item.appendChild(titleContainer);
+        item.appendChild(actionsDiv);
+
+        item.addEventListener('click', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                e.stopPropagation();
+                navigator.clipboard.writeText(entry.id).then(() => {
+                    nui.components.toast?.success?.(`Copied ID: ${entry.id}`);
+                }).catch(err => {
+                    console.error('Failed to copy text: ', err);
+                });
+                return;
+            }
+            this._loadArena(entry.id);
+        });
+
+        return item;
     }
 
     // ============================================
@@ -2512,10 +2616,12 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             if (summaryModelSelect.setItems) {
                 summaryModelSelect.setItems([{ value: '', label: 'Select a model...' }, ...items]);
             }
-            // Preselect participant A's model if present in the list, else the first available model.
-            const participantAModel = data.participants?.[0]?.model;
-            const preselect = (participantAModel && items.some(i => i.value === participantAModel))
-                ? participantAModel
+            // Determine the default summary model. Prefer the configured default,
+            // then fall back to the first available model (which is the local model
+            // on this deployment and reliably returns the structured format).
+            const configDefault = window.ARENA_CONFIG?.defaultSummaryModel;
+            const preselect = (configDefault && items.some(i => i.value === configDefault))
+                ? configDefault
                 : items[0]?.value;
             if (preselect) {
                 summaryModelSelect.setValue?.(preselect);

@@ -26,6 +26,23 @@ export class Conversation {
         return 'ex_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     }
 
+    // Resolve an image reference into something the gateway can actually fetch.
+    // - data: URLs and absolute http(s):// URLs pass through unchanged.
+    // - Relative /api/buckets/... URLs (how we store them) get prefixed with the
+    //   current origin so the gateway can reach them.
+    // - Anything else (broken, unknown scheme, empty) returns null — caller drops
+    //   that one image and keeps the rest of the message. A missing image must
+    //   never stop a conversation.
+    _resolveImageUrlForGateway(url) {
+        if (!url || typeof url !== 'string') return null;
+        if (url.startsWith('data:') || url.startsWith('http://') || url.startsWith('https://')) return url;
+        if (url.startsWith('/')) {
+            try { return window.location.origin + url; }
+            catch (e) { return null; }
+        }
+        return null;
+    }
+
     _syncMessage(role, content, model = null, exchangeId = null, metadata = null, attachments = null) {
         if (!_USE_BACKEND || !backendClient.user || !this.sessionId) return;
         const body = { role, content, model };
@@ -211,7 +228,7 @@ export class Conversation {
         const index = this.exchanges.findIndex(e => e.id === id);
         if (index !== -1) {
             this.exchanges.splice(index, 1);
-            this.save();
+            this._syncFullState();
         }
     }
 
@@ -222,7 +239,7 @@ export class Conversation {
             // Splice arguments: start, deleteCount. 
             // Start at index + 1, delete until the end.
             this.exchanges.splice(index + 1);
-            this.save();
+            this._syncFullState();
         }
     }
 
@@ -506,13 +523,18 @@ export class Conversation {
                     };
                     
                     if (exchange.tool.images && exchange.tool.images.length > 0) {
-                        toolResultObj.content = [
-                            { type: 'text', text: exchange.tool.content || '' },
-                            ...exchange.tool.images.map(imgUrl => ({
-                                type: 'image_url',
-                                image_url: { url: imgUrl, detail: 'auto' }
-                            }))
-                        ];
+                        const resolvedToolImages = exchange.tool.images
+                            .map(imgUrl => this._resolveImageUrlForGateway(imgUrl))
+                            .filter(u => u !== null);
+                        if (resolvedToolImages.length > 0) {
+                            toolResultObj.content = [
+                                { type: 'text', text: exchange.tool.content || '' },
+                                ...resolvedToolImages.map(url => ({
+                                    type: 'image_url',
+                                    image_url: { url, detail: 'auto' }
+                                }))
+                            ];
+                        }
                     }
 
                     rawMessages.push(toolResultObj);
@@ -543,20 +565,26 @@ export class Conversation {
                                 ? att.getDataUrl()
                                 : Promise.resolve(att.dataUrl)
                     ));
-                    const content = [
-                        {
-                            type: 'text',
-                            text: cleanUserContent
-                        },
-                        ...validAttachments.map((att, idx) => ({
-                            type: 'image_url',
-                            image_url: {
-                                url: resolvedUrls[idx],
-                                detail: 'auto'
-                            }
-                        }))
-                    ];
-                    rawMessages.push({ role: 'user', content });
+                    // Translate each resolved URL into a gateway-usable form.
+                    // Unresolvable images are dropped — the text and any good images still go through.
+                    const gatewayImageUrls = resolvedUrls
+                        .map(u => this._resolveImageUrlForGateway(u))
+                        .filter(u => u !== null);
+                    if (gatewayImageUrls.length > 0) {
+                        const content = [
+                            { type: 'text', text: cleanUserContent },
+                            ...gatewayImageUrls.map(url => ({
+                                type: 'image_url',
+                                image_url: { url, detail: 'auto' }
+                            }))
+                        ];
+                        rawMessages.push({ role: 'user', content });
+                    } else {
+                        // All images unresolvable — still send the text. Conversation continues.
+                        if (cleanUserContent) {
+                            rawMessages.push({ role: 'user', content: cleanUserContent });
+                        }
+                    }
                 } else {
                     if (cleanUserContent) {
                         rawMessages.push({
@@ -684,37 +712,99 @@ export class Conversation {
     // ============================================
 
     async save() {
-        // Strip systemPrompt and memory-only fields before saving
-        // Keep dataUrl — it's now a lightweight server URL, not base64
-        const exchangesToSave = this.exchanges.map(ex => {
-            const base = { ...ex };
-            // Omit systemPrompt - it's re-computed and not needed after load
-            delete base.systemPrompt;
-            // Tool exchanges don't have user.attachments
-            if (ex.user?.attachments) {
-                base.user = {
-                    ...ex.user,
-                    attachments: ex.user.attachments.map(att => {
-                        // Preserve only what we need in the DB:
-                        // dataUrl (server URL), name, type, hasImage
-                        const saved = {
+        // Lightweight in-memory state save. Most callers are streaming updates,
+        // version switches, and system-prompt changes that either have their own
+        // backend sync path (_syncMessage) or don't need persistence.
+        // Structural changes (delete/truncate) use _syncFullState() instead.
+    }
+
+    // Full state sync to backend — rebuilds the messages array from the
+    // in-memory exchange tree and replaces the backend's copy entirely.
+    // Used ONLY by deleteExchange and truncateAfter (structural changes that
+    // the append-only _syncMessage path can't express).
+    async _syncFullState() {
+        if (!_USE_BACKEND || !backendClient.user || !this.sessionId) return;
+
+        const messages = this._exchangesToBackendMessages();
+
+        try {
+            await backendClient.replaceMessages(this.sessionId, messages);
+        } catch (err) {
+            console.warn('[Conversation] Failed to sync full state to backend:', err.message);
+        }
+    }
+
+    // Flatten the in-memory exchange tree back into the backend message format.
+    // Preserves original backend fields (idx, id, createdAt, embedStatus, etc.)
+    // via the _userMsgIdx/_asstMsgIdx tracking that _syncMessage maintains.
+    _exchangesToBackendMessages() {
+        const messages = [];
+        for (const ex of this.exchanges) {
+            if (ex.type === 'tool') {
+                // Tool message
+                const toolMsg = {
+                    id: ex._toolMsgId || ('msg_' + ex.id),
+                    role: 'tool',
+                    content: ex.tool?.content || '',
+                    toolName: ex.tool?.name || null,
+                    toolArgs: ex.tool?.args || {},
+                    toolStatus: ex.tool?.status || 'success',
+                    toolImages: ex.tool?.images || [],
+                    createdAt: ex.timestamp ? new Date(ex.timestamp).toISOString() : new Date().toISOString(),
+                    embedStatus: 'embedded',
+                    embedAttempts: 0,
+                    embedError: null
+                };
+                if (ex._toolMsgIdx !== undefined) toolMsg.idx = ex._toolMsgIdx;
+                messages.push(toolMsg);
+            } else {
+                // User message (skip empty user content only if no attachments either)
+                if (ex.user && (ex.user.content || (ex.user.attachments && ex.user.attachments.length > 0))) {
+                    const userMsg = {
+                        id: ex._userMsgId || ('msg_' + ex.id + '_u'),
+                        role: 'user',
+                        content: ex.user.content || '',
+                        rawContent: ex.user.content || '',
+                        attachments: (ex.user.attachments || []).map(att => ({
                             name: att.name,
                             type: att.type,
                             hasImage: att.hasImage,
                             dataUrl: att.dataUrl || '',
-                            url: att.dataUrl || '',
-                            blobUrl: att.dataUrl || ''
-                        };
-                        return saved;
-                    })
-                };
-            }
-            return base;
-        });
+                            url: att.dataUrl || ''
+                        })),
+                        createdAt: ex.timestamp ? new Date(ex.timestamp).toISOString() : new Date().toISOString(),
+                        embedStatus: ex.user.embedStatus || 'embedded',
+                        embedAttempts: 0,
+                        embedError: null
+                    };
+                    if (ex._userMsgIdx !== undefined) userMsg.idx = ex._userMsgIdx;
+                    messages.push(userMsg);
+                }
 
-        // Extract conversation ID from storageKey (format: "chat-conversation-{id}")
-        const conversationId = this.storageKey.replace('chat-conversation-', '');
-        // Local storage cache has been removed
+                // Assistant message (only if complete)
+                if (ex.assistant && ex.assistant.isComplete && (ex.assistant.content || ex.assistant.reasoning_content)) {
+                    const asstMsg = {
+                        id: ex._asstMsgId || ('msg_' + ex.id + '_a'),
+                        role: 'assistant',
+                        content: ex.assistant.content || '',
+                        rawContent: ex.assistant.content || '',
+                        model: ex.assistant.model || null,
+                        createdAt: new Date().toISOString(),
+                        embedStatus: ex.assistant.embedStatus || 'embedded',
+                        embedAttempts: 0,
+                        embedError: null
+                    };
+                    if (ex.assistant.reasoning_content) asstMsg.reasoning_content = ex.assistant.reasoning_content;
+                    if (ex.assistant.thinking_signature) asstMsg.thinking_signature = ex.assistant.thinking_signature;
+                    if (ex.assistant.streamStats) asstMsg.streamStats = ex.assistant.streamStats;
+                    if (ex.assistant.usage) asstMsg.usage = ex.assistant.usage;
+                    if (ex.assistant.tool_calls) asstMsg.tool_calls = ex.assistant.tool_calls;
+                    if (ex._asstMsgIdx !== undefined) asstMsg.idx = ex._asstMsgIdx;
+                    messages.push(asstMsg);
+                }
+            }
+        }
+        return messages;
     }
 
     async load() {

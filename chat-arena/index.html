@@ -61,6 +61,26 @@
                         <button type="button"><nui-icon name="upload"></nui-icon> Import</button>
                     </nui-button>
                 </div>
+                <div class="arena-history-controls" id="arena-history-controls">
+                    <div class="arena-history-controls-row">
+                        <nui-select id="arena-sort-select" data-label="Sort">
+                            <select>
+                                <option value="updatedAt">Modified</option>
+                                <option value="createdAt">Created</option>
+                            </select>
+                        </nui-select>
+                    </div>
+                    <div class="arena-history-controls-row">
+                        <nui-checkbox title="Group sessions by category">
+                            <input type="checkbox" id="arena-group-checkbox" checked>
+                        </nui-checkbox>
+                        <label for="arena-group-checkbox">Group</label>
+                        <nui-checkbox title="Show pinned sessions first">
+                            <input type="checkbox" id="arena-pin-checkbox" checked>
+                        </nui-checkbox>
+                        <label for="arena-pin-checkbox">Pins</label>
+                    </div>
+                </div>
                 <div class="arena-history-list" id="arena-history-list">
                     <!-- Arena history items injected here -->
                 </div>

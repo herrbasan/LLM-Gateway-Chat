@@ -15,6 +15,10 @@ window.ARENA_CONFIG = {
     // Temperature (0.0 - 2.0). Controls response randomness.
     defaultTemperature: 0.7,
 
+    // Default model used for AI summary generation in the arena edit dialog.
+    // Set to null to fall back to the first available chat model.
+    defaultSummaryModel: null,
+
     // TTS Configuration
     ttsEndpoint: 'http://localhost:2233',
     ttsVoiceA: '',

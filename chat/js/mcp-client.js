@@ -163,6 +163,8 @@ class MCPClient {
         let sseUrl = server.url;
         if (sseUrl.includes('/message')) {
             sseUrl = sseUrl.replace('/message', '/sse');
+        } else if (sseUrl.endsWith('/mcp/compact')) {
+            sseUrl = sseUrl.replace('/mcp/compact', '/sse/compact');
         } else if (sseUrl.endsWith('/mcp')) {
             sseUrl = sseUrl.replace('/mcp', '/sse');
         }

@@ -66,12 +66,43 @@ nui-sidebar[position="right"] .sidebar-content {
 .arena-history-list {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
     flex: 1;
     overflow-y: auto;
     padding-top: 1rem;
     padding-left: 1rem;
     padding-right: 1rem;
+}
+
+/* Items already have margin-bottom from chat.css; avoid double gaps in flat list */
+.arena-history-list .chat-history-item {
+    margin-bottom: 0.5rem;
+}
+
+/* Arena history list view controls */
+.arena-history-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background-color: var(--color-shade2);
+    border-bottom: thin solid var(--border-shade2);
+}
+
+.arena-history-controls-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.arena-history-controls-row nui-select {
+    flex: 1;
+}
+
+.arena-history-controls-row nui-checkbox + label {
+    font-size: 0.8rem;
+    color: var(--text-color);
+    cursor: pointer;
+    user-select: none;
 }
 
 /* History list styling is shared with the chat app via chat.css (chat-history-item, etc.) */
