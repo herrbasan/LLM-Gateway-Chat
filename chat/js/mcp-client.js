@@ -87,6 +87,12 @@ class MCPClient {
     disconnectServer(id) {
         const server = this.servers.find(s => s.id === id);
         if (server) {
+            if (server._reconnectTimer) {
+                clearTimeout(server._reconnectTimer);
+                delete server._reconnectTimer;
+            }
+            delete server._reconnectAttempt;
+            delete server._pendingToolListRequest;
             if (server.eventSource) {
                 server.eventSource.close();
                 server.eventSource = null;
@@ -158,6 +164,14 @@ class MCPClient {
      * @param {Object} server The server config object
      */
     async connectToServer(server) {
+        // Cancel any pending reconnect (in case this is a manual reconnect)
+        if (server._reconnectTimer) {
+            clearTimeout(server._reconnectTimer);
+            delete server._reconnectTimer;
+        }
+        // Cancel stale tools/list timeout from a previous connection
+        delete server._pendingToolListRequest;
+
         // The server exposes /sse for SSE endpoint discovery and /message for POST requests
         // Derive the SSE URL from the server URL (replace /mcp or /message with /sse if needed)
         let sseUrl = server.url;
@@ -179,6 +193,7 @@ class MCPClient {
                 if (!response.body) throw new Error('No response body');
 
                 server.status = 'connected';
+                delete server._reconnectAttempt; // reset backoff on successful connection
                 server.eventSource = { close: () => {} }; // compat shim
 
                 const reader = response.body.getReader();
@@ -186,8 +201,8 @@ class MCPClient {
                 let buffer = '';
 
                 const read = () => {
-                    reader.read().then(({ done, value }) => {
-                        if (done) return;
+                    return reader.read().then(({ done, value }) => {
+                        if (done) return; // stream ended cleanly, chain resolves
                         buffer += decoder.decode(value, { stream: true });
 
                         // SSE messages are separated by blank lines (\n\n or \r\n\r\n)
@@ -246,28 +261,61 @@ class MCPClient {
                             }
                         }
 
-                        read();
-                    }).catch(err => {
-                        console.error(`[${server.name}] SSE read error:`, err);
-                        server.status = 'error';
-                        this.rebuildToolRegistry();
-                        reject(err);
+                        return read(); // chain the next read
                     });
                 };
 
-                read();
+                // Start reading; when the stream ends (clean or error), schedule reconnect
+                read().then(() => {
+                    console.log(`[${server.name}] SSE stream ended cleanly, reconnecting...`);
+                    this._scheduleReconnect(server);
+                }).catch(err => {
+                    console.error(`[${server.name}] SSE read error:`, err);
+                    this._scheduleReconnect(server);
+                });
             }).catch(err => {
                 console.error(`[${server.name}] SSE connection failed:`, err);
-                server.status = 'error';
-                this.rebuildToolRegistry();
+                this._scheduleReconnect(server);
                 reject(err);
             });
         });
     }
 
     /**
-     * Internal: Fetches tools using the discovered POST endpoint
-     * For legacy SSE transport, the response comes on the main SSE stream, not the POST response
+     * Schedule an auto-reconnect attempt with exponential backoff.
+     * @param {Object} server The server that disconnected
+     */
+    _scheduleReconnect(server) {
+        // Don't schedule if already reconnecting or disconnected manually
+        if (server._reconnectTimer) return;
+        if (server.status === 'disconnected') return;
+
+        const attempt = (server._reconnectAttempt || 0) + 1;
+        server._reconnectAttempt = attempt;
+        server.status = 'reconnecting';
+        this.rebuildToolRegistry();
+        // Notify UI to show reconnecting status
+        if (typeof window !== 'undefined' && window.refreshMCPServersUI) {
+            window.refreshMCPServersUI();
+        }
+
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30000); // 1s, 2s, 4s, 8s, ..., max 30s
+        console.log(`[${server.name}] Reconnect attempt ${attempt} in ${delay}ms`);
+
+        server._reconnectTimer = setTimeout(() => {
+            delete server._reconnectTimer;
+            this.connectToServer(server).catch(() => {
+                // connectToServer calls _scheduleReconnect on failure, so nothing to do here
+            });
+        }, delay);
+    }
+
+    /**
+     * Internal: Fetches tools using the discovered POST endpoint.
+     * Handles BOTH transport modes:
+     *   - Legacy SSE: response arrives on the main SSE stream (_pendingToolListRequest)
+     *   - Streamable HTTP: response arrives on the POST response body as SSE
+     * Whichever path delivers first wins.
      */
     async refreshServerTools(server) {
         if (!server.postEndpoint) throw new Error("No POST endpoint discovered for server");
@@ -280,37 +328,56 @@ class MCPClient {
             params: {}
         };
 
-        // For legacy SSE transport, register a one-time handler for the response on the main SSE stream
         return new Promise((resolve, reject) => {
-            const timeoutId = setTimeout(() => {
+            let settled = false;
+
+            const onSuccess = (result) => {
+                // result is data.result (full JSON-RPC result object) from either path
+                const tools = result?.tools;
+                if (!tools || !Array.isArray(tools)) {
+                    onError(new Error('Unexpected response format: missing tools array'));
+                    return;
+                }
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
                 delete server._pendingToolListRequest;
-                reject(new Error('Timeout waiting for tools/list response'));
+                server.tools = tools;
+                this.rebuildToolRegistry();
+                if (typeof window !== 'undefined' && window.refreshMCPServersUI) {
+                    window.refreshMCPServersUI();
+                }
+                resolve();
+            };
+
+            const onError = (err) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                delete server._pendingToolListRequest;
+                reject(err);
+            };
+
+            const timeoutId = setTimeout(() => {
+                onError(new Error('Timeout waiting for tools/list response'));
             }, 10000);
 
-            // Store the pending request handler on the server object
-            // The connectToServer SSE handler will check for this
+            // Path 1: Legacy SSE — response comes on the main SSE stream.
+            // The connectToServer SSE handler routes messages to _pendingToolListRequest.onResponse.
             server._pendingToolListRequest = {
                 requestId: requestId,
                 onResponse: (data) => {
-                    clearTimeout(timeoutId);
-                    delete server._pendingToolListRequest;
                     if (data.error) {
-                        reject(new Error(`MCP error: ${data.error.message}`));
-                    } else if (data.result?.tools) {
-                        server.tools = data.result.tools;
-                        this.rebuildToolRegistry();
-                        // Notify UI to refresh server display with new tool counts
-                        if (typeof window !== 'undefined' && window.refreshMCPServersUI) {
-                            window.refreshMCPServersUI();
-                        }
-                        resolve();
+                        onError(new Error(`MCP error: ${data.error.message}`));
+                    } else if (data.result) {
+                        onSuccess(data.result);
                     } else {
-                        reject(new Error('Unexpected response format'));
+                        onError(new Error('Unexpected response format'));
                     }
                 }
             };
 
-            // Send the POST request (response will come via main SSE stream)
+            // Send the POST request
             fetch(server.postEndpoint, {
                 method: 'POST',
                 headers: {
@@ -318,20 +385,79 @@ class MCPClient {
                     'Accept': 'text/event-stream'
                 },
                 body: JSON.stringify(payload)
-            }).then(response => {
+            }).then(async (response) => {
                 if (!response.ok) {
-                    clearTimeout(timeoutId);
-                    delete server._pendingToolListRequest;
-                    return response.text().then(text => {
-                        reject(new Error(`HTTP ${response.status}: ${text}`));
-                    });
+                    const text = await response.text();
+                    return onError(new Error(`HTTP ${response.status}: ${text}`));
                 }
 
+                // Path 2: Streamable HTTP — response comes on the POST response body as SSE.
+                // Read the body in parallel with Path 1; whichever delivers first wins.
+                this._readSSEBodyForId(response, requestId, onSuccess, onError);
             }).catch(err => {
-                clearTimeout(timeoutId);
-                delete server._pendingToolListRequest;
-                reject(err);
+                onError(err);
             });
+        });
+    }
+
+    /**
+     * Read an SSE response body, looking for a JSON-RPC response matching requestId.
+     * Used for both tools/list (refreshServerTools) and tools/call (executeToolStreamableHttp).
+     * @param {Response} response - Fetch Response with SSE body
+     * @param {String} requestId - JSON-RPC request ID to match
+     * @param {Function} onSuccess - Called with result object when matching response found
+     * @param {Function} onError - Called with Error on stream/parse failure
+     */
+    _readSSEBodyForId(response, requestId, onSuccess, onError) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        const read = () => {
+            return reader.read().then(({ done, value }) => {
+                if (done) return;
+                buffer += decoder.decode(value, { stream: true });
+                buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+                while (buffer.includes('\n\n')) {
+                    const msgEnd = buffer.indexOf('\n\n');
+                    const rawMsg = buffer.slice(0, msgEnd);
+                    buffer = buffer.slice(msgEnd + 2);
+
+                    if (rawMsg.startsWith(':')) continue;
+
+                    let eventData = '';
+                    for (const line of rawMsg.split('\n')) {
+                        if (line.startsWith('data:')) {
+                            eventData = line.slice(5).trim();
+                        }
+                    }
+
+                    if (!eventData) continue;
+
+                    try {
+                        const data = JSON.parse(eventData);
+                        if (data.id && String(data.id) === requestId) {
+                            if (data.error) {
+                                onError(new Error(`MCP error: ${data.error.message || JSON.stringify(data.error)}`));
+                            } else {
+                                onSuccess(data.result);
+                            }
+                            return; // Found our response, stop reading
+                        }
+                        // Not our response — could be a notification or a different request.
+                        // Ignore and continue reading.
+                    } catch (e) {
+                        // Ignore malformed JSON in SSE stream
+                    }
+                }
+
+                return read();
+            });
+        };
+
+        read().catch(err => {
+            onError(err);
         });
     }
 

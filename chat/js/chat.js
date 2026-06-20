@@ -560,6 +560,7 @@ function buildExchangeElement(exchange) {
                     <nui-icon name="extension"></nui-icon>
                     <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
+                    <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
                 <div class="tool-notifications"></div>
                 <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
@@ -572,7 +573,14 @@ function buildExchangeElement(exchange) {
             </div>
         `;
 
-        toolEl.querySelector('.message-header').addEventListener('click', () => {
+        toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            conversation.deleteExchange(exchange.id);
+            renderConversation();
+        });
+
+        toolEl.querySelector('.message-header').addEventListener('click', (e) => {
+            if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
             const payloadBox = toolEl.querySelector('.tool-payload');
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
         });
@@ -2480,6 +2488,7 @@ function renderExchange(exchange, targetContainer = null) {
                     <nui-icon name="extension"></nui-icon>
                     <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
+                    <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
                 <div class="tool-notifications">
                   </div>
@@ -2500,7 +2509,14 @@ function renderExchange(exchange, targetContainer = null) {
         else if (isError) resultEl.innerHTML = `<strong>Error:</strong> `;
         resultEl.appendChild(document.createTextNode(exchange.tool.content));
 
-        toolEl.querySelector('.message-header').addEventListener('click', () => {
+        toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            conversation.deleteExchange(exchange.id);
+            renderConversation();
+        });
+
+        toolEl.querySelector('.message-header').addEventListener('click', (e) => {
+            if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
             const payloadBox = toolEl.querySelector('.tool-payload');
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
         });
@@ -2968,6 +2984,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
                   <nui-icon name="extension"></nui-icon>
                   <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
                   <nui-badge variant="primary" class="tool-status">Pending</nui-badge>
+                  <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
               </div>
               <div class="tool-notifications">
                   </div>
@@ -2981,6 +2998,12 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
 
     toolContainer?.appendChild(toolEl);
     scrollToBottom();
+
+    toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toolConversation.deleteExchange(exchange.id);
+        renderConversation();
+    });
 
 // Toggle expand/collapse
     toolEl.querySelector('.message-header').addEventListener('click', (e) => {
@@ -5028,9 +5051,10 @@ function renderMCPServers() {
         let badgeVariant = '';
           if (server.status === 'connected') badgeVariant = 'success';
           if (server.status === 'error') badgeVariant = 'danger';
-          if (server.status === 'connecting...') badgeVariant = 'warning';
+          if (server.status === 'connecting...' || server.status === 'reconnecting') badgeVariant = 'warning';
 
         const isConnected = server.status === 'connected';
+        const isTransitioning = server.status === 'connecting...' || server.status === 'reconnecting';
         
         const enabledToolsMap = mcpClient.enabledTools.get(server.id);
         let activeCount = 0;
@@ -5048,7 +5072,7 @@ function renderMCPServers() {
                 <!-- Header: Title and Toggle -->
                 <div class="mcp-server-header">
                     <h3 class="mcp-server-title">${server.name}</h3>
-                    <nui-checkbox variant="switch" title="Connect/Disconnect"><input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected ? 'checked' : ''} ${(server.status === 'connecting...') ? 'disabled' : ''}></nui-checkbox>
+                    <nui-checkbox variant="switch" title="Connect/Disconnect"><input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected || isTransitioning ? 'checked' : ''} ${isTransitioning ? 'disabled' : ''}></nui-checkbox>
                 </div>
 
                 <!-- Status Badge -->
