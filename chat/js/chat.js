@@ -384,7 +384,7 @@ let conversation = null;
 
 // Multi-conversation: per-chat DOM containers (hidden containers for background chats)
 const chatContainers = new Map(); // chatId -> HTMLDivElement
-// Multi-conversation: in-memory conversation objects (avoid re-loading from IndexedDB)
+// Multi-conversation: in-memory conversation objects (avoid re-loading from backend)
 const activeConversations = new Map(); // chatId -> Conversation
 // Chats that received new content while in background (cleared when viewed)
 const chatsWithNewContent = new Set();
@@ -393,7 +393,13 @@ const chatsWithNewContent = new Set();
 let _embedEventSource = null;
 let _embedEventChatId = null;
 
-let client = new GatewayClient({ baseUrl: GATEWAY_URL });
+let client = new GatewayClient({
+    baseUrl: GATEWAY_URL,
+    operationMode: CONFIG.operationMode || 'sse',
+    onLog: (category, message, meta) => {
+        if (backendClient?.clientLog) backendClient.clientLog(category, message, meta).catch(() => {});
+    }
+});
 let models = [];
 let currentModel = '';
 let isStreaming = false;
@@ -870,7 +876,7 @@ async function init() {
     // Check gateway status
     checkGatewayStatus();
 
-    // Init MCP (load config from IndexedDB first)
+    // Init MCP (load config from storage)
     await mcpClient.ready();
     initMCP();
 
@@ -2543,7 +2549,7 @@ function renderExchange(exchange, targetContainer = null) {
     if (exchange.user?.attachments?.length > 0) {
         userContent += '<div class="message-attachments"><nui-lightbox loop>';
         for (const att of exchange.user.attachments) {
-            // blobUrl works for both IndexedDB (blob:) and API (server URL) modes
+            // imgSrc resolves to a server URL (from API); blob: scheme no longer used
             const imgSrc = att.blobUrl || att.dataUrl || '';
             userContent += `<img src="${imgSrc}" alt="${att.name}" data-lightbox-src="${imgSrc}" class="chat-attachment">`
         }
@@ -3889,7 +3895,7 @@ async function switchChat(targetChatId) {
     // 1. Get or create the container for this chat (creates DOM node if first time)
     const targetContainer = getOrCreateContainer(targetChatId);
 
-    // 2. Load conversation from cache or IndexedDB
+    // 2. Load conversation from cache or backend
     let conv = activeConversations.get(targetChatId);
     if (!conv) {
         conv = new Conversation(`chat-conversation-${targetChatId}`);
@@ -3992,7 +3998,7 @@ async function deleteChat(chatId, e) {
         console.warn('[Chat] Failed to delete images for chat', chatId, err);
     }
 
-    // Delete from chat history (handles IndexedDB deletion)
+    // Delete from chat history (handles backend deletion)
     chatHistory.delete(chatId);
 
     // Abort any ongoing stream for this chat

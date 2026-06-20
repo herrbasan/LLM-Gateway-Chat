@@ -326,7 +326,6 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                         const next = current === 'dark' ? 'light' : 'dark';
                         document.documentElement.setAttribute('data-theme', next);
                         document.documentElement.style.colorScheme = next;
-                        localStorage.setItem('nui-theme', next);
                         window.arenaUI?._setPref?.('theme', next);
                     }
                     break;

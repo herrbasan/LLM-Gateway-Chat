@@ -17,7 +17,7 @@ class MCPClient {
     }
 
     /**
-     * Load MCP config from IndexedDB. Call once after app init.
+     * Load MCP config from storage. Call once after app init.
      */
     async ready() {
         if (this._configLoaded) return;

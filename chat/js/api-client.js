@@ -171,6 +171,11 @@ export class BackendClient {
         return this._request('PUT', '/api/user/settings', { settings });
     }
 
+    // Forward a client-side log line to the server's nLogger so it appears in server/logs/
+    async clientLog(category, message, meta = {}) {
+        return this._request('POST', '/api/client-log', { category, message, meta });
+    }
+
     // ============================================
     // Sessions
     // ============================================

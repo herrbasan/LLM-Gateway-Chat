@@ -69,8 +69,8 @@ export class GatewayClient extends EventEmitter {
     // Auto-generate session ID for tracking related requests (e.g., for Kimi CLI Adapter)
     this.sessionId = options.sessionId || `sess-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     
-    // Operation mode: 'websocket' or 'sse'
-    this.operationMode = options.operationMode || 'websocket';
+    // Operation mode: 'websocket' or 'sse' — default 'sse' to match HTML/Config defaults
+    this.operationMode = options.operationMode || 'sse';
     this.socket = null;
     this.streams = new Map();
     this._streamRegistry = new Map(); // chatId -> { stream, isAborted }
@@ -78,6 +78,7 @@ export class GatewayClient extends EventEmitter {
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
     this.reconnectActive = false;
+    this.onLog = options.onLog || null; // (category, message, meta) => void
   }
 
   // ==========================================
@@ -241,6 +242,7 @@ export class GatewayClient extends EventEmitter {
     
     const paramsWithSession = { ...params, request_id: requestId, session_id: this.sessionId };
     console.log('[GatewayClient WS] _createStream session_id:', this.sessionId, 'requestId:', requestId);
+    if (this.onLog) this.onLog('Transport', 'Transport: WS', { requestId, method });
     
     this.connect()
       .then(() => {
@@ -397,6 +399,7 @@ export class GatewayClient extends EventEmitter {
       };
 
       console.log('[GatewayClient SSE] POST session_id:', this.sessionId, 'chatId:', chatId);
+    if (this.onLog) this.onLog('Transport', 'Transport: SSE', { chatId, sessionId: this.sessionId });
 
       const response = await fetch(url, {
         method: 'POST',

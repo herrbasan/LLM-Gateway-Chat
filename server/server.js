@@ -848,6 +848,18 @@ const routes = {
     'GET /api/server-type': async (req, res) => {
     json(res, { type: 'node-backend' });
   },
+
+  // Frontend telemetry — receive client-side log events and forward to nLogger
+  'POST /api/client-log': async (req, res) => {
+    const body = await readBody(req);
+    const { category, message, meta } = body || {};
+    if (!category || !message) {
+      json(res, { error: 'category and message required' }, 400, req);
+      return;
+    }
+    logger.info(message, meta || {}, category);
+    json(res, { ok: true }, 200, req);
+  },
   
   // Auth endpoints (Phase 1)
   'POST /api/auth/login': async (req, res) => {

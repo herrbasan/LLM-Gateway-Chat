@@ -8,6 +8,7 @@ import { backendClient } from '../../chat/js/api-client.js';
 import { renderMarkdown, parseThinking } from '../../chat/js/markdown.js';
 import { getPlainText } from '../../chat/js/tts-utils.js';
 import { arenaStorage } from './storage.js';
+import { storage } from '../../chat/js/storage.js';
 
 // ============================================
 // Helpers
@@ -1348,22 +1349,12 @@ class ArenaUI {
     }
 
     async _getPref(key, fallback = null) {
-        try {
-            const res = await backendClient.getUserSettings();
-            if (res && res.settings && res.settings[key] !== undefined) {
-                return res.settings[key];
-            }
-        } catch(e) {}
-        return fallback;
+        const value = await storage.getPref(key);
+        return value !== null ? value : fallback;
     }
 
     async _setPref(key, value) {
-        try {
-            const res = await backendClient.getUserSettings();
-            const setts = (res && res.settings) ? res.settings : {};
-            setts[key] = value;
-            await backendClient.updateUserSettings(setts);
-        } catch(e) {}
+        await storage.setPref(key, value);
     }
 
     async _loadHistoryViewPrefs() {
@@ -1411,7 +1402,6 @@ class ArenaUI {
         const theme = savedTheme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         document.documentElement.setAttribute('data-theme', theme);
         document.documentElement.style.colorScheme = theme;
-        localStorage.setItem('nui-theme', theme);
 
         // ---- Verify session / login (mirrors chat.js) ----
         if (typeof backendClient?.verifySession === 'function') {
