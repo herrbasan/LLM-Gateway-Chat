@@ -8,6 +8,40 @@
 - **Fail Fast, Always:** No defensive coding. No mock data. No fallback defaults. No silencing `try/catch`. No optional chaining (`?.`) for required values. Configuration must be explicit - missing required config must throw immediately at startup. When something breaks, let it crash and fix the root cause.
 - **Collaborative Development:** The human user is a partner, not just a reviewer. When facing architectural decisions, trade-offs, or uncertain paths, pause and ask for input. Explain the options clearly. The user's domain knowledge and preferences are valuable — include them in the loop. Avoid long silent stretches of trial-and-error; converse, don't just execute.
 
+## Memory System (Workshop)
+
+The Workshop memory tool (`workshop.memory.*` in MCP, or the `memory` tool in supported IDEs) is a **persistent, cross-session memory** shared across all LLM interactions with the user — in the IDE, in the Chat Arena, and in the Gateway Chat app. It is a collective memory for every conversation the user has with any of their LLMs.
+
+### Session Protocol
+
+**Start every session** with `memory.overview` (format: `"summary"` or `"full"`). This shows what is already known: clusters of related memories, priority scores, active bridges between topics. Without this, you are navigating blind — you don't know what was discussed, decided, or discovered in previous sessions.
+
+**Long sessions**: re-run `memory.overview` periodically. New memories may have been stored by other LLMs in parallel conversations while you were working. Staying current prevents redundant work and conflicting decisions.
+
+### Storing Memories
+
+Store memories **aggressively**. It is impossible to "clutter" the system — a background process (the **Dreamer**, runs every ~15 minutes) automatically deduplicates, connects, and compresses memories. More raw data makes the map better, not messier. You can always update or forget later.
+
+Store after any of:
+- A decision or trade-off was made
+- A bug was found and diagnosed (even if not yet fixed)
+- A pattern was observed across multiple sessions
+- A script or procedure worked (especially if it required specific steps)
+- A design rule or constraint was discovered
+- Something broke and you learned why
+
+Each memory should have a clear `description`, a relevant `category` (e.g., `bugs-fixed`, `project-rules`, `project-architecture`, `project-history`), and `data` with the concrete facts. If you're unsure whether something is worth storing — store it. The Dreamer sorts it out.
+
+### Categories
+
+| Category | Use for |
+|----------|--------|
+| `project-rules` | Hard rules: "never do X", "always do Y before Z" |
+| `project-architecture` | Format specs, data models, structural facts |
+| `project-history` | Session summaries, what happened when |
+| `bugs-fixed` | Root cause + fix for resolved bugs |
+| `patterns` | Recurring observations across sessions |
+
 ## Project Overview
 
 LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend** (default port 8080, configurable in `server/config.json`). It connects to an LLM Gateway for chat streaming and embedding, and stores all data in Rust-based embedded databases.
