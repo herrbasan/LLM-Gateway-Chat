@@ -1673,11 +1673,12 @@ function buildMetadataPrefix() {
 function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
     const userPrompt = elements.systemPrompt?.querySelector('textarea')?.value?.trim() || '';
     const metadata = buildMetadataPrefix();
-    
+    const instructions = CONFIG.instructions || '';
+
+    let prompt = instructions ? `${instructions}\n\n${metadata}` : metadata;
+
     if (userPrompt) {
-        prompt = `${metadata}\n\n${userPrompt}`;
-    } else {
-        prompt = metadata;
+        prompt = `${prompt}\n\n${userPrompt}`;
     }
 
     // Archive tool context: let the LLM know it can search past conversations

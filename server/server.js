@@ -48,6 +48,26 @@ let embedAvailable = true;
 let embedFailCount = 0;
 
 // ============================================
+// Prime Directive (fetched from workshop, cached per-request)
+// ============================================
+
+async function fetchPrimeDirective() {
+    try {
+        const resp = await fetch('http://192.168.0.100:3100/docs/Workshop/Agents_Prime.md', {
+            signal: AbortSignal.timeout(3000)
+        });
+        if (!resp.ok) return '';
+        let md = await resp.text();
+        // Strip YAML frontmatter (between first two --- lines)
+        if (md.startsWith('---')) {
+            const second = md.indexOf('---', 3);
+            if (second !== -1) md = md.slice(second + 3).trimStart();
+        }
+        return md;
+    } catch (_) { return ''; }
+}
+
+// ============================================
 // Database & Routing
 // ============================================
 
@@ -1899,6 +1919,8 @@ const server = http.createServer(async (req, res) => {
   // Intercept JS config to inject environment variables dynamically
   if (pathname === '/chat/js/config.js') {
     res.writeHead(200, { 'Content-Type': 'application/javascript' });
+    const instructions = await fetchPrimeDirective();
+
     const configObj = {
       gatewayUrl: process.env.LLM_GATEWAY_URL || 'http://127.0.0.1:3400',
       defaultModel: process.env.UI_DEFAULT_MODEL || '',
@@ -1910,9 +1932,28 @@ const server = http.createServer(async (req, res) => {
       ttsSpeed: parseFloat(process.env.TTS_SPEED || 1.0),
       backendUrl: '',
       enableBackend: true,
-      enableArchiveTools: true
+      enableArchiveTools: true,
+      instructions
     };
     res.end(`// Generated dynamically by server.js from .env\nwindow.CHAT_CONFIG = ${JSON.stringify(configObj, null, 4)};`);
+    return;
+  }
+
+  // Intercept arena config to inject prime directive
+  if (pathname === '/chat-arena/js/config.js') {
+    const instructions = await fetchPrimeDirective();
+    const arenaPath = path.join(__dirname, '..', 'chat-arena', 'js', 'config.js');
+    try {
+      let content = await fs.promises.readFile(arenaPath, 'utf8');
+      if (instructions) {
+        content += `\n// Injected by server: prime directive from workshop\nwindow.ARENA_CONFIG.instructions = ${JSON.stringify(instructions)};\n`;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/javascript' });
+      res.end(content);
+    } catch (_) {
+      res.writeHead(404);
+      res.end('Not found');
+    }
     return;
   }
 

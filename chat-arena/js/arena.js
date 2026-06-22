@@ -194,6 +194,12 @@ class Participant {
     _buildMessages(conversationHistory) {
         const messages = [];
         const showIdentities = window.ARENA_CONFIG?.showIdentities !== false;
+        const instructions = window.ARENA_CONFIG?.instructions || '';
+
+        // Prime directive first (if available)
+        if (instructions) {
+            messages.push({ role: 'system', content: instructions });
+        }
 
         // System prompt only if role-play mode is active (custom prompt was set)
         if (this.systemPrompt) {
