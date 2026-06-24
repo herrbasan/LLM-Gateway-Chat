@@ -1610,7 +1610,7 @@ const routes = {
       try {
         const queryVector = await embedQuery(query);
 
-        const vectorResults = embeddingsCol.search({
+        const vectorResults = await embeddingsCol.search({
           vector: queryVector,
           top_k: limit * 3
         });
