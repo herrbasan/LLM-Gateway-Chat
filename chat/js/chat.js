@@ -1765,6 +1765,7 @@ async function sendMessage() {
     // MCP VISION: If toggle is ON and tools available, create vision sessions BEFORE sending to model
     // This happens AFTER user message is rendered, BEFORE LLM responds
     if (shouldUseMcpVision) {
+        let visionSucceeded = false;
         try {
             const visionResult = await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, sendChatId);
 
@@ -1774,14 +1775,18 @@ async function sendMessage() {
                 const ex = sendConv.getExchange(currentExchangeId);
                 if (ex?.user?.content) {
                     ex.user.content += `\n\n[Auto-vision: ${visionResult.sessionId}]\n${visionResult.analysis}`;
-                    sendConv.save();
+                    visionSucceeded = true;
                 }
             }
 
-            // Remove image attachments so raw base64 isn't sent to Gateway
-            const ex = sendConv.getExchange(currentExchangeId);
-            if (ex?.user?.attachments) {
-                ex.user.attachments = [];
+            // Only clear attachments if vision analysis actually produced a result.
+            // Otherwise leave images attached so the model can still use direct vision
+            // as a fallback.
+            if (visionSucceeded) {
+                const ex = sendConv.getExchange(currentExchangeId);
+                if (ex?.user?.attachments) {
+                    ex.user.attachments = [];
+                }
                 sendConv.save();
             }
         } catch (err) {
@@ -1934,6 +1939,13 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
         </div>
     `;
     container?.appendChild(visionStatusEl);
+    
+    // Reposition: insert right after the user message that triggered this analysis,
+    // not at the container's end (where it can land after the assistant response).
+    const userMsgEl = container?.querySelector(`.chat-message.user[data-exchange-id="${userExchangeId}"]`);
+    if (userMsgEl?.nextSibling && userMsgEl.nextSibling !== visionStatusEl) {
+        container.insertBefore(visionStatusEl, userMsgEl.nextSibling);
+    }
     scrollToBottom();
     
     let lastSessionId = null;
@@ -2896,13 +2908,17 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     console.log('[Tool Call Intercepted]', parsedObj);
 
     // Guard: Reject vision tool calls if MCP Vision is disabled
+    // Use the chat's actual model, not the global dropdown — the user
+    // may have switched models since the conversation was started.
     const isVisionTool = parsedObj.name.toLowerCase().includes('vision_');
-    const modelSupportsVision = currentModelSupportsVision();
+    const visionChatId = forcedChatId || currentChatId;
+    const chatModel = chatHistory.get(visionChatId)?.model || currentModel;
+    const chatModelConfig = models.find(m => m.id === chatModel);
+    const modelSupportsVision = chatModelConfig?.capabilities?.vision === true;
     if (isVisionTool && modelSupportsVision && !useVisionAnalysis) {
         console.warn('[Tool Call Blocked] Vision tool called but MCP Vision is disabled:', parsedObj.name);
         // Treat as error - add error exchange and continue
-        const toolChatId = forcedChatId || currentChatId;
-        const toolConversation = activeConversations.get(toolChatId);
+        const toolConversation = activeConversations.get(visionChatId);
         const toolExchangeId = await toolConversation.addToolExchange(parsedObj.name, parsedObj.args, origUserExchangeId || originalExchangeId);
         const exchange = toolConversation.getExchange(toolExchangeId);
         exchange.tool.status = 'error';

@@ -62,7 +62,7 @@ Thinking on the Qwen model produces `nullnullnullnullnullnullnullnullnullnull` a
 
 The `</think>` content terminator leaks into the response content. Same fix: gateway should split reasoning from content at the `</think>` marker rather than emitting the terminator as content.
 
-Status: Open — requires LLM Gateway backend changes.
+Status: Resolved (2026-06-24) — No longer reproducible. Likely fixed by Gateway-side thinking extraction improvements.
 
 ---
 
@@ -76,8 +76,7 @@ Status: Backlog
 
 When I try to use the MCP Vision tool to analyze an image, it does not return any results. This might be related to the issue with image attachments not being displayed properly, or there might be a problem with the MCP Vision integration.
 
-Status: Re-opened — It is not working consistently. It might depend on the model adapter acting on the LLM Gateway. Note that it's not entirely done yet.
-(Previously marked resolved via `autoCreateVisionSessions()` pipeline, but the fix is intermittent.)
+Status: Improved — 2026-06-24: `handleToolExecution()` was using the global dropdown `currentModel` for vision detection, which could disagree with the chat's actual model if the user switched models mid-session. Now uses per-chat model via `chatHistory.get(toolChatId)?.model`. This eliminates one class of intermittent failures. Root cause may still have a timing component (models not loaded yet when check runs), but that window is brief.
 
 
 ## Arena chats are not automatically embedded
