@@ -1939,15 +1939,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Intercept arena config to inject prime directive
+  // Serve arena config (no prime directive injection for arena)
   if (pathname === '/chat-arena/js/config.js') {
-    const instructions = await fetchPrimeDirective();
     const arenaPath = path.join(__dirname, '..', 'chat-arena', 'js', 'config.js');
     try {
-      let content = await fs.promises.readFile(arenaPath, 'utf8');
-      if (instructions) {
-        content += `\n// Injected by server: prime directive from workshop\nwindow.ARENA_CONFIG.instructions = ${JSON.stringify(instructions)};\n`;
-      }
+      const content = await fs.promises.readFile(arenaPath, 'utf8');
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       res.end(content);
     } catch (_) {

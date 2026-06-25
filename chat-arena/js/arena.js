@@ -84,6 +84,7 @@ class Participant {
                 messages: messages,
                 stream: true,
                 temperature: this.temperature,
+                tools: [],  // Explicit: no tool use in arena
                 extra_body: {
                     chat_template_kwargs: {
                         enable_thinking: !!this.reasoningEffort
@@ -194,12 +195,6 @@ class Participant {
     _buildMessages(conversationHistory) {
         const messages = [];
         const showIdentities = window.ARENA_CONFIG?.showIdentities !== false;
-        const instructions = window.ARENA_CONFIG?.instructions || '';
-
-        // Prime directive first (if available)
-        if (instructions) {
-            messages.push({ role: 'system', content: instructions });
-        }
 
         // System prompt only if role-play mode is active (custom prompt was set)
         if (this.systemPrompt) {
