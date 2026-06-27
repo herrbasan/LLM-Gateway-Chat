@@ -12,6 +12,13 @@ import { storage } from './storage.js';
 import { getPlainText } from './tts-utils.js';
 import { backendClient } from './api-client.js';
 
+// Fire-and-forget client log to server nLogger — never throws
+function _logTool(message, meta = {}) {
+    if (backendClient?.clientLog) {
+        backendClient.clientLog('Tool', message, meta).catch(() => {});
+    }
+}
+
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
 const GATEWAY_URL = CONFIG.gatewayUrl || 'http://localhost:3400';
@@ -31,7 +38,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_update_metadata',
-            description: 'Update the metadata for a specific session/chat. Use this to assign categories (folders), write summaries, or update titles for better organization.',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nUpdate the metadata for a specific session/chat. Use this to assign categories (folders), write summaries, or update titles for better organization.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -48,7 +55,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_search',
-            description: 'Search the conversation archive. Use semantic mode for themes/ideas, keyword mode for specific terms, hybrid for both. Returns messages ranked by relevance.',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nSearch the conversation archive. Use semantic mode for themes/ideas, keyword mode for specific terms, hybrid for both. Returns messages ranked by relevance.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -68,13 +75,14 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_get_session',
-            description: 'Retrieve a specific conversation session by ID. Returns full message history with pagination.',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nRetrieve a specific conversation session by ID.\\n\\nTo process session data with a forge tool: (1) call this tool to get session data, (2) call storage.write to persist it, (3) pass the storage URL as forge.call payload.\\n\\nWhen saveToStorage is true, this tool writes the full session JSON directly to workshop storage and returns ONLY the URL — use this when you need to pass large session data to a forge tool that would overflow the context window.',
             parameters: {
                 type: 'object',
                 properties: {
                     session_id: { type: 'string', description: 'The session/channel ID to retrieve' },
                     offset: { type: 'number', description: 'Message offset for pagination (default 0)' },
-                    limit: { type: 'number', description: 'Max messages to return (default 100)' }
+                    limit: { type: 'number', description: 'Max messages to return (default 100)' },
+                    saveToStorage: { type: 'boolean', description: 'If true, writes full session JSON to workshop storage and returns only the URL. Use when passing data to forge.call.' }
                 },
                 required: ['session_id']
             }
@@ -84,7 +92,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_list_chats',
-            description: 'List all direct (normal) chat sessions with metadata. Use to browse past conversations.',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nList all direct (normal) chat sessions with metadata. Use to browse past conversations.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -100,7 +108,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_list_arena',
-            description: 'List all arena sessions with metadata. Use to browse available conversations.',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nList all arena sessions with metadata. Use to browse available conversations.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -116,7 +124,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_find_similar',
-            description: 'Given a session ID, find the most semantically similar sessions in the archive. Use to discover related conversations without guessing search terms.',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nGiven a session ID, find the most semantically similar sessions in the archive. Use to discover related conversations without guessing search terms.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -131,7 +139,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_find_references',
-            description: 'Trace conversation lineage. Finds which sessions reference this one (inbound) and which sessions this one references (outbound). Matches session IDs in message content.',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nTrace conversation lineage. Finds which sessions reference this one (inbound) and which sessions this one references (outbound). Matches session IDs in message content.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -217,6 +225,55 @@ async function executeLocalTool(toolName, args) {
             const res = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, { method: 'GET', headers });
             if (!res.ok) throw new Error(`Backend ${res.status}`);
             const data = await res.json();
+
+            // saveToStorage: bypass LLM context window — write session JSON
+            // directly to workshop storage, return only the URL.
+            if (args.saveToStorage) {
+                const storagePayload = JSON.stringify({
+                    session: {
+                        id: data.session?.id,
+                        title: data.session?.title,
+                        mode: data.session?.mode,
+                        model: data.session?.model,
+                        category: data.session?.category,
+                        summary: data.session?.summary,
+                        arenaConfig: data.session?.arenaConfig,
+                    },
+                    messageCount: data.messages?.length,
+                    messages: (data.messages || []).map(m => ({
+                        role: m.role, model: m.model, turnIndex: m.turnIndex,
+                        speaker: m.speaker,
+                        content: m.content
+                    }))
+                });
+
+                const storagePath = `sessions/${args.session_id}.json`;
+                const storageUrl = `http://192.168.0.100:3100/storage/${storagePath}`;
+
+                const putRes = await fetch(`http://192.168.0.100:3100/api/storage/write`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: storagePath, content: storagePayload })
+                });
+                if (!putRes.ok) {
+                    const errText = await putRes.text();
+                    throw new Error(`Storage write failed (${putRes.status}): ${errText}`);
+                }
+
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            ok: true,
+                            url: storageUrl,
+                            sessionId: args.session_id,
+                            messageCount: data.messages?.length,
+                            hint: 'Use this URL as forge.call payload to pass the session data to a forged tool'
+                        })
+                    }]
+                };
+            }
+
             const paged = data.messages?.slice(offset, offset + limit) || [];
             return {
                 content: [{
@@ -1683,7 +1740,7 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
 
     // Archive tool context: let the LLM know it can search past conversations
     if (ENABLE_ARCHIVE_TOOLS) {
-        prompt = prompt + '\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.';
+        prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*. Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.`;
     }
 
     // Memory tool reminder: only when memory.* tools are available via MCP
@@ -2323,6 +2380,9 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     
                 case 'done':
                     if (event.finish_reason === 'tool_calls' && event.tool_calls?.length > 0) {
+                        const toolNames = event.tool_calls.map(tc => tc.function?.name).join(', ');
+                        _logTool('Tool calls received', { chatId, finish_reason: event.finish_reason, count: event.tool_calls.length, tools: toolNames });
+
                         const toolDoneEx = streamConv.getExchange(exchangeId);
                         if (toolDoneEx) {
                             if (event.reasoning_content) toolDoneEx.assistant.reasoning_content = event.reasoning_content;
@@ -2357,6 +2417,18 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                         }
                         return; // Done handling tool execution
                     }
+
+                    // No tool call committed — clean up any placeholder UI shown by
+                    // showPendingToolUI during streaming. Models sometimes stream
+                    // tool_calls deltas then back out with finish_reason:'stop'.
+                    if (isReceivingTool) {
+                        _logTool('Model bailed on tool_calls', { chatId, finish_reason: event.finish_reason });
+                    } else {
+                        _logTool('No tool_calls in done', { chatId, finish_reason: event.finish_reason });
+                    }
+                    const toolContainer2 = getOrCreateContainer(chatId);
+                    const pendingEl = toolContainer2?.querySelector(`.pending-tool-element[data-pending-exchange-id="${exchangeId}"]`);
+                    if (pendingEl) pendingEl.remove();
 
                     // contentBuffer doesn't include our injected timestamp
                     // Get the exchange to find the original timestamp we injected
@@ -2905,7 +2977,7 @@ function showPendingToolUI(exchangeId, chatId) {
 }
 
 async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, origUserExchangeId = null, resumeStream = true) {
-    console.log('[Tool Call Intercepted]', parsedObj);
+    _logTool('handleToolExecution entry', { name: parsedObj.name, toolCallId: parsedObj.id, resumeStream });
 
     // Guard: Reject vision tool calls if MCP Vision is disabled
     // Use the chat's actual model, not the global dropdown — the user
@@ -2967,7 +3039,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     const oldEx = toolConversation.getExchange(originalExchangeId);
     // oldEx could be undefined if the user switched chats and this exchange doesn't exist in the new chat's conversation
     if (!oldEx) {
-        console.warn('[handleToolExecution] Original exchange not found, likely from a different chat context');
+        _logTool('Exchange not found', { originalExchangeId, toolChatId, currentChatId, reason: 'chat context switch or deleted exchange' });
         return;
     }
     // Trim trailing whitespace
@@ -3030,27 +3102,70 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
     });
 
-    // 4. Execute tool (local archive tools first, then MCP servers)
-    try {
-        const isLocalTool = LOCAL_TOOL_NAMES.has(parsedObj.name);
-        const result = isLocalTool
-            ? await executeLocalTool(parsedObj.name, parsedObj.args)
-            : await mcpClient.executeTool(parsedObj.name, parsedObj.args, (progressParams) => {
-                // Update UI on progress
-            const { progress, total, message } = progressParams;
-            let statusText = 'Running...';
-            if (message) statusText = message;
-            if (progress !== undefined) {
-                statusText += ` (${progress}${total ? '/' + total : ''})`;
-            }
-            const notifEl = toolEl.querySelector('.tool-notifications');
-            if (notifEl) {
-                notifEl.style.display = 'block';
-                notifEl.innerHTML = '<span class="tool-spinner"></span> ' + statusText;
-            }
-        }, toolChatId);
+    // 4. Execute tool (local archive tools first, then MCP servers).
+    // .catch() ONLY on the tool execution — a known external-failure path.
+    // Returns null on failure to signal "UI already handled".
+    const isLocalTool = LOCAL_TOOL_NAMES.has(parsedObj.name);
+    _logTool('Routing', { name: parsedObj.name, target: isLocalTool ? 'LOCAL' : 'MCP' });
+    const toolPromise = isLocalTool
+        ? executeLocalTool(parsedObj.name, parsedObj.args)
+        : mcpClient.executeTool(parsedObj.name, parsedObj.args, (progressParams) => {
+        const { progress, total, message } = progressParams;
+        let statusText = 'Running...';
+        if (message) statusText = message;
+        if (progress !== undefined) {
+            statusText += ` (${progress}${total ? '/' + total : ''})`;
+        }
+        const notifEl = toolEl.querySelector('.tool-notifications');
+        if (notifEl) {
+            notifEl.style.display = 'block';
+            notifEl.innerHTML = '<span class="tool-spinner"></span> ' + statusText;
+        }
+    }, toolChatId);
 
-        exchange.tool.status = 'success';
+    const result = await toolPromise.catch(err => {
+        _logTool('Tool FAILED', { name: parsedObj.name, error: err.message || String(err) });
+        exchange.tool.status = 'error';
+        exchange.tool.content = err.message || String(err);
+        toolConversation.save();
+        toolConversation._syncMessage('tool', exchange.tool.content, null, exchange.id, {
+            toolName: exchange.tool.name,
+            toolArgs: exchange.tool.args,
+            toolStatus: 'error'
+        });
+
+        toolEl.querySelector('.tool-status').setAttribute('variant', 'danger');
+          toolEl.querySelector('.tool-status').innerHTML = 'Failed';
+          toolEl.querySelector('.tool-notifications').style.display = 'none';
+        toolEl.querySelector('.tool-result').innerHTML = '<span class="tool-error"></span>' +
+            '<div class="tool-error-actions">' +
+                '<nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>' +
+                '<nui-button size="small" class="dismiss-tool"><button>Dismiss & Continue</button></nui-button>' +
+            '</div>';
+        toolEl.querySelector('.tool-result .tool-error').textContent = exchange.tool.content;
+        toolEl.querySelector('.tool-payload').style.display = 'block';
+
+        toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
+            toolEl.querySelector('.tool-result').innerHTML = '';
+            toolEl.querySelector('.tool-status').innerHTML = 'Pending';
+            toolEl.querySelector('.tool-notifications').innerHTML = '<span class="tool-spinner"></span> Running...';
+            toolEl.querySelector('.tool-status').setAttribute('variant', 'primary');
+            handleToolExecution(originalExchangeId, parsedObj, toolChatId, origUserExchangeId, resumeStream);
+        });
+
+        toolEl.querySelector('.dismiss-tool')?.addEventListener('click', () => {
+            if (resumeStream) {
+                streamResponse(toolExchangeId, toolChatId, userExchangeId);
+            }
+            toolEl.querySelector('.dismiss-tool').parentElement.style.display = 'none';
+        });
+
+        return null; // signal: failed, UI handled, bail
+    });
+
+    if (result === null) return;
+
+    exchange.tool.status = 'success';
         // Extract the actual content from MCP result structure
         // MCP result is { content: [{ type: 'text', text: '...' }] } or similar
         let resultText = '';
@@ -3092,17 +3207,11 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         
         // Intercept massive base64 images generated by the tool and force them into nDB natively
         if (rawBase64Attachments.length > 0) {
-            try {
-                // Shoot the base64 up to the node API which writes to disk via nDB and returns `/api/buckets/images/...`
-                const savedToolFiles = await imageStore.save(exchange.id, rawBase64Attachments);
-                
-                // For every image saved, push the lightweight backend URL instead of the base64 string
-                savedToolFiles.forEach(f => resultImages.push(f.url));
-            } catch (err) {
-                console.error('Failed to intercept and upload MCP base64 image data to local bucket store', err);
-                // Fallback to storing massive json blobs in browser storage if upload strictly fails
-                rawBase64Attachments.forEach(att => resultImages.push(att.dataUrl));
-            }
+            // Shoot the base64 up to the node API which writes to disk via nDB and returns `/api/buckets/images/...`
+            const savedToolFiles = await imageStore.save(exchange.id, rawBase64Attachments);
+
+            // For every image saved, push the lightweight backend URL instead of the base64 string
+            savedToolFiles.forEach(f => resultImages.push(f.url));
         }
         
         if (resultImages.length > 0) {
@@ -3143,52 +3252,6 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             await streamResponse(toolExchangeId, toolChatId, userExchangeId);
         }
         return toolExchangeId;
-        
-    } catch (err) {
-        console.error('Tool execution error', err);
-        exchange.tool.status = 'error';
-        exchange.tool.content = err.message || String(err);
-        toolConversation.save();
-        toolConversation._syncMessage('tool', exchange.tool.content, null, exchange.id, {
-            toolName: exchange.tool.name,
-            toolArgs: exchange.tool.args,
-            toolStatus: 'error'
-        });
-
-        toolEl.querySelector('.tool-status').setAttribute('variant', 'danger');
-          toolEl.querySelector('.tool-status').innerHTML = 'Failed';
-          toolEl.querySelector('.tool-notifications').style.display = 'none';
-        toolEl.querySelector('.tool-result').innerHTML = `<span class="tool-error"></span>
-            <div class="tool-error-actions">
-                <nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>
-                <nui-button size="small" class="dismiss-tool"><button>Dismiss & Continue</button></nui-button>
-            </div>
-        `;
-        toolEl.querySelector('.tool-result .tool-error').textContent = exchange.tool.content;
-        toolEl.querySelector('.tool-payload').style.display = 'block'; // force open
-        
-        // Wire up retry/dismiss
-        toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
-            toolEl.querySelector('.tool-result').innerHTML = '';
-            toolEl.querySelector('.tool-status').innerHTML = 'Pending';
-            toolEl.querySelector('.tool-notifications').innerHTML = '<span class="tool-spinner"></span> Running...';
-            toolEl.querySelector('.tool-status').setAttribute('variant', 'primary');
-            handleToolExecution(originalExchangeId, parsedObj, toolChatId, origUserExchangeId, resumeStream);
-        });
-        
-        toolEl.querySelector('.dismiss-tool')?.addEventListener('click', () => {
-            // Dismiss tool implies just continuing without tool result.
-            // Session ID is set per-chat inside streamResponse — no need to set it here.
-            if (resumeStream) {
-                streamResponse(toolExchangeId, toolChatId, userExchangeId);
-            }
-            toolEl.querySelector('.dismiss-tool').parentElement.style.display = 'none';
-        });
-        
-        if (!resumeStream) {
-            return toolExchangeId;
-        }
-    }
 }
 
 function setEmbedStatus(exchangeId, status, error = null, role = 'assistant') {

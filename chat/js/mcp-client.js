@@ -23,25 +23,21 @@ class MCPClient {
         if (this._configLoaded) return;
         this._configLoaded = true;
 
-        try {
-            const storedServers = await storage.mcpGet('servers');
-            if (storedServers) {
-                this.servers = JSON.parse(storedServers);
-                this.servers.forEach(s => s.status = 'disconnected');
-            }
+        const storedServers = await storage.mcpGet('servers');
+        if (storedServers) {
+            this.servers = JSON.parse(storedServers);
+            this.servers.forEach(s => s.status = 'disconnected');
+        }
 
-            const storedEnabledTools = await storage.mcpGet('enabledTools');
-            if (storedEnabledTools) {
-                const parsedTools = JSON.parse(storedEnabledTools);
-                this.enabledTools = new Map(
-                    Object.entries(parsedTools).map(([serverId, toolsObj]) => [
-                        serverId,
-                        new Map(Object.entries(toolsObj))
-                    ])
-                );
-            }
-        } catch (e) {
-            console.error('Failed to load MCP server config', e);
+        const storedEnabledTools = await storage.mcpGet('enabledTools');
+        if (storedEnabledTools) {
+            const parsedTools = JSON.parse(storedEnabledTools);
+            this.enabledTools = new Map(
+                Object.entries(parsedTools).map(([serverId, toolsObj]) => [
+                    serverId,
+                    new Map(Object.entries(toolsObj))
+                ])
+            );
         }
     }
 
@@ -498,15 +494,17 @@ class MCPClient {
     handleResponse(server, data) {
         const requestId = String(data.id);
         const pending = this.pendingRequests.get(requestId);
+        console.log(`[MCP handleResponse] requestId=${requestId} found=${!!pending} error=${!!data.error} resultType=${typeof data.result}`);
         if (pending) {
             this.pendingRequests.delete(requestId);
             if (pending.cancelTimeout) {
-                // Clear the timeout to prevent it firing later
                 pending.cancelTimeout();
             }
             if (data.error) {
+                console.error('[MCP handleResponse] Rejecting with:', data.error.message || data.error);
                 pending.reject(new Error(`MCP error: ${data.error.message || JSON.stringify(data.error)}`));
             } else {
+                console.log('[MCP handleResponse] Resolving with result');
                 pending.resolve(data.result);
             }
         }
@@ -518,25 +516,22 @@ class MCPClient {
      */
     async executeToolStreamableHttp(server, payload) {
         const requestId = payload.id;
-        console.log(`[${server.name}] Execute via streamableHTTP: ${server.postEndpoint}`);
+        console.log(`[MCP SSE] POST fetch → ${server.postEndpoint} | method=${payload.method} name=${payload.params?.name}`);
 
-        let response;
-        try {
-            response = await fetch(server.postEndpoint, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'text/event-stream'
-                },
-                body: JSON.stringify(payload)
-            });
-        } catch (err) {
-            console.error(`[${server.name}] Fetch failed:`, err.message);
-            throw new Error(`Fetch failed: ${err.message}. CORS issue?`);
-        }
+        const response = await fetch(server.postEndpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        console.log(`[MCP SSE] Response: status=${response.status} ok=${response.ok} type=${response.headers.get('content-type')}`);
 
         if (!response.ok) {
             const text = await response.text();
+            console.error(`[MCP SSE] HTTP error body:`, text.slice(0, 500));
             throw new Error(`HTTP ${response.status}: ${text}`);
         }
 
@@ -544,52 +539,74 @@ class MCPClient {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let eventCount = 0;
 
-        try {
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+        console.log('[MCP SSE] Starting SSE reader loop...');
 
-                const chunk = decoder.decode(value, { stream: true });
-                buffer += chunk;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                console.log(`[MCP SSE] Stream ended after ${eventCount} events`);
+                // Stream closed without a matching response for our requestId.
+                // This is a zombie — the pending promise has no resolution path.
+                // Force-fail it.
+                const pending = this.pendingRequests.get(requestId);
+                if (pending) {
+                    console.error(`[MCP SSE] Stream ended with NO matching response for requestId=${requestId}`);
+                    this.pendingRequests.delete(requestId);
+                    if (pending.cancelTimeout) pending.cancelTimeout();
+                    pending.reject(new Error('MCP stream ended without response'));
+                }
+                break;
+            }
 
-                // Normalise line endings
-                buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            const chunk = decoder.decode(value, { stream: true });
+            buffer += chunk;
 
-                while (buffer.includes('\n\n')) {
-                    const msgEnd = buffer.indexOf('\n\n');
-                    const msg = buffer.slice(0, msgEnd);
-                    buffer = buffer.slice(msgEnd + 2);
+            // Normalise line endings
+            buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-                    if (msg.startsWith(':')) continue; // skip comment lines
+            while (buffer.includes('\n\n')) {
+                const msgEnd = buffer.indexOf('\n\n');
+                const msg = buffer.slice(0, msgEnd);
+                buffer = buffer.slice(msgEnd + 2);
 
-                    const fields = {};
-                    for (const line of msg.split('\n')) {
-                        const colonIdx = line.indexOf(':');
-                        if (colonIdx === -1) continue;
-                        fields[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
+                if (msg.startsWith(':')) continue; // skip comment lines
+
+                const fields = {};
+                for (const line of msg.split('\n')) {
+                    const colonIdx = line.indexOf(':');
+                    if (colonIdx === -1) continue;
+                    fields[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
+                }
+
+                if (!fields.data) continue;
+
+                let data;
+                try {
+                    data = JSON.parse(fields.data);
+                } catch (e) {
+                    console.warn('[MCP SSE] Skipping unparseable event data:', fields.data.slice(0, 100));
+                    continue;
+                }
+
+                eventCount++;
+                const hasId = !!data.id;
+                const hasMethod = !!data.method;
+                console.log(`[MCP SSE] Event #${eventCount}: id=${data.id || 'NONE'} method=${data.method || 'NONE'} hasError=${!!data.error} hasResult=${!!data.result}`);
+
+                if (data.method && !data.id) {
+                    if (data.method === 'notifications/progress') {
+                        this.handleProgress(server, data.params);
                     }
-
-                    if (!fields.data) continue;
-
-                    try {
-                        const data = JSON.parse(fields.data);
-                        if (data.method && !data.id) {
-                            if (data.method === 'notifications/progress') {
-                                this.handleProgress(server, data.params);
-                            }
-                            continue;
-                        }
-                        if (data.id) {
-                            this.handleResponse(server, data);
-                        }
-                    } catch (e) {
-                        // Ignore malformed JSON in SSE stream
-                    }
+                    continue;
+                }
+                if (data.id) {
+                    const isMatch = String(data.id) === requestId;
+                    console.log(`[MCP SSE] handleResponse id=${data.id} requestId=${requestId} match=${isMatch}`);
+                    this.handleResponse(server, data);
                 }
             }
-        } catch (e) {
-            console.error(`[${server.name}] SSE read error:`, e);
         }
     }
 
@@ -601,20 +618,25 @@ class MCPClient {
      * @param {String} chatId Optional - the chat this tool execution belongs to (for multi-chat tracking)
      */
     async executeTool(llmToolName, parameters, onProgress = null, chatId = null) {
+        console.log('[MCP executeTool] Called for:', llmToolName);
+
         const record = this.toolRegistry.get(llmToolName);
         if (!record) {
+            console.error('[MCP executeTool] Tool not in registry:', llmToolName, 'registry keys:', [...this.toolRegistry.keys()]);
             throw new Error(`Unknown tool: ${llmToolName}`);
         }
 
         const server = this.servers.find(s => s.id === record.serverId);
+        console.log('[MCP executeTool] Server lookup:', server?.name, 'status:', server?.status, 'postEndpoint:', server?.postEndpoint);
         if (!server || server.status !== 'connected') {
+            console.error('[MCP executeTool] Server disconnected:', server?.name, server?.status);
             throw new Error(`Server for tool ${llmToolName} is disconnected or unavailable`);
         }
 
         const requestId = Date.now().toString();
         const progressToken = `prog-${requestId}`;
 
-        console.log(`Executing tool: ${record.originalName} on server ${server.name}`, parameters);
+        console.log(`[MCP executeTool] Dispatching ${record.originalName} → ${server.name}, requestId=${requestId}`);
 
         const payload = {
             jsonrpc: '2.0',
@@ -626,6 +648,7 @@ class MCPClient {
                 _meta: { progressToken }
             }
         };
+        console.log('[MCP executeTool] Payload:', JSON.stringify(payload).slice(0, 200));
 
         // Register pending request for progress/cancel callbacks
         const pendingPromise = new Promise((resolve, reject) => {
@@ -633,6 +656,7 @@ class MCPClient {
 
             const startTimeout = () => {
                 return setTimeout(() => {
+                    console.warn('[MCP executeTool] Timeout firing for requestId:', requestId);
                     this.pendingRequests.delete(requestId);
                     reject(new Error('Tool execution timeout (2 minutes)'));
                 }, timeoutDuration);
@@ -650,15 +674,21 @@ class MCPClient {
             }
 
             this.pendingRequests.set(requestId, { resolve, reject, resetTimeout, cancelTimeout, onProgress, server, chatId });
+            console.log('[MCP executeTool] pendingRequests count:', this.pendingRequests.size);
         });
 
-        // Use streamableHTTP (streaming response)
+        // Use streamableHTTP (streaming response).
+        // Reject the pending promise immediately if the fetch or stream fails.
         this.executeToolStreamableHttp(server, payload).catch(err => {
-            // Error will be handled by handleResponse rejecting the promise
-            console.error(`[${server.name}] StreamableHTTP error:`, err);
+            console.error('[MCP executeTool] streamableHTTP failed:', err.message);
+            const pending = this.pendingRequests.get(payload.id);
+            if (pending) {
+                this.pendingRequests.delete(payload.id);
+                if (pending.cancelTimeout) pending.cancelTimeout();
+                pending.reject(err);
+            }
         });
 
-        // Return the pending promise directly, timeout is handled natively inside it
         return pendingPromise;
     }
 

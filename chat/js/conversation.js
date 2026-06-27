@@ -156,11 +156,9 @@ export class Conversation {
         };
         this.exchanges.push(exchange);
         this.save();
-        this._syncMessage('tool', '', null, exchange.id, { 
-            toolName, 
-            toolArgs,
-            toolStatus: 'pending'
-        });
+        // Backend sync deferred until result or error — a pending
+        // tool with no content is invisible noise and creates zombies
+        // when the call silently fails. Only persist on completion.
         return exchange.id;
     }
 
