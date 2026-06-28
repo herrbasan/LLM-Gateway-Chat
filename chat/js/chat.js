@@ -1098,9 +1098,14 @@ async function savePresets() {
     await storage.setPref('system-presets', JSON.stringify(systemPresets));
 }
 
+const PRESET_NONE = '__none__';
+
 function populatePresetSelect() {
     if (!elements.presetSelect) return;
-    const items = systemPresets.map(p => ({ value: p.id, label: p.name }));
+    const items = [
+        { value: PRESET_NONE, label: '— None —' },
+        ...systemPresets.map(p => ({ value: p.id, label: p.name }))
+    ];
     if (elements.presetSelect.setItems) {
         elements.presetSelect.setItems(items);
     } else {
@@ -1113,6 +1118,10 @@ function populatePresetSelect() {
         placeholder.selected = true;
         placeholder.textContent = 'Load preset...';
         select.appendChild(placeholder);
+        const noneOpt = document.createElement('option');
+        noneOpt.value = PRESET_NONE;
+        noneOpt.textContent = '— None —';
+        select.appendChild(noneOpt);
         for (const p of systemPresets) {
             const opt = document.createElement('option');
             opt.value = p.id;
@@ -1124,13 +1133,20 @@ function populatePresetSelect() {
 
 async function onPresetSelected(id) {
     if (!id) return;
-    const preset = systemPresets.find(p => p.id === id);
-    if (!preset) return;
     const textarea = elements.systemPrompt?.querySelector('textarea');
-    if (textarea) {
-        textarea.value = preset.content;
-        if (currentChatId) {
-            updateChatSystemPrompt(currentChatId, preset.content);
+    if (id === PRESET_NONE) {
+        if (textarea) {
+            textarea.value = '';
+            if (currentChatId) updateChatSystemPrompt(currentChatId, '');
+        }
+    } else {
+        const preset = systemPresets.find(p => p.id === id);
+        if (!preset) return;
+        if (textarea) {
+            textarea.value = preset.content;
+            if (currentChatId) {
+                updateChatSystemPrompt(currentChatId, preset.content);
+            }
         }
     }
     // Reset select to "Load preset..." placeholder
@@ -1626,15 +1642,17 @@ function setupEventListeners() {
     elements.importChatInput?.addEventListener('change', handleChatImport);
     
     // System prompt presets
-    if (elements.managePresetsBtn) {
-        elements.managePresetsBtn.addEventListener('click', () => {
-            editingPresetId = null;
+    // Manage button: open dialog with no preset selected for editing
+    elements.managePresetsBtn?.addEventListener('click', () => {
+        editingPresetId = null;
         const nameInput = document.getElementById('preset-name-input');
         if (nameInput) nameInput.value = '';
         setPresetEditor('');
         renderPresetList();
         elements.presetsDialog?.showModal();
     });
+
+    // + New button: create a draft preset, select it for editing, open dialog
     document.getElementById('preset-add-btn')?.addEventListener('click', () => {
         const draft = {
             id: 'preset_' + Date.now(),
@@ -1646,25 +1664,10 @@ function setupEventListeners() {
         const nameInput = document.getElementById('preset-name-input');
         if (nameInput) nameInput.value = draft.name;
         setPresetEditor('');
-            renderPresetList();
-            elements.presetsDialog?.showModal();
-        });
-    }
-    document.getElementById('preset-add-btn')?.addEventListener('click', () => {
-        const draft = {
-            id: 'preset_' + Date.now(),
-            name: 'New Preset',
-            content: ''
-        };
-        systemPresets.push(draft);
-        editingPresetId = draft.id;
-        const nameInput = document.getElementById('preset-name-input');
-        if (nameInput) nameInput.value = draft.name;
-        const editor = document.getElementById('preset-editor');
-        if (editor) editor.setValue('');
         savePresets();
         populatePresetSelect();
         renderPresetList();
+        elements.presetsDialog?.showModal();
     });
     elements.presetSelect?.querySelector('select')?.addEventListener('change', () => {
         const select = elements.presetSelect.querySelector('select');
