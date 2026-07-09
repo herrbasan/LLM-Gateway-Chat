@@ -44,6 +44,14 @@ const EMBED_HEADERS = {
     'Content-Type': 'application/json'
 };
 
+// browser_fetch allowlist — exposed to the chat frontend as
+// window.CHAT_CONFIG.browserFetchAllowedPrefixes. Each entry is
+// { label, match } where match is a string prefix or RegExp source string.
+// When omitted, the chat uses its built-in LAN-only default.
+const BROWSER_FETCH_ALLOWLIST = Array.isArray(cfg.browserFetchAllowedPrefixes)
+    ? cfg.browserFetchAllowedPrefixes
+    : null;
+
 let embedAvailable = true;
 let embedFailCount = 0;
 
@@ -1933,6 +1941,7 @@ const server = http.createServer(async (req, res) => {
       backendUrl: '',
       enableBackend: true,
       enableArchiveTools: true,
+      browserFetchAllowedPrefixes: BROWSER_FETCH_ALLOWLIST,
       instructions
     };
     res.end(`// Generated dynamically by server.js from .env\nwindow.CHAT_CONFIG = ${JSON.stringify(configObj, null, 4)};`);

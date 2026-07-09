@@ -32,8 +32,37 @@ const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http:
 const BACKEND_API_KEY = CONFIG.backendApiKey || '';
 const ENABLE_ARCHIVE_TOOLS = CONFIG.enableArchiveTools !== false;
 
-// Archive tool definitions (local, not MCP servers)
+// LAN allowlist for browser_fetch — must match an entry's `match` prefix (string or RegExp).
+// Default covers the chat backend, workshop storage/MCP server, and the home gateway.
+// Server can override via server/config.json → browserFetchAllowedPrefixes.
+const DEFAULT_BROWSER_FETCH_ALLOWLIST = [
+    { label: 'localhost', match: /^https?:\/\/localhost(:\d+)?(\/|$)/i },
+    { label: '127.0.0.1', match: /^https?:\/\/127\.0\.0\.1(:\d+)?(\/|$)/i },
+    { label: '192.168.x.x', match: /^https?:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?(\/|$)/i },
+    { label: '10.x.x.x', match: /^https?:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?(\/|$)/i },
+    { label: '172.16-31.x.x', match: /^https?:\/\/172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}(:\d+)?(\/|$)/i }
+];
+
+// Local tool definitions (executed directly in the browser, never routed to MCP servers)
 const ARCHIVE_TOOLS = [
+    {
+        type: 'function',
+        function: {
+            name: 'browser_fetch',
+            description: 'Execution context: Chat App browser ONLY. This is NOT an MCP method — it is intercepted by the chat frontend and executed with the browser\'s native fetch() API, bypassing MCP JSON-RPC size limits entirely.\\n\\nUse this tool to download a file or resource from a LAN/local URL when the response may be too large for MCP (which is typically capped around 64 KB). The response is made available to the model either as inline text or as a chat-bucket URL.\\n\\n**Allowed URLs**: only LAN/local addresses are permitted (localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x, 172.16-31.x.x). Public internet URLs are rejected.\\n\\n**Response handling**: text/* and application/json responses up to max_inline_bytes (default 5 MB) are returned inline. Anything larger, or any binary type (images, PDFs, audio, etc.), is uploaded to the chat\'s bucket and a `/api/buckets/images/...` URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when `storage_read` fails due to size.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'Absolute URL to fetch. Must be a LAN/local address.' },
+                    method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method (default GET)' },
+                    headers: { type: 'object', description: 'Optional request headers as key/value strings' },
+                    body: { type: 'string', description: 'Optional request body for POST/PUT/PATCH. String only.' },
+                    max_inline_bytes: { type: 'number', description: 'Max bytes to return inline as text (default 5,242,880 = 5 MB). Set to 0 to always upload to bucket and return a URL.' }
+                },
+                required: ['url']
+            }
+        }
+    },
     {
         type: 'function',
         function: {
@@ -153,13 +182,19 @@ const ARCHIVE_TOOLS = [
 ];
 
 // Local tool execution — calls backend REST API, not MCP servers
-async function executeLocalTool(toolName, args) {
+async function executeLocalTool(toolName, args, exchangeId = null) {
     const headers = {
         'Content-Type': 'application/json',
         'X-API-Key': BACKEND_API_KEY
     };
 
     switch (toolName) {
+        case 'browser_fetch': {
+            return executeBrowserFetch(args, exchangeId, headers);
+        }
+        case 'read_resource': {
+            return mcpClient.executeReadResource(args, exchangeId);
+        }
         case 'chat_archive_update_metadata': {
             console.log('[Archive Update Metadata] Args:', JSON.stringify(args));
             const reqBody = {};
@@ -433,7 +468,176 @@ async function executeLocalTool(toolName, args) {
     }
 }
 
+// ============================================
+// browser_fetch — direct browser fetch with no MCP transport size cap
+// ============================================
+//
+// Returns MCP-style { content: [{ type: 'text' | 'image', ... }] } so the
+// existing dispatcher renders text inline and binary responses via the
+// chat's image bucket (garbage-collected on chat delete).
+//
+// Validate-then-fetch. If any precondition fails, throw — never silently
+// degrade. The dispatcher catches and shows a tool error.
+
+async function executeBrowserFetch(args, exchangeId, _headers) {
+    // Success conditions (each one explicit, fail fast)
+    if (!args || typeof args !== 'object') throw new Error('browser_fetch: args object required');
+    if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('browser_fetch: url required');
+    if (args.method !== undefined && !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(args.method)) {
+        throw new Error(`browser_fetch: invalid method "${args.method}"`);
+    }
+    if (args.headers !== undefined && (typeof args.headers !== 'object' || Array.isArray(args.headers))) {
+        throw new Error('browser_fetch: headers must be an object');
+    }
+    if (args.body !== undefined && typeof args.body !== 'string') {
+        throw new Error('browser_fetch: body must be a string');
+    }
+    const maxInlineBytes = args.max_inline_bytes === 0 ? 0 : (args.max_inline_bytes ?? 5 * 1024 * 1024);
+    if (typeof maxInlineBytes !== 'number' || maxInlineBytes < 0) {
+        throw new Error('browser_fetch: max_inline_bytes must be a non-negative number');
+    }
+    // 0 means "always upload to bucket and return URL"; non-zero may fall back to bucket if too large.
+    if (maxInlineBytes > 0 && !exchangeId) {
+        throw new Error('browser_fetch: exchangeId required when max_inline_bytes > 0');
+    }
+
+    // Parse + validate URL
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(args.url);
+    } catch (err) {
+        throw new Error(`browser_fetch: invalid URL — ${err.message}`);
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        throw new Error(`browser_fetch: protocol must be http or https (got ${parsedUrl.protocol})`);
+    }
+
+    // Allowlist check — server can extend via CONFIG.browserFetchAllowedPrefixes.
+    const allowlist = (CONFIG.browserFetchAllowedPrefixes && Array.isArray(CONFIG.browserFetchAllowedPrefixes))
+        ? CONFIG.browserFetchAllowedPrefixes
+        : DEFAULT_BROWSER_FETCH_ALLOWLIST;
+    const fullUrl = parsedUrl.href;
+    const matched = allowlist.some(entry => {
+        const m = entry?.match;
+        if (!m) return false;
+        if (m instanceof RegExp) return m.test(fullUrl);
+        if (typeof m === 'string') return fullUrl.startsWith(m);
+        return false;
+    });
+    if (!matched) {
+        const allowedLabels = allowlist.map(e => e?.label || '<unlabeled>').join(', ');
+        throw new Error(`browser_fetch: URL not in allowlist. Allowed: ${allowedLabels}. Got: ${fullUrl}`);
+    }
+
+    // Build fetch options
+    const fetchOpts = {
+        method: args.method || 'GET',
+        headers: args.headers ? { ...args.headers } : undefined,
+        body: args.body
+    };
+    // GET/HEAD cannot have a body per spec — strip silently rather than 400.
+    if ((fetchOpts.method === 'GET' || fetchOpts.method === 'HEAD') && fetchOpts.body !== undefined) {
+        fetchOpts.body = undefined;
+    }
+
+    console.log(`[browser_fetch] Fetching ${fetchOpts.method} ${fullUrl}`);
+    let res;
+    try {
+        res = await fetch(fullUrl, fetchOpts);
+    } catch (fetchErr) {
+        const errType = fetchErr.name || 'NetworkError';
+        const errMsg = fetchErr.message || String(fetchErr);
+        console.error(`[browser_fetch] Fetch failed: ${errType}: ${errMsg}`, fetchErr);
+        throw new Error(
+            `browser_fetch: network request failed (${errType}). ` +
+            `URL: ${fullUrl}. ` +
+            `Common causes: target server not running, CORS blocked the request, or the browser cannot reach localhost:3100 from this origin. ` +
+            `Detail: ${errMsg}`
+        );
+    }
+    console.log(`[browser_fetch] Response ${res.status} ${res.statusText}, content-type: ${res.headers.get('content-type') || 'unknown'}`);
+
+    const contentType = res.headers.get('content-type') || '';
+    const isText = contentType.startsWith('text/') || contentType.includes('json') || contentType.startsWith('application/xml') || contentType === '';
+
+    // Read the whole response as a Blob so we can measure actual bytes before deciding inline vs bucket.
+    // This keeps us from loading multi-megabyte text into a JS string just to truncate it.
+    const blob = await res.blob();
+
+    // If binary OR explicitly always-upload (maxInlineBytes === 0) OR too large for inline → bucket.
+    const tooLargeForInline = maxInlineBytes > 0 && blob.size > maxInlineBytes;
+    if (!isText || maxInlineBytes === 0 || tooLargeForInline) {
+        if (!exchangeId) {
+            throw new Error('browser_fetch: response too large for inline return and no exchangeId to upload under');
+        }
+        const mime = blob.type || contentType || 'application/octet-stream';
+        const filename = `browser_fetch_${Date.now()}.${mimeToExt(mime)}`;
+        const dataUrl = await blobToDataUrl(blob);
+        const saved = await imageStore.save(exchangeId, [{ name: filename, type: mime, dataUrl }]);
+        const url = saved[0]?.url;
+        if (!url) throw new Error('browser_fetch: bucket upload succeeded but no URL returned');
+        const summary = JSON.stringify({
+            ok: res.ok,
+            status: res.status,
+            statusText: res.statusText,
+            url,
+            mimeType: mime,
+            bytes: blob.size,
+            note: maxInlineBytes === 0 ? 'Response uploaded to chat bucket (max_inline_bytes=0).' : 'Response too large for inline return; uploaded to chat bucket.'
+        }, null, 2);
+        return {
+            content: [
+                { type: 'image', url, mimeType: mime },
+                { type: 'text', text: summary }
+            ]
+        };
+    }
+
+    // Text inline path — blob is known to be under maxInlineBytes.
+    const text = await blob.text();
+    const payload = {
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        contentType,
+        bytes: blob.size,
+        url: fullUrl,
+        truncated: false,
+        body: text
+    };
+    return {
+        content: [{
+            type: 'text',
+            text: JSON.stringify(payload, null, 2)
+        }]
+    };
+}
+
+// Convert Blob → data URL (browser only).
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error(`FileReader failed: ${reader.error?.message || 'unknown'}`));
+        reader.readAsDataURL(blob);
+    });
+}
+
+// Map common MIME types to safe filename extensions.
+function mimeToExt(mime) {
+    const map = {
+        'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg',
+        'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg',
+        'image/bmp': 'bmp', 'application/pdf': 'pdf',
+        'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg',
+        'video/mp4': 'mp4', 'video/webm': 'webm',
+        'application/zip': 'zip', 'application/octet-stream': 'bin'
+    };
+    return map[mime] || 'bin';
+}
+
 const LOCAL_TOOL_NAMES = new Set(ARCHIVE_TOOLS.map(t => t.function.name));
+LOCAL_TOOL_NAMES.add('read_resource'); // read_resource is handled by the MCP resource client, not a real MCP tool
 
 // State
 let currentChatId = null;
@@ -1743,7 +1947,36 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
 
     // Archive tool context: let the LLM know it can search past conversations
     if (ENABLE_ARCHIVE_TOOLS) {
-        prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*. Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.`;
+        prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*. Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.
+
+## Large File Retrieval — browser_fetch
+
+browser_fetch is a CHAT-APP-NATIVE tool. It is NOT an MCP method. When you call it, the chat frontend intercepts the call and performs a direct browser fetch() to the URL, bypassing MCP's ~64 KB per-message size limit entirely.
+
+When to use browser_fetch:
+- You have a direct URL for a file/resource and the payload is likely larger than MCP can carry.
+- storage_read or another MCP file tool fails with a size-limit error.
+- You already obtained a LAN/local URL (for example from storage.list or a Forge result) and need to read its contents.
+
+Allowed URLs: LAN/local addresses ONLY — localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x, and 172.16-31.x.x. Public internet URLs are rejected.
+
+How to call browser_fetch:
+1. Use the tool name exactly: browser_fetch
+2. Pass the absolute URL in the "url" argument.
+3. Optional: set "max_inline_bytes" to control how many bytes are returned as inline text (default 5,242,880 = 5 MB). Set it to 0 to always upload the response to the chat bucket and receive a URL instead.
+4. Optional: set "method", "headers", or "body" for non-GET requests.
+
+What you get back:
+- For text/* or application/json responses that are smaller than max_inline_bytes: a JSON object with the response body in the "body" field.
+- For binary responses, or text larger than max_inline_bytes, or when max_inline_bytes is 0: the response is uploaded to the chat bucket and you receive a "/api/buckets/images/..." URL plus metadata. If the URL points to a text file you can read, call browser_fetch again on that URL to retrieve the text.
+
+Prefer browser_fetch over storage_read when you already know the URL and expect the response to be large. Example flow: storage.list shows a path, storage.read fails due to size, so you call browser_fetch on the file's direct URL.`;
+    }
+
+    // MCP resource context: list available resources and templates so the LLM can ask to read them
+    const resourceBlock = buildMcpResourceContext();
+    if (resourceBlock) {
+        prompt = prompt + '\n\n## MCP Resources Available\n\n' + resourceBlock;
     }
 
     // Memory tool reminder: only when memory.* tools are available via MCP
@@ -1905,6 +2138,46 @@ function areMemoryToolsAvailable() {
         if (llmName.startsWith('memory.')) return true;
     }
     return false;
+}
+
+/**
+ * Build a markdown block describing available MCP resources and templates.
+ */
+function buildMcpResourceContext() {
+    const resources = mcpClient.getAllResources();
+    const templates = mcpClient.getAllResourceTemplates();
+    if (resources.length === 0 && templates.length === 0) return null;
+
+    const lines = [];
+
+    if (resources.length > 0) {
+        lines.push('Available resources (call `read_resource` with the exact URI):');
+        for (const r of resources) {
+            let line = `- \`${r.uri}\` (${r.name}`;
+            if (r.mimeType) line += `, ${r.mimeType}`;
+            if (r.size) line += `, ${r.size} bytes`;
+            line += ')';
+            if (r.description) line += ` — ${r.description}`;
+            lines.push(line);
+        }
+    }
+
+    if (templates.length > 0) {
+        if (resources.length > 0) lines.push('');
+        lines.push('Resource templates (fill in the placeholders and call `read_resource`):');
+        for (const t of templates) {
+            let line = `- \`${t.uriTemplate}\` (${t.name}`;
+            if (t.mimeType) line += `, ${t.mimeType}`;
+            line += ')';
+            if (t.description) line += ` — ${t.description}`;
+            lines.push(line);
+        }
+    }
+
+    lines.push('');
+    lines.push('To read a resource, call `read_resource({ uri: "..." })`.');
+    lines.push('If the returned content is a URL or too large to use inline, call `browser_fetch` on the URL.');
+    return lines.join('\n');
 }
 
 async function analyzeImagesWithVision(images) {
@@ -2982,24 +3255,26 @@ function showPendingToolUI(exchangeId, chatId) {
 async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, origUserExchangeId = null, resumeStream = true) {
     _logTool('handleToolExecution entry', { name: parsedObj.name, toolCallId: parsedObj.id, resumeStream });
 
+    // Resolve the target chat up front so every guard uses the same ID.
+    const toolChatId = forcedChatId || currentChatId;
+
     // Guard: Reject vision tool calls if MCP Vision is disabled
     // Use the chat's actual model, not the global dropdown — the user
     // may have switched models since the conversation was started.
     const isVisionTool = parsedObj.name.toLowerCase().includes('vision_');
-    const visionChatId = forcedChatId || currentChatId;
-    const chatModel = chatHistory.get(visionChatId)?.model || currentModel;
+    const chatModel = chatHistory.get(toolChatId)?.model || currentModel;
     const chatModelConfig = models.find(m => m.id === chatModel);
     const modelSupportsVision = chatModelConfig?.capabilities?.vision === true;
     if (isVisionTool && modelSupportsVision && !useVisionAnalysis) {
         console.warn('[Tool Call Blocked] Vision tool called but MCP Vision is disabled:', parsedObj.name);
         // Treat as error - add error exchange and continue
-        const toolConversation = activeConversations.get(visionChatId);
-        const toolExchangeId = await toolConversation.addToolExchange(parsedObj.name, parsedObj.args, origUserExchangeId || originalExchangeId);
+        const toolConversation = activeConversations.get(toolChatId);
+        const toolExchangeId = await toolConversation.addToolExchange(parsedObj.name, parsedObj.args, parsedObj.id, origUserExchangeId || originalExchangeId);
         const exchange = toolConversation.getExchange(toolExchangeId);
         exchange.tool.status = 'error';
         exchange.tool.content = 'Vision tools are disabled. The selected model supports native vision - images were sent directly to the model.';
         toolConversation.save();
-        
+
         // Render error UI
         const toolContainer = getOrCreateContainer(toolChatId);
         const toolEl = document.createElement('div');
@@ -3026,9 +3301,8 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     }
 
     // Use forcedChatId if provided (passed from streamResponse which knows the correct chat),
-    // otherwise fall back to currentChatId for backward compatibility
-    const toolChatId = forcedChatId || currentChatId;
-    // Use this specific chat's container for all DOM operations (not getActiveContainer which may be different if user switched tabs)
+    // otherwise fall back to currentChatId for backward compatibility.
+    // toolChatId is already resolved above; keep it consistent.
     const toolContainer = getOrCreateContainer(toolChatId);
     // Always use the conversation for toolChatId - it might differ from global `conversation` if user switched chats during an async operation
     const toolConversation = activeConversations.get(toolChatId);
@@ -3105,13 +3379,14 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
     });
 
-    // 4. Execute tool (local archive tools first, then MCP servers).
+    // 4. Execute tool (local tools first, then MCP servers).
     // .catch() ONLY on the tool execution — a known external-failure path.
     // Returns null on failure to signal "UI already handled".
     const isLocalTool = LOCAL_TOOL_NAMES.has(parsedObj.name);
-    _logTool('Routing', { name: parsedObj.name, target: isLocalTool ? 'LOCAL' : 'MCP' });
+    _logTool('Routing', { name: parsedObj.name, localTools: [...LOCAL_TOOL_NAMES], isLocalTool, target: isLocalTool ? 'LOCAL' : 'MCP' });
+    console.log(`[handleToolExecution] Routing ${parsedObj.name} → ${isLocalTool ? 'LOCAL' : 'MCP'}`);
     const toolPromise = isLocalTool
-        ? executeLocalTool(parsedObj.name, parsedObj.args)
+        ? executeLocalTool(parsedObj.name, parsedObj.args, toolExchangeId)
         : mcpClient.executeTool(parsedObj.name, parsedObj.args, (progressParams) => {
         const { progress, total, message } = progressParams;
         let statusText = 'Running...';
