@@ -2488,6 +2488,20 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         // Append to stage if virtual scroll is active, otherwise to container
         const stage = targetContainer?.querySelector('.vs-stage');
         if (stage) {
+            // Register as a new slot positioned at the end of the stage
+            const state = _vsState.get(targetContainer);
+            if (state) {
+                const offset = state.totalHeight;
+                assistantEl.style.position = 'absolute';
+                assistantEl.style.top = offset + 'px';
+                assistantEl.style.left = '0';
+                assistantEl.style.right = '0';
+                assistantEl.style.margin = '0';
+                // Add a placeholder slot — height will be measured on finalize
+                const slot = { el: assistantEl, height: 100, offset: offset };
+                state.slots.push(slot);
+                state.attached.add(assistantEl);
+            }
             stage.appendChild(assistantEl);
         } else {
             targetContainer?.appendChild(assistantEl);
@@ -4135,6 +4149,13 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     if (thinking) {
         thinking.classList.remove('streaming');
         thinking.querySelector('.thinking-title').textContent = 'Thinking';
+    }
+
+    // Update virtual scroll — element height is now stable
+    const container = getActiveContainer();
+    if (container) {
+        _vsOnContentGrown(container);
+        _vsUpdateVisible(container);
     }
 }
 
