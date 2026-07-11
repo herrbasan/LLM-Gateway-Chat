@@ -247,10 +247,6 @@ After virtual scroll activation, elements are moved from the `.conversation-cont
 - Audit CSS selectors that depend on the `.conversation-container > .chat-message` parent relationship
 - Add `.vs-stage .chat-message` variants where needed
 
-### 3. Streaming Height Updates
+### 3. Streaming Height Updates (FIXED 2026-07-11)
 
-When a new message is appended during streaming, it's added to the stage but its slot is not registered in the slots array. The `_vsOnContentGrown()` function exists but is not wired into the streaming finalize path.
-
-**Symptoms:** After streaming completes, the stage height does not reflect the new message. Reloading the conversation fixes it (re-renders with full measurement).
-
-**Planned fix:** Call `_vsOnContentGrown(container)` from `finalizeAssistantElement()` after the element's content is complete and its height is stable.
+When a new message is appended during streaming, it's now registered as a slot in the slots array immediately (with an initial height estimate of 100px for positioning). On `finalizeAssistantElement`, `_vsOnContentGrown()` re-measures the last slot and updates the stage height and visibility. The streaming element's final height is now correctly reflected in the stage.
