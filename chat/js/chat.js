@@ -2495,7 +2495,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                 assistantEl.style.position = 'absolute';
                 assistantEl.style.top = offset + 'px';
                 assistantEl.style.left = '0';
-                assistantEl.style.right = '0';
+                assistantEl.style.right = 'auto';
                 assistantEl.style.margin = '0';
                 // Add a placeholder slot — height will be measured on finalize
                 const slot = { el: assistantEl, height: 100, offset: offset };
@@ -2922,14 +2922,30 @@ function _vsActivate(container) {
     stage.className = 'vs-stage';
     stage.style.height = totalHeight + 'px';
 
-    // Move all elements into the stage, positioned absolutely
+    // Move all elements into the stage, positioned absolutely.
+    // Preserve original horizontal alignment from CSS classes:
+    //   .chat-message.user → margin-left:auto (right-aligned)
+    //   .chat-message.assistant → margin-right:auto (left-aligned)
+    //   .chat-message.tool → full width
     for (const slot of slots) {
-        slot.el.style.position = 'absolute';
-        slot.el.style.top = slot.offset + 'px';
-        slot.el.style.left = '0';
-        slot.el.style.right = '0';
-        slot.el.style.margin = '0';
-        stage.appendChild(slot.el);
+        const el = slot.el;
+        el.style.position = 'absolute';
+        el.style.top = slot.offset + 'px';
+        el.style.margin = '0';
+
+        if (el.classList.contains('user')) {
+            el.style.right = '0';
+            el.style.left = 'auto';
+        } else if (el.classList.contains('tool')) {
+            el.style.left = '0';
+            el.style.right = '0';
+        } else {
+            // assistant or other: left-aligned
+            el.style.left = '0';
+            el.style.right = 'auto';
+        }
+
+        stage.appendChild(el);
     }
 
     container.innerHTML = '';
