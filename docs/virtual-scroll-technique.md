@@ -220,21 +220,17 @@ The component would have the same API surface as `nui-list` but handle variable 
 
 ## Known Issues (2026-07-11)
 
-### 1. No Resize Recalculation
+### 1. Resize Recalculation (FIXED 2026-07-11)
 
-When the container's width changes (window resize, orientation change, sidebar toggle), element text reflows and their heights change. The cached heights in the slots array become stale.
+When the container's width changes (window resize, orientation change, sidebar toggle), element text reflows and their heights change. A `ResizeObserver` on the container detects width changes with a **settle pattern**: each resize event resets a 300ms timer. Only after 300ms of no further resizing does `_vsRecalculate()` fire, preventing thrashing during active resize.
 
-**Symptoms:** Elements may overlap or have gaps after resize. Scrolling past the new visible range may reveal stale positions.
-
-**Planned fix:** Debounced `ResizeObserver` on the container. On resize:
-1. Re-attach all elements to the stage (temporarily)
-2. Reset their positioning (remove `position: absolute` so they flow naturally)
-3. Force one layout pass, then read all `offsetHeight` values
-4. Rebuild offset array, update stage height
-5. Re-position all elements with `position: absolute; top: offset`
-6. Run visibility pass to detach non-visible
-
-Cost: one append + one layout + N reads + one detach ≈ under 100ms for 700 elements on mobile.
+`_vsRecalculate()`:
+1. Re-attaches all elements to stage, resets to `position: static` (natural flow)
+2. Reads all `offsetHeight` values (one layout pass, then cheap per-element reads)
+3. Rebuilds slots with new heights and offsets
+4. Re-positions elements with `position: absolute; top: offset`
+5. Updates stage height
+6. Runs visibility pass to detach non-visible
 
 ### 2. Chat Bubble Styling Issues (PARTIALLY FIXED 2026-07-11)
 
