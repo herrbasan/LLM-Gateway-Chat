@@ -2956,7 +2956,8 @@ function _vsActivate(container) {
         totalHeight,
         stage,
         rafId: null,
-        attached: new Set(messages) // All elements start attached — _vsUpdateVisible will detach non-visible
+        attached: new Set(messages), // All elements start attached — _vsUpdateVisible will detach non-visible
+        resizeTimer: null
     };
     _vsState.set(container, state);
 
@@ -2970,7 +2971,78 @@ function _vsActivate(container) {
     };
     container.addEventListener('scroll', container._vsOnScroll, { passive: true });
 
+    // Attach resize observer — recalculation settles after 300ms of no resizing
+    if (!container._vsResizeObserver) {
+        container._vsResizeObserver = new ResizeObserver(() => {
+            if (state.resizeTimer) clearTimeout(state.resizeTimer);
+            state.resizeTimer = setTimeout(() => {
+                state.resizeTimer = null;
+                _vsRecalculate(container);
+            }, 300);
+        });
+        container._vsResizeObserver.observe(container);
+    }
+
     // Initial visibility pass
+    _vsUpdateVisible(container);
+}
+
+function _vsRecalculate(container) {
+    const state = _vsState.get(container);
+    if (!state) return;
+
+    // Re-attach all elements and reset to natural flow for measurement
+    for (const slot of state.slots) {
+        const el = slot.el;
+        el.style.position = '';
+        el.style.top = '';
+        el.style.left = '';
+        el.style.right = '';
+        el.style.margin = '';
+        if (!state.attached.has(el)) {
+            state.stage.appendChild(el);
+            state.attached.add(el);
+        }
+    }
+
+    // Force layout, then measure
+    let offset = 0;
+    for (const slot of state.slots) {
+        const el = slot.el;
+        const elStyle = getComputedStyle(el);
+        const marginTop = parseFloat(elStyle.marginTop) || 0;
+        const marginBottom = parseFloat(elStyle.marginBottom) || 0;
+        const height = el.offsetHeight + marginTop + marginBottom;
+        el._vsHeight = height;
+        el._vsOffset = offset;
+        slot.height = height;
+        slot.offset = offset;
+        offset += height;
+    }
+
+    // Re-position absolutely
+    for (const slot of state.slots) {
+        const el = slot.el;
+        el.style.position = 'absolute';
+        el.style.top = slot.offset + 'px';
+        el.style.margin = '0';
+        if (el.classList.contains('user')) {
+            el.style.right = '0';
+            el.style.left = 'auto';
+        } else if (el.classList.contains('tool')) {
+            el.style.left = '0';
+            el.style.right = '0';
+        } else {
+            el.style.left = '0';
+            el.style.right = 'auto';
+        }
+    }
+
+    // Update stage height
+    state.totalHeight = offset;
+    state.stage.style.height = offset + 'px';
+
+    // Detach non-visible
     _vsUpdateVisible(container);
 }
 
@@ -3021,11 +3093,16 @@ function _vsDeactivate(container) {
     const state = _vsState.get(container);
     if (state) {
         if (state.rafId) cancelAnimationFrame(state.rafId);
+        if (state.resizeTimer) clearTimeout(state.resizeTimer);
         _vsState.delete(container);
     }
     if (container._vsOnScroll) {
         container.removeEventListener('scroll', container._vsOnScroll);
         delete container._vsOnScroll;
+    }
+    if (container._vsResizeObserver) {
+        container._vsResizeObserver.disconnect();
+        delete container._vsResizeObserver;
     }
 }
 
