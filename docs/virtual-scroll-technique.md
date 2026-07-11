@@ -236,16 +236,13 @@ When the container's width changes (window resize, orientation change, sidebar t
 
 Cost: one append + one layout + N reads + one detach ≈ under 100ms for 700 elements on mobile.
 
-### 2. Chat Bubble Styling Issues
+### 2. Chat Bubble Styling Issues (PARTIALLY FIXED 2026-07-11)
 
 After virtual scroll activation, elements are moved from the `.conversation-container` (flexbox with `gap: 1rem`) into `.vs-stage` (positioned absolutely). This changes the DOM path and can break CSS selectors.
 
-**Symptoms:** Some CSS rules (especially `.conversation-container > .chat-message` or flex-gap-dependent layouts) no longer match.
+**Fixed:** Horizontal alignment. The original code set `left: 0; right: 0` on all elements, which made user messages full-width from the left (CSS `margin-left: auto` no longer works on absolutely positioned elements). Now uses class-aware positioning: `.chat-message.user → right:0`, `.chat-message.assistant → left:0`, `.chat-message.tool → left:0; right:0`.
 
-**Potential fixes:**
-- Move any gap-based spacing into the offset calculation (already partially done via margin measurement)
-- Audit CSS selectors that depend on the `.conversation-container > .chat-message` parent relationship
-- Add `.vs-stage .chat-message` variants where needed
+**Still possible:** Other CSS rules that depend on the `.conversation-container > .chat-message` parent relationship or flex-gap-dependent layouts. Audit needed if further visual glitches appear.
 
 ### 3. Streaming Height Updates (FIXED 2026-07-11)
 
