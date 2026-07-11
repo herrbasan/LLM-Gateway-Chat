@@ -21,7 +21,7 @@ function _logTool(message, meta = {}) {
 
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
-const GATEWAY_URL = CONFIG.gatewayUrl || 'http://localhost:3400';
+const GATEWAY_URL = localStorage.getItem('gateway-url') || '';
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
@@ -661,6 +661,13 @@ let client = new GatewayClient({
         if (backendClient?.clientLog) backendClient.clientLog(category, message, meta).catch(() => {});
     }
 });
+
+function updateGatewayUrl(newUrl) {
+    localStorage.setItem('gateway-url', newUrl);
+    client.restUrl = newUrl;
+    client.wsUrl = newUrl.replace(/^http/, 'ws') + '/v1/realtime';
+    if (client.socket) client.socket.close();
+}
 let models = [];
 let currentModel = '';
 let isStreaming = false;
@@ -704,7 +711,10 @@ const elements = {
     sidebar: document.getElementById('sidebar'),
     sidebarToggle: document.getElementById('sidebar-toggle'),
     sidebarToggleMobile: document.getElementById('sidebar-toggle-mobile'),
-    gatewayStatus: document.querySelector('.status-dot'),
+    gatewayUrl: document.getElementById('gateway-url'),
+    gatewayConnectBtn: document.getElementById('gateway-connect-btn'),
+    gatewayConfigStatus: document.querySelector('#gateway-config-status .status-dot'),
+    gatewayConfigStatusText: document.querySelector('#gateway-config-status .gateway-config-status-text'),
     overallContextProgressWrap: document.getElementById('overall-context-progress-wrap'),
     overallContextProgress: document.getElementById('overall-context-progress'),
     overallContextTooltip: document.getElementById('overall-context-tooltip'),
@@ -1234,12 +1244,17 @@ async function applyDefaultConfig() {
         if (input) input.value = language;
     }
 
-    // Load TTS preferences from storage (with config defaults)
-    const savedTtsEndpoint = await storage.getPref('tts-endpoint');
+    // Gateway URL input — populate from localStorage
+    if (elements.gatewayUrl) {
+        const input = elements.gatewayUrl.querySelector('input');
+        if (input) input.value = GATEWAY_URL;
+    }
+
+    // Load TTS preferences
+    ttsEndpoint = localStorage.getItem('tts-endpoint') || '';
     const savedTtsVoice = await storage.getPref('tts-voice');
     const savedTtsSpeed = await storage.getPref('tts-speed');
 
-    ttsEndpoint = savedTtsEndpoint !== null ? savedTtsEndpoint : TTS_ENDPOINT;
     ttsVoice = savedTtsVoice !== null ? savedTtsVoice : TTS_VOICE;
     ttsSpeed = savedTtsSpeed !== null ? parseFloat(savedTtsSpeed) : TTS_SPEED;
 
@@ -1454,6 +1469,13 @@ function waitForNUI() {
 // ============================================
 
 async function loadModels() {
+    if (!client.restUrl) {
+        models = [];
+        if (elements.modelSelect.setItems) {
+            elements.modelSelect.setItems([{ value: '', label: 'Set gateway URL first', disabled: true }]);
+        }
+        return;
+    }
     try {
         const data = await client.getModels();
         models = data.data || [];
@@ -1463,7 +1485,10 @@ async function loadModels() {
 
     } catch (error) {
         console.error('[Chat] Failed to load models:', error);
-        elements.modelSelect.innerHTML = '<option value="">Failed to load models</option>';
+        models = [];
+        if (elements.modelSelect.setItems) {
+            elements.modelSelect.setItems([{ value: '', label: 'Failed to load models', disabled: true }]);
+        }
     }
 }
 
@@ -1716,10 +1741,20 @@ function setupEventListeners() {
         storage.setPref('operation-mode', newMode).catch(() => {});
     });
 
+    // Gateway Connect button — save URL, update client, reload models + status
+    elements.gatewayConnectBtn?.addEventListener('click', async () => {
+        const input = elements.gatewayUrl?.querySelector('input');
+        const newUrl = input?.value?.trim();
+        if (!newUrl) return;
+        updateGatewayUrl(newUrl);
+        await loadModels();
+        checkGatewayStatus();
+    });
+
     // TTS endpoint - save and reload voices on change
     elements.ttsEndpoint?.querySelector('input')?.addEventListener('change', (e) => {
-        ttsEndpoint = e.target.value || TTS_ENDPOINT;
-        storage.setPref('tts-endpoint', ttsEndpoint).catch(() => {});
+        ttsEndpoint = e.target.value || '';
+        localStorage.setItem('tts-endpoint', ttsEndpoint);
         loadTtsVoices();
     });
 
@@ -2450,7 +2485,13 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     let assistantEl = targetContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
     if (!assistantEl) {
         assistantEl = createAssistantElement(exchangeId, '', streamModel);
-        targetContainer?.appendChild(assistantEl);
+        // Append to stage if virtual scroll is active, otherwise to container
+        const stage = targetContainer?.querySelector('.vs-stage');
+        if (stage) {
+            stage.appendChild(assistantEl);
+        } else {
+            targetContainer?.appendChild(assistantEl);
+        }
     }
     // Store timestamp info for stripping during rendering (reset on regeneration)
     const tsLen = timestampWithSpace.length;
@@ -2790,9 +2831,24 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 // DOM Creation & Updates
 // ============================================
 
+// ============================================
+// Virtual Scroll: Detached-element recycler
+// ============================================
+// All elements are rendered once (normal page load speed). After settling,
+// each element's height is measured and stored. A stage div with an explicit
+// height (sum of all element heights) controls the scrollbar. Only visible
+// elements are attached to the DOM with position:absolute. Off-screen elements
+// are detached (not destroyed) — their innerHTML and state survive.
+// The NuiMarkdown connectedCallback guard (_processed) makes re-attach free.
+
+const VS_MARGIN = 200; // px above/below viewport to keep attached
+const _vsState = new Map(); // container -> { slots: [], totalHeight, stage, rafId, attached: Set }
+
 function renderConversation() {
     const container = getActiveContainer();
 
+    // Clean up any previous virtual scroll state
+    _vsDeactivate(container);
     container.innerHTML = '';
 
     if (conversation.length === 0) {
@@ -2802,17 +2858,174 @@ function renderConversation() {
                 <p>Select a model and start chatting</p>
             </div>
         `;
-        updateOverallContext(); // Clear context indicator for new chat
+        updateOverallContext();
         return;
     }
 
+    // Render all exchanges into the container (normal flow — same as before)
     for (const exchange of conversation.getAll()) {
         renderExchange(exchange);
     }
 
-    updateOverallContext(); // Call this when loading historical conversation
-
+    updateOverallContext();
     scrollToBottom();
+
+    // After web components settle, activate virtual scroll
+    _vsActivateWhenReady(container);
+}
+
+// Wait for nui-markdown/nui-code to finish rendering, then activate
+function _vsActivateWhenReady(container) {
+    setTimeout(() => {
+        requestAnimationFrame(() => {
+            _vsActivate(container);
+        });
+    }, 300);
+}
+
+function _vsActivate(container) {
+    const messages = Array.from(container.querySelectorAll('.chat-message'));
+    if (messages.length === 0) return;
+
+    // Measure each element's full height including margins
+    const slots = [];
+    let offset = 0;
+    for (const el of messages) {
+        const style = getComputedStyle(el);
+        const marginTop = parseFloat(style.marginTop) || 0;
+        const marginBottom = parseFloat(style.marginBottom) || 0;
+        const height = el.offsetHeight + marginTop + marginBottom;
+        el._vsHeight = height;
+        el._vsOffset = offset;
+        slots.push({ el, height, offset });
+        offset += height;
+    }
+
+    const totalHeight = offset;
+
+    // Create the stage — a positioned container with explicit height
+    const stage = document.createElement('div');
+    stage.className = 'vs-stage';
+    stage.style.height = totalHeight + 'px';
+
+    // Move all elements into the stage, positioned absolutely
+    for (const slot of slots) {
+        slot.el.style.position = 'absolute';
+        slot.el.style.top = slot.offset + 'px';
+        slot.el.style.left = '0';
+        slot.el.style.right = '0';
+        slot.el.style.margin = '0';
+        stage.appendChild(slot.el);
+    }
+
+    container.innerHTML = '';
+    container.appendChild(stage);
+
+    const state = {
+        slots,
+        totalHeight,
+        stage,
+        rafId: null,
+        attached: new Set(messages) // All elements start attached — _vsUpdateVisible will detach non-visible
+    };
+    _vsState.set(container, state);
+
+    // Attach scroll listener
+    container._vsOnScroll = () => {
+        if (state.rafId) return;
+        state.rafId = requestAnimationFrame(() => {
+            state.rafId = null;
+            _vsUpdateVisible(container);
+        });
+    };
+    container.addEventListener('scroll', container._vsOnScroll, { passive: true });
+
+    // Initial visibility pass
+    _vsUpdateVisible(container);
+}
+
+function _vsUpdateVisible(container) {
+    const state = _vsState.get(container);
+    if (!state) return;
+
+    const scrollTop = container.scrollTop;
+    const viewportBottom = scrollTop + container.clientHeight;
+    const above = scrollTop - VS_MARGIN;
+    const below = viewportBottom + VS_MARGIN;
+
+    // Find visible range via linear scan (binary search can optimize later)
+    const shouldAttach = new Set();
+    for (const slot of state.slots) {
+        const el = slot.el;
+        // Always keep streaming elements attached
+        if (el.dataset.isStreaming === 'true') {
+            shouldAttach.add(el);
+            continue;
+        }
+
+        const elTop = slot.offset;
+        const elBottom = slot.offset + slot.height;
+        if (elBottom >= above && elTop <= below) {
+            shouldAttach.add(el);
+        }
+    }
+
+    // Detach elements that should no longer be visible
+    for (const el of state.attached) {
+        if (!shouldAttach.has(el)) {
+            state.stage.removeChild(el);
+            state.attached.delete(el);
+        }
+    }
+
+    // Attach elements that should be visible
+    for (const el of shouldAttach) {
+        if (!state.attached.has(el)) {
+            state.stage.appendChild(el);
+            state.attached.add(el);
+        }
+    }
+}
+
+function _vsDeactivate(container) {
+    const state = _vsState.get(container);
+    if (state) {
+        if (state.rafId) cancelAnimationFrame(state.rafId);
+        _vsState.delete(container);
+    }
+    if (container._vsOnScroll) {
+        container.removeEventListener('scroll', container._vsOnScroll);
+        delete container._vsOnScroll;
+    }
+}
+
+// Called when a new message is appended during streaming — update stage height
+function _vsOnContentGrown(container) {
+    const state = _vsState.get(container);
+    if (!state) return;
+
+    // Re-measure the last element (it grew during streaming)
+    const lastSlot = state.slots[state.slots.length - 1];
+    if (lastSlot) {
+        const el = lastSlot.el;
+        const style = getComputedStyle(el);
+        const marginTop = parseFloat(style.marginTop) || 0;
+        const marginBottom = parseFloat(style.marginBottom) || 0;
+        const newHeight = el.offsetHeight + marginTop + marginBottom;
+        if (newHeight !== lastSlot.height) {
+            lastSlot.height = newHeight;
+            el._vsHeight = newHeight;
+            el.style.top = lastSlot.offset + 'px';
+        }
+    }
+
+    // Recalculate total height
+    let total = 0;
+    for (const slot of state.slots) {
+        total += slot.height;
+    }
+    state.totalHeight = total;
+    state.stage.style.height = total + 'px';
 }
 
 function renderExchange(exchange, targetContainer = null) {
@@ -2994,7 +3207,7 @@ function renderExchange(exchange, targetContainer = null) {
         updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
         const aEmbed = assistantEl.querySelector('.embed-status');
         if (aEmbed) _applyEmbedStatusAttrs(aEmbed, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
-        getActiveContainer()?.appendChild(assistantEl);
+        container?.appendChild(assistantEl);
 
         if (exchange.assistant.isComplete) {
             finalizeAssistantElement(assistantEl, exchange.id);
@@ -4304,6 +4517,11 @@ async function switchChat(targetChatId) {
         container.style.display = id === targetChatId ? 'flex' : 'none';
     }
 
+    // 6. Activate virtual scroll after container is visible and web components settle
+    if (targetContainer.children.length > 0 && !targetContainer.querySelector('.vs-stage')) {
+        _vsActivateWhenReady(targetContainer);
+    }
+
     // Restore the system prompt
     const chatInfo = chatHistory.get(targetChatId);
     restoreSystemPromptUI(chatInfo);
@@ -5167,16 +5385,25 @@ function clearAttachments() {
 // ============================================
 
 async function checkGatewayStatus() {
+    if (!client.restUrl) {
+        elements.gatewayConfigStatus?.classList.add('offline');
+        if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Not connected';
+        return;
+    }
     try {
+        if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Checking...';
         const data = await client.getHealth();
 
         if (data.status === 'ok') {
-            elements.gatewayStatus?.classList.remove('offline');
+            elements.gatewayConfigStatus?.classList.remove('offline');
+            if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Connected';
         } else {
-            elements.gatewayStatus?.classList.add('offline');
+            elements.gatewayConfigStatus?.classList.add('offline');
+            if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Error';
         }
     } catch (error) {
-        elements.gatewayStatus?.classList.add('offline');
+        elements.gatewayConfigStatus?.classList.add('offline');
+        if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Offline';
     }
 }
 
@@ -5338,6 +5565,7 @@ function scrollToBottom() {
     const container = getActiveContainer();
     if (container) {
         container.scrollTop = container.scrollHeight;
+        _vsUpdateVisible(container);
     }
 }
 

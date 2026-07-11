@@ -1190,7 +1190,7 @@ const routes = {
             systemPresets: [],
             mcpServers: [],
             visionEnabled: false,
-            ttsEndpoint: 'http://localhost:2233',
+            ttsEndpoint: '',
             ttsVoice: '',
             ttsSpeed: 1.0
         }

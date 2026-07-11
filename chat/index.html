@@ -32,9 +32,6 @@
                 </a>
             </div>
             <div slot="center">
-                <div class="gateway-status" id="gateway-status">
-                    <span class="status-dot"></span> <span id="gateway-status-text">Gateway</span>
-                </div>
             </div>
             <div slot="right">
                 <nui-button data-action="admin" id="btn-admin" title="User Management" style="display: none;">
@@ -92,6 +89,22 @@
                     
                     <!-- Model Tab -->
                     <div>
+                        <nui-input-group class="sidebar-section">
+                            <div class="gateway-config-header">
+                                <label>Gateway</label>
+                                <span class="gateway-config-status" id="gateway-config-status">
+                                    <span class="status-dot"></span>
+                                    <span class="gateway-config-status-text">Not connected</span>
+                                </span>
+                            </div>
+                            <nui-input id="gateway-url">
+                                <input type="url" placeholder="http://localhost:3400" id="gateway-url-input">
+                            </nui-input>
+                            <nui-button id="gateway-connect-btn">
+                                <button type="button">Connect</button>
+                            </nui-button>
+                        </nui-input-group>
+                        
                         <nui-input-group class="sidebar-section">
                             <label>Model</label>
                             <nui-select id="model-select" searchable data-label="Select model...">

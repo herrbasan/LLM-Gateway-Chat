@@ -141,6 +141,32 @@ nui-code pre {
     background: #ef4444;
 }
 
+.gateway-config-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+}
+
+.gateway-config-status {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.7rem;
+    color: var(--text-color-dim);
+}
+
+.gateway-config-status .status-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: #ef4444;
+}
+
+.gateway-config-status .status-dot:not(.offline) {
+    background: #22c55e;
+}
+
 /* Main Chat Area */
 .chat-main {
     min-height: 0;
@@ -202,6 +228,34 @@ nui-code pre {
     color: var(--text-color-dim);
 }
 
+.vs-stage {
+    position: relative;
+    width: 100%;
+    flex-shrink: 0; /* Don't let flex container shrink the stage */
+}
+
+.load-more-sentinel {
+    display: flex;
+    justify-content: center;
+    padding: 0.5rem 0;
+}
+
+.load-more-btn {
+    background: var(--color-shade1);
+    color: var(--text-color-dim);
+    border: thin solid var(--border-shade2);
+    border-radius: var(--border-radius2);
+    padding: 0.4rem 1rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.load-more-btn:hover {
+    background: var(--color-shade2);
+    color: var(--text-color);
+}
+
 .welcome-message h2 {
     margin-bottom: 0.5rem;
     color: var(--text-color);
@@ -211,12 +265,6 @@ nui-code pre {
 .chat-message {
     margin-bottom: 1.5rem;
     max-width: 85%;
-    animation: fadeIn 0.2s ease;
-}
-
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(0.625rem); }
-    to { opacity: 1; transform: translateY(0); }
 }
 
 .chat-message.user {
@@ -1076,7 +1124,7 @@ nui-app:not(.nui-ready) { display: none; }
 }
 
 @media (max-width: 37.5rem) {
-    .app-title { font-size: 0.7rem; }
+    .app-title { display: none; }
     .message-timestamp { display: none; }
     .chat-input-area {
         padding: 0.5rem;

@@ -100,6 +100,16 @@
                     <!-- Conversation Tab -->
                     <div>
                         <div class="sidebar-section">
+                            <label>Gateway URL</label>
+                            <nui-input id="arena-gateway-url">
+                                <input type="url" placeholder="http://localhost:3400" id="arena-gateway-url-input">
+                            </nui-input>
+                            <nui-button id="arena-gateway-connect-btn" style="margin-top: 0.5rem;">
+                                <button type="button">Connect</button>
+                            </nui-button>
+                        </div>
+                        
+                        <div class="sidebar-section">
                             <label>Topic</label>
                             <nui-textarea>
                                 <textarea id="topic-input" placeholder="Enter a topic for the conversation..." rows="2"></textarea>

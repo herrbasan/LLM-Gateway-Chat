@@ -31,7 +31,7 @@ class Participant {
     constructor(options = {}) {
         this.name = options.name || 'Unknown';
         this.modelName = options.modelName || '';
-        this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
+        this.gatewayUrl = options.gatewayUrl || localStorage.getItem('gateway-url') || window.ARENA_CONFIG?.gatewayUrl || '';
         this.systemPrompt = options.systemPrompt || null;
         this.temperature = options.temperature !== undefined ? options.temperature : (window.ARENA_CONFIG?.defaultTemperature ?? 0.7);
         this.reasoningEffort = options.reasoningEffort || null;
@@ -292,7 +292,7 @@ class Arena {
     constructor(options = {}) {
         this.id = options.id || this._generateId();
         this.sessionId = options.sessionId || `arena-${this.id}-sess`;
-        this.gatewayUrl = options.gatewayUrl || window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400';
+        this.gatewayUrl = options.gatewayUrl || localStorage.getItem('gateway-url') || window.ARENA_CONFIG?.gatewayUrl || '';
         this.maxTurns = options.maxTurns || window.ARENA_CONFIG?.defaultMaxTurns || 10;
         this.autoAdvance = options.autoAdvance !== undefined ? options.autoAdvance : true;
         this.targetTokens = options.targetTokens || null; // Token target for hint (not enforced as hard limit)
@@ -1221,6 +1221,8 @@ class ArenaUI {
         this.thinkingCheckbox = document.getElementById('thinking-checkbox');
         this.autoAdvanceCheckbox = document.getElementById('auto-advance-checkbox');
         this.startButton = document.getElementById('start-btn');
+        this.gatewayUrlInput = document.getElementById('arena-gateway-url');
+        this.gatewayConnectBtn = document.getElementById('arena-gateway-connect-btn');
         this.stopButton = document.getElementById('stop-btn');
         this.summarizeBtn = document.getElementById('summarize-btn');
         this.promptInput = document.getElementById('arena-prompt-input');
@@ -1301,6 +1303,22 @@ class ArenaUI {
         this._importInput.style.display = 'none';
         this._importInput.addEventListener('change', (e) => this._handleFileImport(e));
         document.body.appendChild(this._importInput);
+
+        // Gateway Connect button — save URL, reload models
+        this.gatewayConnectBtn?.addEventListener('click', async () => {
+            const input = this.gatewayUrlInput?.querySelector('input');
+            const newUrl = input?.value?.trim();
+            if (!newUrl) return;
+            localStorage.setItem('gateway-url', newUrl);
+            try {
+                const client = new GatewayClient({ baseUrl: newUrl });
+                const response = await client.getModels();
+                this.models = response.data || response.models || [];
+                this._populateModelSelects();
+            } catch (err) {
+                this._showError('Failed to connect to gateway. Check the URL.');
+            }
+        });
 
         // TTS endpoint change - reload voices
         this.ttsEndpoint?.querySelector('input')?.addEventListener('change', () => {
@@ -1450,8 +1468,12 @@ class ArenaUI {
         await this._loadHistory();
 
         try {
-            const config = window.ARENA_CONFIG || {};
-            const client = new GatewayClient({ baseUrl: config.gatewayUrl || 'http://localhost:3400' });
+            const gatewayUrl = localStorage.getItem('gateway-url') || '';
+            if (this.gatewayUrlInput) {
+                const input = this.gatewayUrlInput.querySelector('input');
+                if (input) input.value = gatewayUrl;
+            }
+            const client = new GatewayClient({ baseUrl: gatewayUrl });
             const response = await client.getModels();
             this.models = response.data || response.models || [];
 
@@ -1548,7 +1570,7 @@ class ArenaUI {
 
         const config = window.ARENA_CONFIG || {};
         this.arena = new Arena({
-            gatewayUrl: config.gatewayUrl || 'http://localhost:3400',
+            gatewayUrl: localStorage.getItem('gateway-url') || config.gatewayUrl || '',
             maxTurns,
             autoAdvance,
             temperature,
@@ -1664,7 +1686,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     async _initTts() {
         const config = window.ARENA_CONFIG || {};
 
-        this._ttsEndpoint = await this._getPref('arena-tts-endpoint', config.ttsEndpoint || 'http://localhost:2233');
+        this._ttsEndpoint = localStorage.getItem('tts-endpoint') || '';
         this._ttsVoiceA = await this._getPref('arena-tts-voice-a', config.ttsVoiceA || '');
         this._ttsVoiceB = await this._getPref('arena-tts-voice-b', config.ttsVoiceB || '');
         const storedSpeed = await this._getPref('arena-tts-speed', null);
@@ -1695,7 +1717,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             this._ttsVoices = data.voices || [];
-            await this._setPref('arena-tts-endpoint', endpoint);
+            localStorage.setItem('tts-endpoint', endpoint);
             this._ttsEndpoint = endpoint;
             this._updateTtsVoiceSelects();
             this._showTtsStatus(null);
@@ -2119,7 +2141,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             const data = JSON.parse(text);
 
             this.arena = new Arena({
-                gatewayUrl: window.ARENA_CONFIG?.gatewayUrl || 'http://localhost:3400',
+                gatewayUrl: localStorage.getItem('gateway-url') || window.ARENA_CONFIG?.gatewayUrl || '',
                 onMessage: (msg) => this._renderMessage(msg),
                 onStatusChange: (status) => this._updateStatus(status),
                 onError: (err) => this._showError(err),

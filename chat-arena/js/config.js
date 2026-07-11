@@ -1,5 +1,5 @@
 window.ARENA_CONFIG = {
-    gatewayUrl: 'http://192.168.0.100:3400',
+    gatewayUrl: '',
     defaultMaxTurns: 10,
     defaultAutoAdvance: true,
     defaultModelA: 0,  // 0-indexed, so 5 = 6th option
@@ -20,7 +20,7 @@ window.ARENA_CONFIG = {
     defaultSummaryModel: null,
 
     // TTS Configuration
-    ttsEndpoint: 'http://localhost:2233',
+    ttsEndpoint: '',
     ttsVoiceA: '',
     ttsVoiceB: '',
     ttsSpeed: 1.0,

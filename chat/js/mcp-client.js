@@ -4,8 +4,6 @@
  * and tool execution coordination for the chat application.
  */
 
-import { storage } from './storage.js';
-
 class MCPClient {
     constructor() {
         this.servers = []; // List of active MCP server connections
@@ -19,19 +17,19 @@ class MCPClient {
     }
 
     /**
-     * Load MCP config from storage. Call once after app init.
+     * Load MCP config from localStorage. Call once after app init.
      */
     async ready() {
         if (this._configLoaded) return;
         this._configLoaded = true;
 
-        const storedServers = await storage.mcpGet('servers');
+        const storedServers = localStorage.getItem('mcp-servers');
         if (storedServers) {
             this.servers = JSON.parse(storedServers);
             this.servers.forEach(s => s.status = 'disconnected');
         }
 
-        const storedEnabledTools = await storage.mcpGet('enabledTools');
+        const storedEnabledTools = localStorage.getItem('mcp-enabledTools');
         if (storedEnabledTools) {
             const parsedTools = JSON.parse(storedEnabledTools);
             this.enabledTools = new Map(
@@ -43,20 +41,20 @@ class MCPClient {
         }
     }
 
-    async saveConfig() {
+    saveConfig() {
         const serversToStore = this.servers.map(s => ({
             id: s.id,
             url: s.url,
             name: s.name,
             status: 'disconnected'
         }));
-        await storage.mcpSet('servers', JSON.stringify(serversToStore));
+        localStorage.setItem('mcp-servers', JSON.stringify(serversToStore));
 
         const serializedTools = {};
         for (const [serverId, toolsMap] of this.enabledTools.entries()) {
             serializedTools[serverId] = Object.fromEntries(toolsMap);
         }
-        await storage.mcpSet('enabledTools', JSON.stringify(serializedTools));
+        localStorage.setItem('mcp-enabledTools', JSON.stringify(serializedTools));
     }
 
     logTraffic(direction, payload) {
