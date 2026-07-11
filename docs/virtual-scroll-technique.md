@@ -216,3 +216,41 @@ To generalize this as an NUI component (e.g., `nui-virtual-scroll`):
 7. **Binary search** for visible range — O(log n) instead of O(n) for large lists
 
 The component would have the same API surface as `nui-list` but handle variable heights.
+
+
+## Known Issues (2026-07-11)
+
+### 1. No Resize Recalculation
+
+When the container's width changes (window resize, orientation change, sidebar toggle), element text reflows and their heights change. The cached heights in the slots array become stale.
+
+**Symptoms:** Elements may overlap or have gaps after resize. Scrolling past the new visible range may reveal stale positions.
+
+**Planned fix:** Debounced `ResizeObserver` on the container. On resize:
+1. Re-attach all elements to the stage (temporarily)
+2. Reset their positioning (remove `position: absolute` so they flow naturally)
+3. Force one layout pass, then read all `offsetHeight` values
+4. Rebuild offset array, update stage height
+5. Re-position all elements with `position: absolute; top: offset`
+6. Run visibility pass to detach non-visible
+
+Cost: one append + one layout + N reads + one detach ≈ under 100ms for 700 elements on mobile.
+
+### 2. Chat Bubble Styling Issues
+
+After virtual scroll activation, elements are moved from the `.conversation-container` (flexbox with `gap: 1rem`) into `.vs-stage` (positioned absolutely). This changes the DOM path and can break CSS selectors.
+
+**Symptoms:** Some CSS rules (especially `.conversation-container > .chat-message` or flex-gap-dependent layouts) no longer match.
+
+**Potential fixes:**
+- Move any gap-based spacing into the offset calculation (already partially done via margin measurement)
+- Audit CSS selectors that depend on the `.conversation-container > .chat-message` parent relationship
+- Add `.vs-stage .chat-message` variants where needed
+
+### 3. Streaming Height Updates
+
+When a new message is appended during streaming, it's added to the stage but its slot is not registered in the slots array. The `_vsOnContentGrown()` function exists but is not wired into the streaming finalize path.
+
+**Symptoms:** After streaming completes, the stage height does not reflect the new message. Reloading the conversation fixes it (re-renders with full measurement).
+
+**Planned fix:** Call `_vsOnContentGrown(container)` from `finalizeAssistantElement()` after the element's content is complete and its height is stable.
