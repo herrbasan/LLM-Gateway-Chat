@@ -3228,17 +3228,38 @@ function _vsRecalcItem(el) {
         state.attached.add(el);
     }
 
-    // Quick scan: did the height actually change?
-    // (offsetHeight + margins; offsets store total slot height.)
+    // Read the element's actual rendered height. offsetHeight does NOT
+    // account for CSS max-height clamping (thinking-content collapsed vs
+    // expanded). getBoundingClientRect() returns the visual box height
+    // which DOES reflect CSS clamping.
+    //
+    // Freeze CSS transitions on this slot and any .thinking-content
+    // children. .thinking-content has `transition: max-height 0.3s`,
+    // so measuring mid-transition gives an intermediate value.
+    // Temporarily setting transition:none forces the final height.
+    const savedTransitions = [];
+    const freeze = (node) => {
+        savedTransitions.push({ node, v: node.style.transition });
+        node.style.transition = 'none';
+    };
+    freeze(el);
+    for (const tc of el.querySelectorAll('.thinking-content')) freeze(tc);
+    void el.offsetHeight; // flush
+
+    const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
     const marginTop = parseFloat(style.marginTop) || 0;
     const marginBottom = parseFloat(style.marginBottom) || 0;
-    const newHeight = el.offsetHeight + marginTop + marginBottom;
-    if (newHeight === slot.height) {
-        return; // No change — nothing to cascade. Save the offset loop.
+    const newHeight = rect.height + marginTop + marginBottom;
+
+    // Restore transitions
+    for (const { node, v } of savedTransitions) {
+        node.style.transition = v;
     }
 
-    // Cascade: only positions/offsets from `idx` onward change.
+    // Always cascade — even if stored height didn't change, the visual
+    // layout may have shifted (CSS max-height on children, tool expand).
+    // The slots-below walk is O(n) but only fires on user interaction.
     slot.height = newHeight;
     el._vsHeight = newHeight;
     el.style.margin = '0';
