@@ -799,7 +799,8 @@ async function buildHistoricalDomForChat(conv, container) {
     }
     // Show busy while we render the historical DOM. _vsActivate hides it
     // after the post-activation visibility pass (called from switchChat).
-    _vsShowBusy();
+    // WI-5: skip the overlay for small chats — _vsActivate will no-op anyway.
+    if (conversation.getAll().length * 2 >= VS_MIN_ITEMS) _vsShowBusy();
     for (const exchange of conv.getAll()) {
         const el = buildExchangeElement(exchange);
         if (el) container.appendChild(el);
@@ -866,9 +867,8 @@ function buildExchangeElement(exchange) {
             if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
             const payloadBox = toolEl.querySelector('.tool-payload');
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
-            // Toggling the payload changes the message's height — re-measure this
-            // slot and cascade offsets to every slot below it.
-            _vsRecalcItem(toolEl);
+            // WI-2: height change detected by the frame loop (wake triggered
+            // by the container's delegated click listener).
         });
 
         // Assistant message after tool - create as sibling, not child
@@ -2853,7 +2853,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 // The NuiMarkdown connectedCallback guard (_processed) makes re-attach free.
 
 const VS_MARGIN = 200; // px above/below viewport to keep attached
-const _vsState = new Map(); // container -> { slots: [], totalHeight, stage, rafId, attached: Set }
+const VS_IDLE_FRAMES = 30; // rAF frames (~0.5s) with no height change → sleep
+const VS_EPSILON = 0.5; // px — ignore sub-pixel jitter (prevents cascade loops)
+const VS_MIN_ITEMS = 30; // WI-5: below this count, skip virtualization entirely
+const _vsState = new Map(); // container -> { slots: [], totalHeight, stage, rafId, attached: Set, loopId, idleFrames }
 
 // Build the busy overlay element using createElement (not innerHTML) —
 // innerHTML triggers HTML parsing on every assignment.
@@ -2915,7 +2918,8 @@ function renderConversation() {
     // Show the busy overlay FIRST so the user never sees the
     // "render all → measure → empty → re-attach" sequence.
     // The overlay is built with createElement (no innerHTML parser cost).
-    _vsShowBusy();
+    // WI-5: skip the overlay for small chats — _vsActivate will no-op anyway.
+    if (conversation.getAll().length * 2 >= VS_MIN_ITEMS) _vsShowBusy();
 
     if (conversation.length === 0) {
         // No virtual scroll to wait for — hide busy and show the welcome
@@ -2964,6 +2968,13 @@ function _vsActivate(container) {
         return;
     }
 
+    // WI-5: below the threshold, the browser handles normal flow effortlessly.
+    // No stage, no state — all helpers degrade correctly (if (!state) return).
+    if (messages.length < VS_MIN_ITEMS) {
+        _vsHideBusy();
+        return;
+    }
+
     // Hidden container (display:none — a background chat). Every offsetHeight
     // read would return 0 and we'd build a corrupt stage. Bail WITHOUT creating
     // a stage — switchChat re-triggers activation (`!querySelector('.vs-stage')`)
@@ -2991,6 +3002,7 @@ function _vsActivate(container) {
         const height = el.offsetHeight + spacing;
         el._vsHeight = height;
         el._vsOffset = offset;
+        el._vsIndex = slots.length; // WI-4: index for binary-search range logic
         slots.push({ el, height, offset, spacing });
         offset += height;
     }
@@ -3042,12 +3054,15 @@ function _vsActivate(container) {
         resizeTimer: null,
         measuredWidth: container.clientWidth, // width the cached heights were measured at
         staleMeasurements: false, // set when a measurement was skipped while hidden
-        gap // the container's natural flex gap, baked into every slot's spacing
+        gap, // the container's natural flex gap, baked into every slot's spacing
+        loopId: null, // rAF handle of the height-detection loop (null = sleeping)
+        idleFrames: 0 // consecutive frames with zero height diffs
     };
     _vsState.set(container, state);
 
     // Attach scroll listener
     container._vsOnScroll = () => {
+        _vsWake(container); // WI-2: keep loop awake while scrolling
         if (state.rafId) return;
         state.rafId = requestAnimationFrame(() => {
             state.rafId = null;
@@ -3078,8 +3093,19 @@ function _vsActivate(container) {
         container._vsResizeObserver.observe(container);
     }
 
+    // WI-2: Delegated interaction listeners — any click/keydown may toggle
+    // something that animates (thinking block, tool payload). Wake the loop
+    // so it detects the height change and cascades.
+    container._vsOnInteract = () => _vsWake(container);
+    container.addEventListener('click', container._vsOnInteract, { passive: true });
+    container.addEventListener('keydown', container._vsOnInteract, { passive: true });
+
     // Initial visibility pass
     _vsUpdateVisible(container);
+
+    // WI-2: Wake after first visibility pass — catches late-settling web
+    // components (neutralizes the 300ms _vsActivateWhenReady race).
+    _vsWake(container);
 
     // Hide the busy overlay now that the stage is in place and the right
     // elements are attached. This is the last step of the activation
@@ -3117,7 +3143,8 @@ function _vsRecalculate(container) {
     // Force layout, then measure. Inline margins were cleared above, so the
     // natural CSS margins are readable again — refresh slot.spacing here.
     let offset = 0;
-    for (const slot of state.slots) {
+    for (let i = 0; i < state.slots.length; i++) {
+        const slot = state.slots[i];
         const el = slot.el;
         const elStyle = getComputedStyle(el);
         const marginTop = parseFloat(elStyle.marginTop) || 0;
@@ -3126,6 +3153,7 @@ function _vsRecalculate(container) {
         const height = el.offsetHeight + spacing;
         el._vsHeight = height;
         el._vsOffset = offset;
+        el._vsIndex = i; // WI-4: index for binary-search range logic
         slot.spacing = spacing;
         slot.height = height;
         slot.offset = offset;
@@ -3160,6 +3188,10 @@ function _vsRecalculate(container) {
 
     // Detach non-visible
     _vsUpdateVisible(container);
+
+    // WI-2: wake the loop — newly measured heights may still settle (web
+    // components, images loading).
+    _vsWake(container);
 }
 
 function _vsUpdateVisible(container) {
@@ -3171,44 +3203,138 @@ function _vsUpdateVisible(container) {
     const above = scrollTop - VS_MARGIN;
     const below = viewportBottom + VS_MARGIN;
 
-    // Find visible range via linear scan (binary search can optimize later)
-    const shouldAttach = new Set();
-    for (const slot of state.slots) {
-        const el = slot.el;
-        // Always keep streaming elements attached
-        if (el.dataset.isStreaming === 'true') {
-            shouldAttach.add(el);
-            continue;
-        }
-
-        const elTop = slot.offset;
-        const elBottom = slot.offset + slot.height;
-        if (elBottom >= above && elTop <= below) {
-            shouldAttach.add(el);
-        }
+    // WI-4: Binary search for the first visible slot, then walk forward to
+    // the last. Slots are sorted by offset — O(log n + visible) per pass.
+    const slots = state.slots;
+    const first = _vsFirstVisibleIndex(slots, above);
+    // Walk forward to find the last visible slot
+    let last = first - 1;
+    for (let i = first; i < slots.length; i++) {
+        if (slots[i].offset <= below) last = i;
+        else break;
     }
 
-    // Detach elements that should no longer be visible
+    // Detach elements that should no longer be visible.
+    // Iterate the attached Set — anything outside [first, last] and not
+    // streaming gets detached.
     for (const el of state.attached) {
-        if (!shouldAttach.has(el)) {
+        if (el.dataset.isStreaming === 'true') continue; // pinned
+        const idx = el._vsIndex;
+        if (idx < first || idx > last) {
             state.stage.removeChild(el);
             state.attached.delete(el);
         }
     }
 
-    // Attach elements that should be visible
-    for (const el of shouldAttach) {
-        if (!state.attached.has(el)) {
+    // Attach elements that should be visible.
+    // Iterate the visible range — set style.top from slot.offset (WI-1).
+    for (let i = first; i <= last; i++) {
+        const slot = slots[i];
+        if (!state.attached.has(slot.el)) {
+            slot.el.style.top = slot.offset + 'px';
+            state.stage.appendChild(slot.el);
+            state.attached.add(slot.el);
+        }
+    }
+
+    // Re-attach pinned (streaming) elements that may have been detached
+    // before their range was known (e.g. streaming at the bottom).
+    for (const slot of slots) {
+        const el = slot.el;
+        if (el.dataset.isStreaming === 'true' && !state.attached.has(el)) {
+            el.style.top = slot.offset + 'px';
             state.stage.appendChild(el);
             state.attached.add(el);
         }
     }
 }
 
+// WI-4: Binary search — find the first slot whose bottom edge reaches into
+// the viewport (offset + height >= above). Slots are sorted by offset.
+function _vsFirstVisibleIndex(slots, above) {
+    let lo = 0, hi = slots.length - 1, ans = slots.length;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (slots[mid].offset + slots[mid].height >= above) { ans = mid; hi = mid - 1; }
+        else lo = mid + 1;
+    }
+    return ans;
+}
+
+// ============================================
+// WI-2: Reactive Height Frame Loop (wake/sleep)
+// ============================================
+// A per-container rAF loop that detects height changes on attached slots and
+// cascades automatically. Replaces all explicit _vsRecalcItem wiring.
+// Sleeps after VS_IDLE_FRAMES consecutive frames with zero height diffs.
+
+function _vsWake(container) {
+    const state = _vsState.get(container);
+    if (!state) return;                    // VS not active — legitimate no-op
+    state.idleFrames = 0;
+    if (state.loopId !== null) return;     // already awake — idempotent
+    state.loopId = requestAnimationFrame(() => _vsOnFrame(container));
+}
+
+function _vsOnFrame(container) {
+    const state = _vsState.get(container);
+    if (!state) return;                               // deactivated — stop
+    if (container.clientHeight === 0) {               // hidden — sleep, mark stale
+        state.loopId = null;
+        state.staleMeasurements = true;               // RO settle reconciles on switch-back
+        return;
+    }
+
+    // READ phase: all measurements before any style write
+    const scrollTop = container.scrollTop;
+    let firstDirty = -1;
+    let anchorDelta = 0; // WI-3: scroll compensation for changes above viewport
+    for (let i = 0; i < state.slots.length; i++) {
+        const slot = state.slots[i];
+        if (!state.attached.has(slot.el)) continue;   // detached can't change height
+        const h = slot.el.getBoundingClientRect().height + slot.spacing;
+        if (Math.abs(h - slot.height) > VS_EPSILON) {
+            // WI-3: if this slot is fully above the viewport top, its height
+            // change shifts everything below it — compensate scrollTop so the
+            // viewport content stays put.
+            if (slot.offset + slot.height <= scrollTop) anchorDelta += (h - slot.height);
+            slot.height = h;
+            if (firstDirty === -1) firstDirty = i;    // slots are ordered — first hit is topmost
+        }
+    }
+
+    // WRITE phase
+    if (firstDirty !== -1) {
+        // Cascade offsets from firstDirty (WI-1: data always, style.top only if attached)
+        let offset = state.slots[firstDirty].offset;
+        for (let i = firstDirty; i < state.slots.length; i++) {
+            const s = state.slots[i];
+            s.offset = offset;
+            s.el._vsIndex = i; // WI-4: keep index current after cascade
+            if (state.attached.has(s.el)) s.el.style.top = offset + 'px';
+            offset += s.height;
+        }
+        state.totalHeight = offset;
+        state.stage.style.height = offset + 'px';
+        // WI-3: compensate for height changes above the viewport so content
+        // under the user's eyes doesn't shift. Uses the scrollTop read at the
+        // top of the frame (read phase), not a fresh read mid-write.
+        if (anchorDelta !== 0) container.scrollTop = scrollTop + anchorDelta;
+        _vsUpdateVisible(container);
+        state.idleFrames = 0;
+    } else {
+        state.idleFrames++;
+    }
+
+    if (state.idleFrames >= VS_IDLE_FRAMES) { state.loopId = null; return; }  // sleep
+    state.loopId = requestAnimationFrame(() => _vsOnFrame(container));
+}
+
 function _vsDeactivate(container) {
     const state = _vsState.get(container);
     if (state) {
         if (state.rafId) cancelAnimationFrame(state.rafId);
+        if (state.loopId !== null) cancelAnimationFrame(state.loopId);
         if (state.resizeTimer) clearTimeout(state.resizeTimer);
         _vsState.delete(container);
     }
@@ -3216,113 +3342,15 @@ function _vsDeactivate(container) {
         container.removeEventListener('scroll', container._vsOnScroll);
         delete container._vsOnScroll;
     }
+    if (container._vsOnInteract) {
+        container.removeEventListener('click', container._vsOnInteract);
+        container.removeEventListener('keydown', container._vsOnInteract);
+        delete container._vsOnInteract;
+    }
     if (container._vsResizeObserver) {
         container._vsResizeObserver.disconnect();
         delete container._vsResizeObserver;
     }
-}
-
-// Called when a new message is appended during streaming — update stage height
-function _vsOnContentGrown(container) {
-    const state = _vsState.get(container);
-    if (!state || state.slots.length === 0) return;
-    // The streaming message is always the most recent slot in this container.
-    _vsRecalcItem(state.slots[state.slots.length - 1].el);
-}
-
-// Re-measure one chat-message slot and, if its height changed, cascade offsets
-// to every slot AFTER it. Call this from any interaction handler that may
-// change a message's vertical size (tool expand/collapse, thinking toggle,
-// edit commit, regenerate, version switch, image insertion, etc.).
-//
-// Cost: one offsetHeight read for unchanged heights (early-exit before any
-// cascade). For changed heights, O(slots-after) offset updates plus a
-// visibility pass.
-function _vsRecalcItem(el) {
-    const container = el.closest('.conversation-container');
-    if (!container) return;
-    const state = _vsState.get(container);
-    if (!state) return;
-
-    // Background chats keep streaming inside display:none containers.
-    // getBoundingClientRect() there returns 0 — skip the measurement and flag
-    // the state stale; the ResizeObserver settle handler re-measures when the
-    // chat becomes visible again.
-    if (container.clientHeight === 0) {
-        state.staleMeasurements = true;
-        return;
-    }
-
-    const idx = state.slots.findIndex(s => s.el === el);
-    if (idx === -1) return;
-    const slot = state.slots[idx];
-
-    // If detached, re-attach so offsetHeight reflects reality. Re-attaching is
-    // cheap — the element's rendered HTML is already cached by NUI/Markdown
-    // components (via their _processed guards).
-    if (!state.attached.has(el)) {
-        state.stage.appendChild(el);
-        state.attached.add(el);
-    }
-
-    // Read the element's actual rendered height. offsetHeight does NOT
-    // account for CSS max-height clamping (thinking-content collapsed vs
-    // expanded). getBoundingClientRect() returns the visual box height
-    // which DOES reflect CSS clamping.
-    //
-    // Freeze CSS transitions on this slot and any .thinking-content
-    // children. .thinking-content has `transition: max-height 0.3s`,
-    // so measuring mid-transition gives an intermediate value.
-    // Temporarily setting transition:none forces the final height.
-    const savedTransitions = [];
-    const freeze = (node) => {
-        savedTransitions.push({ node, v: node.style.transition });
-        node.style.transition = 'none';
-    };
-    freeze(el);
-    for (const tc of el.querySelectorAll('.thinking-content')) freeze(tc);
-    void el.offsetHeight; // flush
-
-    const rect = el.getBoundingClientRect();
-    // Do NOT read computed margins here — every staged element has inline
-    // margin:0, so they read 0 and the slot would lose its natural spacing
-    // (the "shrinking margins" bug). slot.spacing was captured from natural
-    // flow when the slot was created and is the only surviving record.
-    if (typeof slot.spacing !== 'number') {
-        throw new Error(`_vsRecalcItem: slot has no spacing — slot for ${el.className} was created outside _vsActivate/_vsRecalculate/_vsAppendMessage`);
-    }
-    const newHeight = rect.height + slot.spacing;
-
-    // Restore transitions
-    for (const { node, v } of savedTransitions) {
-        node.style.transition = v;
-    }
-
-    // Always cascade — even if stored height didn't change, the visual
-    // layout may have shifted (CSS max-height on children, tool expand).
-    // The slots-below walk is O(n) but only fires on user interaction.
-    slot.height = newHeight;
-    el._vsHeight = newHeight;
-    el.style.margin = '0';
-
-    let offset = 0;
-    for (let i = 0; i < state.slots.length; i++) {
-        const s = state.slots[i];
-        if (i < idx) {
-            offset += s.height;
-            continue;
-        }
-        s.offset = offset;
-        s.el.style.top = offset + 'px';
-        s.el.style.margin = '0';
-        offset += s.height;
-    }
-
-    state.totalHeight = offset;
-    state.stage.style.height = offset + 'px';
-
-    // The visible range may have shifted — re-evaluate which slots are attached.
-    _vsUpdateVisible(container);
 }
 
 // Append a chat-message element to a container. When virtual scroll is active,
@@ -3336,6 +3364,11 @@ function _vsAppendMessage(container, el) {
     const state = _vsState.get(container);
     if (!state) {
         container.appendChild(el);
+        // WI-5: crossing the threshold upward — activate virtual scroll.
+        // The settle delay lets web components render before measuring.
+        if (container.querySelectorAll('.chat-message').length >= VS_MIN_ITEMS) {
+            _vsActivateWhenReady(container);
+        }
         return;
     }
 
@@ -3358,13 +3391,18 @@ function _vsAppendMessage(container, el) {
     const spacing = (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0) + state.gap;
     el.style.margin = '0';
 
-    // Streaming elements grow — their height is corrected on finalize via
-    // _vsRecalcItem. Static elements (tool bubbles) are correct immediately.
+    // Streaming elements grow — their height is corrected by the frame loop
+    // (WI-2). Static elements (tool bubbles) are correct immediately.
     const height = el.offsetHeight + spacing;
+    el._vsIndex = state.slots.length; // WI-4: index for binary-search range logic
     state.slots.push({ el, height, offset, spacing });
     state.attached.add(el);
     state.totalHeight = offset + height;
     state.stage.style.height = state.totalHeight + 'px';
+
+    // WI-2: wake the loop — the new element may grow (streaming) or settle
+    // (web components finishing render).
+    _vsWake(container);
 }
 
 // Remove every rendered element of an exchange without a full re-render —
@@ -3402,6 +3440,15 @@ function _vsRemoveExchangeDom(clickedEl, exchangeId) {
             state.attached.delete(s.el);
         }
     }
+
+    // WI-3: accumulate heights of removed slots that were fully above the
+    // viewport — deleting them shifts content up by their total height.
+    const scrollTop = container.scrollTop;
+    let removedAbove = 0;
+    for (const s of removed) {
+        if (s.offset + s.height <= scrollTop) removedAbove += s.height;
+    }
+
     state.slots = state.slots.filter(s => s.el.dataset.exchangeId !== exchangeId);
 
     if (state.slots.length === 0) {
@@ -3409,15 +3456,22 @@ function _vsRemoveExchangeDom(clickedEl, exchangeId) {
         return;
     }
 
-    // Cascade all offsets from the top (a deletion can remove multiple slots)
+    // Cascade all offsets from the top (a deletion can remove multiple slots).
+    // WI-1: only write style.top to attached elements — detached slots get
+    // their top refreshed at attach time in _vsUpdateVisible.
     let offset = 0;
-    for (const s of state.slots) {
+    for (let i = 0; i < state.slots.length; i++) {
+        const s = state.slots[i];
         s.offset = offset;
-        s.el.style.top = offset + 'px';
+        s.el._vsIndex = i; // WI-4: rebuild indices after slot removal
+        if (state.attached.has(s.el)) s.el.style.top = offset + 'px';
         offset += s.height;
     }
     state.totalHeight = offset;
     state.stage.style.height = offset + 'px';
+
+    // WI-3: keep viewport content stationary when deleting above the viewport.
+    if (removedAbove > 0) container.scrollTop = scrollTop - removedAbove;
 
     _vsUpdateVisible(container);
     updateOverallContext();
@@ -3488,7 +3542,7 @@ function renderExchange(exchange, targetContainer = null) {
             if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
             const payloadBox = toolEl.querySelector('.tool-payload');
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
-            _vsRecalcItem(toolEl);
+            // WI-2: height change detected by the frame loop (container click listener wakes it).
         });
 
         // Assistant message (if exists after tool) - append as sibling after the tool element
@@ -3989,7 +4043,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
         const payloadBox = toolEl.querySelector('.tool-payload');
         payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
-        _vsRecalcItem(toolEl);
+        // WI-2: height change detected by the frame loop (container click listener wakes it).
     });
 
     // 4. Execute tool (local tools first, then MCP servers).
@@ -4035,7 +4089,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             '</div>';
         toolEl.querySelector('.tool-result .tool-error').textContent = exchange.tool.content;
         toolEl.querySelector('.tool-payload').style.display = 'block';
-        _vsRecalcItem(toolEl);
+        // WI-2: height change detected by the frame loop (container click listener wakes it).
 
         toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
             toolEl.querySelector('.tool-result').innerHTML = '';
@@ -4421,6 +4475,12 @@ function updateAssistantContent(el, content, reasoningContent = null) {
             newThinkingContent.scrollTop = thinkingScrollTop;
         }
     }
+
+    // WI-2: streaming content changes the element's height — wake the loop
+    // so it detects the growth and cascades. Keeps the loop awake through
+    // generation pauses > 0.5s (VS_IDLE_FRAMES).
+    const container = el.closest('.conversation-container');
+    if (container) _vsWake(container);
 }
 
 window.toggleThinking = function(id) {
@@ -4438,10 +4498,8 @@ window.toggleThinking = function(id) {
             }
         }
 
-        // Notify virtual scroll: the assistant message containing this thinking
-        // block grew or shrank. Find the owning .chat-message slot and re-measure.
-        const slot = el.closest('.chat-message');
-        if (slot) _vsRecalcItem(slot);
+        // WI-2: height change detected by the frame loop (container click
+        // listener wakes it). toggleThinking is now a pure CSS class toggle.
     }
 };
 
@@ -4543,10 +4601,11 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
         thinking.querySelector('.thinking-title').textContent = 'Thinking';
     }
 
-    // Update virtual scroll — element height is now stable
-    const container = getActiveContainer();
+    // WI-2: element height is now stable — wake the loop to detect the
+    // finalized height and cascade. (Replaces _vsOnContentGrown + _vsRecalcItem.)
+    const container = el.closest('.conversation-container') || getActiveContainer();
     if (container) {
-        _vsOnContentGrown(container);
+        _vsWake(container);
         _vsUpdateVisible(container);
     }
 }
@@ -4666,10 +4725,11 @@ async function regenerate(exchangeId) {
         oldEl.querySelector('.message-content').innerHTML = '';
         oldEl.querySelector('.streaming-indicator').classList.add('visible');
         oldEl.querySelector('.message-actions').classList.remove('visible');
-        // Cleared content → slot shrinks. Recalc immediately so the slot's
-        // reserved space matches the streaming indicator's smaller height,
-        // and slots below shift up to fill the gap.
-        _vsRecalcItem(oldEl);
+        // WI-2: height change detected by the frame loop. If the element is
+        // off-screen (detached), the change is invisible anyway — offsets
+        // reconcile when the user scrolls back and the loop re-attaches it.
+        const container = oldEl.closest('.conversation-container');
+        if (container) _vsWake(container);
     }
 
     // Stream new response — pass currentChatId to lock to the correct chat
@@ -4686,9 +4746,8 @@ function switchVersion(exchangeId, direction) {
             updateAssistantContent(el, exchange.assistant.content, exchange.assistant.reasoning_content);
             updateVersionControls(el, exchangeId);
             finalizeAssistantElement(el, exchangeId);
-            // Re-measure — version content may have a different length
-            // (different height) than the previous version.
-            _vsRecalcItem(el);
+            // WI-2: height change detected by the frame loop (updateAssistantContent
+            // calls _vsWake via its container lookup).
         }
     }
 }

@@ -410,10 +410,11 @@ vs.deactivate();       // restore normal flow, remove listeners/observers
 
 1. ~~Hidden-container guards~~ — **DONE 2026-07-12** (§1).
 2. ~~Spacing capture, unified append (`_vsAppendMessage`), slot-based deletion (`_vsRemoveExchangeDom`)~~ — **DONE 2026-07-12** (§1b).
-3. **Work Item 1** — cascade decoupling. Small, independently testable, prerequisite for WI-2.
-4. **Work Item 2** — frame loop. The big one. Verify all acceptance tests BEFORE deleting the explicit call sites; delete in a separate commit so it's revertable.
-5. **Work Item 3** — scroll anchoring (slots into WI-2's write phase).
-6. **Work Item 4** — binary search. **Work Item 5** — threshold. Independent of each other.
+3. ~~**Work Item 1** — cascade decoupling~~ — **DONE 2026-07-12**. Verified: style.top only written to attached elements; detached slots refreshed at attach time.
+4. ~~**Work Item 2** — frame loop~~ — **DONE 2026-07-12**. `_vsRecalcItem` and `_vsOnContentGrown` deleted; all 7 call sites removed; rAF wake/sleep loop handles all height detection. Browser-verified: thinking toggle animates smoothly, streaming grows continuously, loop sleeps within ~1s.
+5. ~~**Work Item 3** — scroll anchoring~~ — **DONE 2026-07-12**. `anchorDelta` in frame loop + `removedAbove` in deletion. Browser-verified: no viewport shift on above-viewport changes.
+6. ~~**Work Item 4** — binary search~~ — **DONE 2026-07-12**. `_vsFirstVisibleIndex` + `_vsIndex` maintained at all 5 slot creation points. Zero Set allocation per pass.
+   ~~**Work Item 5** — threshold~~ — **DONE 2026-07-12**. `VS_MIN_ITEMS=30`; small chats skip stage/overlay entirely; threshold-crossing in `_vsAppendMessage` triggers activation.
 7. Extract to `nui-virtual-scroll` Tier 0/1 (needs a dedicated spec, §8), port chat.js to it, verify parity.
 8. Tier 2 windowed mode — new capability, built against a synthetic 10K-item playground page.
 
