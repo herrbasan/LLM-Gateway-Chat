@@ -198,8 +198,39 @@ if (el.dataset.isStreaming === 'true') {
 | File | Role |
 |------|------|
 | `lib/nui_wc2/NUI/nui.js` | `NuiMarkdown` class — `_processed` guard in `connectedCallback` |
-| `chat/js/chat.js` | `renderConversation()`, `_vsActivate()`, `_vsUpdateVisible()`, `_vsDeactivate()` |
-| `chat/css/chat.css` | `.vs-stage` class — `position: relative; flex-shrink: 0` |
+| `chat/js/chat.js` | `renderConversation()`, `buildHistoricalDomForChat()`, `_vsActivate()`, `_vsUpdateVisible()`, `_vsDeactivate()`, `_vsRecalcItem()`, `_vsRecalculate()`, `_vsOnContentGrown()`, `_vsShowBusy()`, `_vsHideBusy()` |
+| `chat/css/chat.css` | `.vs-stage`, `.chat-busy-overlay`, `.chat-busy-spinner` |
+| `chat/index.html` | Cache-busted script/css links |
+
+State model: `_vsState` — a `Map<container, { slots, totalHeight, stage, attached: Set, rafId, resizeTimer }>`.
+
+---
+
+## Incremental Recalc (`_vsRecalcItem`) — 2026-07-12
+
+When a single message changes height (thinking toggle, tool expand), the remaining slots below it must shift. `_vsRecalcItem(el)`:
+
+1. **Re-attach** if detached (`stage.appendChild(el)`) — cheap, NUI components skip re-processing via `_processed` guard.
+2. **Freeze CSS transitions** on the slot and any `.thinking-content` children. `.thinking-content` has `transition: max-height 0.3s`; measuring mid-animation gives the PRE-change height, not the POST-change height. `transition: none` forces the final state immediately.
+3. **Measure** `getBoundingClientRect().height` — NOT `offsetHeight`, which ignores CSS `max-height` clamping.
+4. **Restore** transitions.
+5. **Cascade**: recompute offsets for every slot from the changed index downward. Slots before keep their offsets.
+6. **Update stage height** and **re-evaluate visibility** (`_vsUpdateVisible`).
+
+Always cascades — no early-exit. Cost: O(slots-after-change) offset writes, acceptable for occasional user interactions.
+
+Wired at: 4 tool-toggle sites, `toggleThinking`, `regenerate`, `switchVersion`.
+
+---
+
+## Busy Overlay — 2026-07-12
+
+During the render → measure → activate pipeline, the user saw intermediate DOM ("all messages rendered → container emptied → only visible re-attached"). A busy overlay on `.chat-main` hides this:
+
+- **Target: `.chat-main`** — the only panel with stable dimensions during activation.
+- **CSS**: `.chat-main .chat-busy-overlay`, `.chat-main.chat-busy .chat-messages { overflow: hidden }`.
+- **JS**: `_vsShowBusy()` appends overlay, `_vsHideBusy()` removes. No arguments, idempotent.
+- **Lifecycle**: shown before any DOM work in `renderConversation()`/`buildHistoricalDomForChat()`, hidden after the post-activation visibility pass in `_vsActivate()`.
 
 ---
 
@@ -207,20 +238,20 @@ if (el.dataset.isStreaming === 'true') {
 
 To generalize this as an NUI component (e.g., `nui-virtual-scroll`):
 
-1. **Accept a render function** — like `nui-list`'s `options.render`, called to create each element
+1. **Accept a render function** — like `nui-list`'s `options.render`
 2. **Accept a data array** — the items to render
-3. **Shadow-render all items** on `updateData()` — append to self, measure, set up stage
+3. **Shadow-render all items** on `updateData()` — append, measure, set up stage
 4. **Expose `scrollToIndex(index)`** — calculate offset from slots array, set `scrollTop`
-5. **Handle resize** — debounced re-measure via `ResizeObserver`
-6. **Require the `_processed` guard** on any web components used inside items — document this clearly
-7. **Binary search** for visible range — O(log n) instead of O(n) for large lists
+5. **Handle resize** — debounced via `ResizeObserver`
+6. **Require the `_processed` guard** on any web components — document clearly
+7. **Binary search** for visible range — O(log n)
+8. **Expose `recalcItem(el)`** for per-item height changes
+9. **Busy-overlay** — accept a CSS selector for the stable container
 
-The component would have the same API surface as `nui-list` but handle variable heights.
 
+## Known Issues
 
-## Known Issues (2026-07-11)
-
-### 1. Resize Recalculation (FIXED 2026-07-11)
+### Resize Recalculation (FIXED 2026-07-11)
 
 When the container's width changes (window resize, orientation change, sidebar toggle), element text reflows and their heights change. A `ResizeObserver` on the container detects width changes with a **settle pattern**: each resize event resets a 300ms timer. Only after 300ms of no further resizing does `_vsRecalculate()` fire, preventing thrashing during active resize.
 
@@ -243,3 +274,17 @@ After virtual scroll activation, elements are moved from the `.conversation-cont
 ### 3. Streaming Height Updates (FIXED 2026-07-11)
 
 When a new message is appended during streaming, it's now registered as a slot in the slots array immediately (with an initial height estimate of 100px for positioning). On `finalizeAssistantElement`, `_vsOnContentGrown()` re-measures the last slot and updates the stage height and visibility. The streaming element's final height is now correctly reflected in the stage.
+
+### Thinking Toggle Recalc (FIXED 2026-07-12)
+
+Toggling a thinking block expanded/collapsed used to keep the slot's stored height unchanged — `offsetHeight` ignores CSS `max-height` clamping, so the measurement stayed the same regardless of collapse state. Slots below never shifted; expanded thinking content overflowed visually without pushing anything down.
+
+Fixed by using `getBoundingClientRect().height` for measurement, freezing CSS transitions on `.thinking-content` before reading (the `transition: max-height 0.3s` rule would otherwise give a mid-animation PRE-change height), and always cascading (no early-exit).
+
+### Busy Overlay During Activation (FIXED 2026-07-12)
+
+The render → measure → empty → re-attach pipeline was visible to the user as a janky flash. Fixed with a spinner overlay on `.chat-main` — the only panel with stable dimensions during virtual-scroll activation. Shown before any DOM work, hidden after the post-activation visibility pass.
+
+### Regenerate / Version Switch (OPEN)
+
+Regenerate and version-switch handlers call `_vsRecalcItem` on the changed slot. But reported: regenerate may break version navigation. Image storage also reported broken. Neither is related to virtual-scroll code; investigation needed in `conversation.js` and `file-store.js`.
