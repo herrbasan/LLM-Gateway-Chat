@@ -779,15 +779,27 @@ function getDisplayedChatId() {
  * Does NOT use renderConversation — builds directly from conversation data.
  */
 async function buildHistoricalDomForChat(conv, container) {
+    if (!container || !container.classList.contains('conversation-container')) {
+        throw new Error(
+            `buildHistoricalDomForChat: container must be a .conversation-container, got ${container ? container.tagName + '.' + container.className : 'null'}`
+        );
+    }
     if (conv.length === 0) {
-        container.innerHTML = `
-            <div class="welcome-message">
-                <h2>Welcome to LLM Gateway Chat</h2>
-                <p>Select a model and start chatting</p>
-            </div>
-        `;
+        _vsShowBusy();
+        _vsHideBusy();
+        const welcome = document.createElement('div');
+        welcome.className = 'welcome-message';
+        const h2 = document.createElement('h2');
+        h2.textContent = 'Welcome to LLM Gateway Chat';
+        const p = document.createElement('p');
+        p.textContent = 'Select a model and start chatting';
+        welcome.append(h2, p);
+        container.replaceChildren(welcome);
         return;
     }
+    // Show busy while we render the historical DOM. _vsActivate hides it
+    // after the post-activation visibility pass (called from switchChat).
+    _vsShowBusy();
     for (const exchange of conv.getAll()) {
         const el = buildExchangeElement(exchange);
         if (el) container.appendChild(el);
@@ -854,6 +866,9 @@ function buildExchangeElement(exchange) {
             if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
             const payloadBox = toolEl.querySelector('.tool-payload');
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+            // Toggling the payload changes the message's height — re-measure this
+            // slot and cascade offsets to every slot below it.
+            _vsRecalcItem(toolEl);
         });
 
         // Assistant message after tool - create as sibling, not child
@@ -2858,20 +2873,80 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
 const VS_MARGIN = 200; // px above/below viewport to keep attached
 const _vsState = new Map(); // container -> { slots: [], totalHeight, stage, rafId, attached: Set }
 
+// Build the busy overlay element using createElement (not innerHTML) —
+// innerHTML triggers HTML parsing on every assignment.
+function _buildBusyOverlay() {
+    const overlay = document.createElement('div');
+    overlay.className = 'chat-busy-overlay';
+    const spinner = document.createElement('div');
+    spinner.className = 'chat-busy-spinner';
+    overlay.appendChild(spinner);
+    return overlay;
+}
+
+// Returns the .chat-main panel — the only element with KNOWN, STABLE dimensions
+// during virtual-scroll activation. It's `position: relative`, has fixed flex
+// sizing, and doesn't re-layout when the conversation container changes shape.
+// This is the right anchor for the busy overlay.
+function _vsBusyTarget() {
+    const target = document.querySelector('.chat-main');
+    if (!target) {
+        throw new Error('_vsBusyTarget: .chat-main not found in DOM');
+    }
+    return target;
+}
+
+// Show a busy overlay on the chat-main panel so the user never sees the
+// render-all → empty → re-attach-visible sequence. Covers both the
+// initial render pass and the virtual-scroll activation pass.
+function _vsShowBusy() {
+    const target = _vsBusyTarget();
+    if (target.querySelector('.chat-busy-overlay')) return;
+    target.appendChild(_buildBusyOverlay());
+    target.classList.add('chat-busy');
+}
+
+function _vsHideBusy() {
+    const target = _vsBusyTarget();
+    const overlay = target.querySelector('.chat-busy-overlay');
+    if (overlay) overlay.remove();
+    target.classList.remove('chat-busy');
+}
+
 function renderConversation() {
     const container = getActiveContainer();
 
+    // Fail loud: getActiveContainer() falls back to elements.messages (the wrapper)
+    // when currentChatId is missing. The wrapper is NOT a conversation container —
+    // it has no `.chat-message` children, scroll behavior, or virtual-scroll state.
+    // Reaching that fallback is a programmer error; surface it immediately.
+    if (!container || !container.classList.contains('conversation-container')) {
+        throw new Error(
+            `renderConversation: getActiveContainer() returned ${container ? container.tagName + '.' + container.className : 'null'} ` +
+            `instead of a .conversation-container. currentChatId=${currentChatId}`
+        );
+    }
+
     // Clean up any previous virtual scroll state
     _vsDeactivate(container);
-    container.innerHTML = '';
+
+    // Show the busy overlay FIRST so the user never sees the
+    // "render all → measure → empty → re-attach" sequence.
+    // The overlay is built with createElement (no innerHTML parser cost).
+    _vsShowBusy();
 
     if (conversation.length === 0) {
-        container.innerHTML = `
-            <div class="welcome-message">
-                <h2>Welcome to LLM Gateway Chat</h2>
-                <p>Select a model and start chatting</p>
-            </div>
-        `;
+        // No virtual scroll to wait for — hide busy and show the welcome
+        // message built with createElement (no innerHTML parser cost).
+        _vsHideBusy();
+        const welcome = document.createElement('div');
+        welcome.className = 'welcome-message';
+        const h2 = document.createElement('h2');
+        h2.textContent = 'Welcome to LLM Gateway Chat';
+        const p = document.createElement('p');
+        p.textContent = 'Select a model and start chatting';
+        welcome.append(h2, p);
+        container.replaceChildren(welcome);
         updateOverallContext();
         return;
     }
@@ -2884,7 +2959,8 @@ function renderConversation() {
     updateOverallContext();
     scrollToBottom();
 
-    // After web components settle, activate virtual scroll
+    // After web components settle, activate virtual scroll.
+    // _vsActivate hides the busy overlay after its first visibility pass.
     _vsActivateWhenReady(container);
 }
 
@@ -2899,7 +2975,12 @@ function _vsActivateWhenReady(container) {
 
 function _vsActivate(container) {
     const messages = Array.from(container.querySelectorAll('.chat-message'));
-    if (messages.length === 0) return;
+    if (messages.length === 0) {
+        // Nothing to virtualize — drop the busy overlay so the empty state
+        // is visible. (renderConversation only reaches here when there's content.)
+        _vsHideBusy();
+        return;
+    }
 
     // Measure each element's full height including margins
     const slots = [];
@@ -2948,8 +3029,10 @@ function _vsActivate(container) {
         stage.appendChild(el);
     }
 
-    container.innerHTML = '';
-    container.appendChild(stage);
+    // replaceChildren is one atomic DOM call; innerHTML='' + appendChild is two.
+    // At this point the container still holds the pre-activation render, which
+    // we're clearing as we install the stage.
+    container.replaceChildren(stage);
 
     const state = {
         slots,
@@ -2985,6 +3068,11 @@ function _vsActivate(container) {
 
     // Initial visibility pass
     _vsUpdateVisible(container);
+
+    // Hide the busy overlay now that the stage is in place and the right
+    // elements are attached. This is the last step of the activation
+    // sequence — the user only ever sees the post-activation DOM.
+    _vsHideBusy();
 }
 
 function _vsRecalculate(container) {
@@ -3109,30 +3197,70 @@ function _vsDeactivate(container) {
 // Called when a new message is appended during streaming — update stage height
 function _vsOnContentGrown(container) {
     const state = _vsState.get(container);
+    if (!state || state.slots.length === 0) return;
+    // The streaming message is always the most recent slot in this container.
+    _vsRecalcItem(state.slots[state.slots.length - 1].el);
+}
+
+// Re-measure one chat-message slot and, if its height changed, cascade offsets
+// to every slot AFTER it. Call this from any interaction handler that may
+// change a message's vertical size (tool expand/collapse, thinking toggle,
+// edit commit, regenerate, version switch, image insertion, etc.).
+//
+// Cost: one offsetHeight read for unchanged heights (early-exit before any
+// cascade). For changed heights, O(slots-after) offset updates plus a
+// visibility pass.
+function _vsRecalcItem(el) {
+    const container = el.closest('.conversation-container');
+    if (!container) return;
+    const state = _vsState.get(container);
     if (!state) return;
 
-    // Re-measure the last element (it grew during streaming)
-    const lastSlot = state.slots[state.slots.length - 1];
-    if (lastSlot) {
-        const el = lastSlot.el;
-        const style = getComputedStyle(el);
-        const marginTop = parseFloat(style.marginTop) || 0;
-        const marginBottom = parseFloat(style.marginBottom) || 0;
-        const newHeight = el.offsetHeight + marginTop + marginBottom;
-        if (newHeight !== lastSlot.height) {
-            lastSlot.height = newHeight;
-            el._vsHeight = newHeight;
-            el.style.top = lastSlot.offset + 'px';
-        }
+    const idx = state.slots.findIndex(s => s.el === el);
+    if (idx === -1) return;
+    const slot = state.slots[idx];
+
+    // If detached, re-attach so offsetHeight reflects reality. Re-attaching is
+    // cheap — the element's rendered HTML is already cached by NUI/Markdown
+    // components (via their _processed guards).
+    if (!state.attached.has(el)) {
+        state.stage.appendChild(el);
+        state.attached.add(el);
     }
 
-    // Recalculate total height
-    let total = 0;
-    for (const slot of state.slots) {
-        total += slot.height;
+    // Quick scan: did the height actually change?
+    // (offsetHeight + margins; offsets store total slot height.)
+    const style = getComputedStyle(el);
+    const marginTop = parseFloat(style.marginTop) || 0;
+    const marginBottom = parseFloat(style.marginBottom) || 0;
+    const newHeight = el.offsetHeight + marginTop + marginBottom;
+    if (newHeight === slot.height) {
+        return; // No change — nothing to cascade. Save the offset loop.
     }
-    state.totalHeight = total;
-    state.stage.style.height = total + 'px';
+
+    // Cascade: only positions/offsets from `idx` onward change.
+    slot.height = newHeight;
+    el._vsHeight = newHeight;
+    el.style.margin = '0';
+
+    let offset = 0;
+    for (let i = 0; i < state.slots.length; i++) {
+        const s = state.slots[i];
+        if (i < idx) {
+            offset += s.height;
+            continue;
+        }
+        s.offset = offset;
+        s.el.style.top = offset + 'px';
+        s.el.style.margin = '0';
+        offset += s.height;
+    }
+
+    state.totalHeight = offset;
+    state.stage.style.height = offset + 'px';
+
+    // The visible range may have shifted — re-evaluate which slots are attached.
+    _vsUpdateVisible(container);
 }
 
 function renderExchange(exchange, targetContainer = null) {
@@ -3200,6 +3328,7 @@ function renderExchange(exchange, targetContainer = null) {
             if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
             const payloadBox = toolEl.querySelector('.tool-payload');
             payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+            _vsRecalcItem(toolEl);
         });
 
         // Assistant message (if exists after tool) - append as sibling after the tool element
@@ -3697,6 +3826,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
         const payloadBox = toolEl.querySelector('.tool-payload');
         payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+        _vsRecalcItem(toolEl);
     });
 
     // 4. Execute tool (local tools first, then MCP servers).
@@ -3742,6 +3872,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             '</div>';
         toolEl.querySelector('.tool-result .tool-error').textContent = exchange.tool.content;
         toolEl.querySelector('.tool-payload').style.display = 'block';
+        _vsRecalcItem(toolEl);
 
         toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
             toolEl.querySelector('.tool-result').innerHTML = '';
@@ -4143,6 +4274,11 @@ window.toggleThinking = function(id) {
                 content.scrollTop = content.scrollHeight;
             }
         }
+
+        // Notify virtual scroll: the assistant message containing this thinking
+        // block grew or shrank. Find the owning .chat-message slot and re-measure.
+        const slot = el.closest('.chat-message');
+        if (slot) _vsRecalcItem(slot);
     }
 };
 
@@ -4360,15 +4496,19 @@ async function regenerate(exchangeId) {
     if (client.hasActiveStream(currentChatId)) return;
     
     conversation.regenerateResponse(exchangeId);
-    
+
     // Remove old assistant element
     const oldEl = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
     if (oldEl) {
         oldEl.querySelector('.message-content').innerHTML = '';
         oldEl.querySelector('.streaming-indicator').classList.add('visible');
         oldEl.querySelector('.message-actions').classList.remove('visible');
+        // Cleared content → slot shrinks. Recalc immediately so the slot's
+        // reserved space matches the streaming indicator's smaller height,
+        // and slots below shift up to fill the gap.
+        _vsRecalcItem(oldEl);
     }
-    
+
     // Stream new response — pass currentChatId to lock to the correct chat
     currentExchangeId = exchangeId;
     await streamResponse(exchangeId, currentChatId);
@@ -4383,6 +4523,9 @@ function switchVersion(exchangeId, direction) {
             updateAssistantContent(el, exchange.assistant.content, exchange.assistant.reasoning_content);
             updateVersionControls(el, exchangeId);
             finalizeAssistantElement(el, exchangeId);
+            // Re-measure — version content may have a different length
+            // (different height) than the previous version.
+            _vsRecalcItem(el);
         }
     }
 }

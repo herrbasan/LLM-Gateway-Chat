@@ -206,6 +206,7 @@ nui-code pre {
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
+    position: relative; /* Anchor for .chat-busy-overlay if it lands on the wrapper */
 }
 
 /* Per-chat containers: each scrolls independently */
@@ -220,6 +221,7 @@ nui-code pre {
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    position: relative; /* Anchor for .chat-busy-overlay */
 }
 
 .welcome-message {
@@ -232,6 +234,37 @@ nui-code pre {
     position: relative;
     width: 100%;
     flex-shrink: 0; /* Don't let flex container shrink the stage */
+}
+
+/* Busy overlay — covers the chat-main panel during render + virtual-scroll
+   activation so the user never sees the intermediate
+   "render all → empty → re-attach visible" sequence.
+
+   Anchored on `.chat-main` (the panel with known dimensions and `position: relative`)
+   rather than the conversation container, because the conversation container's
+   dimensions can shift during virtual-scroll activation. `.chat-main` is stable. */
+.chat-main.chat-busy .chat-messages {
+    overflow: hidden; /* Prevent scroll jumps while busy */
+}
+
+.chat-main .chat-busy-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-base);
+    z-index: 50;
+    pointer-events: none; /* Don't block scrollbar during teardown */
+}
+
+.chat-busy-spinner {
+    width: 2rem;
+    height: 2rem;
+    border: 0.2rem solid var(--color-shade3);
+    border-top-color: var(--color-highlight);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
 }
 
 .load-more-sentinel {
