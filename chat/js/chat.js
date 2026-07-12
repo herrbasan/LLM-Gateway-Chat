@@ -859,7 +859,7 @@ function buildExchangeElement(exchange) {
         toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
             e.stopPropagation();
             conversation.deleteExchange(exchange.id);
-            renderConversation();
+            _vsRemoveExchangeDom(toolEl, exchange.id);
         });
 
         toolEl.querySelector('.message-header').addEventListener('click', (e) => {
@@ -939,7 +939,7 @@ function buildExchangeElement(exchange) {
     userEl.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchange.id, 'user'));
     userEl.querySelector('.delete-message')?.addEventListener('click', () => {
         conversation.deleteExchange(exchange.id);
-        renderConversation();
+        _vsRemoveExchangeDom(userEl, exchange.id);
     });
 
     // Set embed status directly on detached element (not in DOM yet)
@@ -2500,27 +2500,9 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     let assistantEl = targetContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
     if (!assistantEl) {
         assistantEl = createAssistantElement(exchangeId, '', streamModel);
-        // Append to stage if virtual scroll is active, otherwise to container
-        const stage = targetContainer?.querySelector('.vs-stage');
-        if (stage) {
-            // Register as a new slot positioned at the end of the stage
-            const state = _vsState.get(targetContainer);
-            if (state) {
-                const offset = state.totalHeight;
-                assistantEl.style.position = 'absolute';
-                assistantEl.style.top = offset + 'px';
-                assistantEl.style.left = '0';
-                assistantEl.style.right = 'auto';
-                assistantEl.style.margin = '0';
-                // Add a placeholder slot — height will be measured on finalize
-                const slot = { el: assistantEl, height: 100, offset: offset };
-                state.slots.push(slot);
-                state.attached.add(assistantEl);
-            }
-            stage.appendChild(assistantEl);
-        } else {
-            targetContainer?.appendChild(assistantEl);
-        }
+        // Registers a slot with natural spacing when virtual scroll is active;
+        // plain append otherwise.
+        if (targetContainer) _vsAppendMessage(targetContainer, assistantEl);
     }
     // Store timestamp info for stripping during rendering (reset on regeneration)
     const tsLen = timestampWithSpace.length;
@@ -2982,17 +2964,34 @@ function _vsActivate(container) {
         return;
     }
 
-    // Measure each element's full height including margins
+    // Hidden container (display:none — a background chat). Every offsetHeight
+    // read would return 0 and we'd build a corrupt stage. Bail WITHOUT creating
+    // a stage — switchChat re-triggers activation (`!querySelector('.vs-stage')`)
+    // when this chat becomes visible.
+    if (container.clientHeight === 0) {
+        _vsHideBusy();
+        return;
+    }
+
+    // Measure each element's full height including margins. Also include the
+    // container's flex gap — the stage is not a flex container, so the natural
+    // `gap: 1rem` spacing must be baked into each slot's height or activation
+    // visibly compresses the layout.
+    // slot.spacing (margins + gap) is stored permanently: once elements get
+    // inline margin:0 in the stage, computed margins read 0 and can never be
+    // re-derived from the DOM.
+    const gap = parseFloat(getComputedStyle(container).rowGap) || 0;
     const slots = [];
     let offset = 0;
     for (const el of messages) {
         const style = getComputedStyle(el);
         const marginTop = parseFloat(style.marginTop) || 0;
         const marginBottom = parseFloat(style.marginBottom) || 0;
-        const height = el.offsetHeight + marginTop + marginBottom;
+        const spacing = marginTop + marginBottom + gap;
+        const height = el.offsetHeight + spacing;
         el._vsHeight = height;
         el._vsOffset = offset;
-        slots.push({ el, height, offset });
+        slots.push({ el, height, offset, spacing });
         offset += height;
     }
 
@@ -3040,7 +3039,10 @@ function _vsActivate(container) {
         stage,
         rafId: null,
         attached: new Set(messages), // All elements start attached — _vsUpdateVisible will detach non-visible
-        resizeTimer: null
+        resizeTimer: null,
+        measuredWidth: container.clientWidth, // width the cached heights were measured at
+        staleMeasurements: false, // set when a measurement was skipped while hidden
+        gap // the container's natural flex gap, baked into every slot's spacing
     };
     _vsState.set(container, state);
 
@@ -3054,12 +3056,22 @@ function _vsActivate(container) {
     };
     container.addEventListener('scroll', container._vsOnScroll, { passive: true });
 
-    // Attach resize observer — recalculation settles after 300ms of no resizing
+    // Attach resize observer — recalculation settles after 300ms of no resizing.
+    // The observer ALSO fires when the container is hidden/shown by switchChat
+    // (size transitions to/from 0). Those transitions must not trigger a
+    // re-measure: hidden containers measure 0 for everything, and switch-back
+    // at an unchanged width doesn't invalidate any cached height.
     if (!container._vsResizeObserver) {
         container._vsResizeObserver = new ResizeObserver(() => {
             if (state.resizeTimer) clearTimeout(state.resizeTimer);
             state.resizeTimer = setTimeout(() => {
                 state.resizeTimer = null;
+                // Hidden (display:none) — this is the 0-size transition of a
+                // chat switch. Measuring now would zero every cached height.
+                if (container.clientHeight === 0) return;
+                // Same width and nothing stale → cached heights are still
+                // valid. Skips the full re-measure on every switch-back.
+                if (container.clientWidth === state.measuredWidth && !state.staleMeasurements) return;
                 _vsRecalculate(container);
             }, 300);
         });
@@ -3079,6 +3091,15 @@ function _vsRecalculate(container) {
     const state = _vsState.get(container);
     if (!state) return;
 
+    // Never measure a hidden container — offsetHeight is 0 for every slot,
+    // which would corrupt all cached heights (and _vsUpdateVisible would then
+    // re-attach ALL slots, since every [0,0] range overlaps the viewport).
+    // Flag stale so the ResizeObserver settle handler re-measures on switch-back.
+    if (container.clientHeight === 0) {
+        state.staleMeasurements = true;
+        return;
+    }
+
     // Re-attach all elements and reset to natural flow for measurement
     for (const slot of state.slots) {
         const el = slot.el;
@@ -3093,16 +3114,19 @@ function _vsRecalculate(container) {
         }
     }
 
-    // Force layout, then measure
+    // Force layout, then measure. Inline margins were cleared above, so the
+    // natural CSS margins are readable again — refresh slot.spacing here.
     let offset = 0;
     for (const slot of state.slots) {
         const el = slot.el;
         const elStyle = getComputedStyle(el);
         const marginTop = parseFloat(elStyle.marginTop) || 0;
         const marginBottom = parseFloat(elStyle.marginBottom) || 0;
-        const height = el.offsetHeight + marginTop + marginBottom;
+        const spacing = marginTop + marginBottom + state.gap;
+        const height = el.offsetHeight + spacing;
         el._vsHeight = height;
         el._vsOffset = offset;
+        slot.spacing = spacing;
         slot.height = height;
         slot.offset = offset;
         offset += height;
@@ -3129,6 +3153,10 @@ function _vsRecalculate(container) {
     // Update stage height
     state.totalHeight = offset;
     state.stage.style.height = offset + 'px';
+
+    // Heights are now valid for this width
+    state.measuredWidth = container.clientWidth;
+    state.staleMeasurements = false;
 
     // Detach non-visible
     _vsUpdateVisible(container);
@@ -3216,6 +3244,15 @@ function _vsRecalcItem(el) {
     const state = _vsState.get(container);
     if (!state) return;
 
+    // Background chats keep streaming inside display:none containers.
+    // getBoundingClientRect() there returns 0 — skip the measurement and flag
+    // the state stale; the ResizeObserver settle handler re-measures when the
+    // chat becomes visible again.
+    if (container.clientHeight === 0) {
+        state.staleMeasurements = true;
+        return;
+    }
+
     const idx = state.slots.findIndex(s => s.el === el);
     if (idx === -1) return;
     const slot = state.slots[idx];
@@ -3247,10 +3284,14 @@ function _vsRecalcItem(el) {
     void el.offsetHeight; // flush
 
     const rect = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    const marginTop = parseFloat(style.marginTop) || 0;
-    const marginBottom = parseFloat(style.marginBottom) || 0;
-    const newHeight = rect.height + marginTop + marginBottom;
+    // Do NOT read computed margins here — every staged element has inline
+    // margin:0, so they read 0 and the slot would lose its natural spacing
+    // (the "shrinking margins" bug). slot.spacing was captured from natural
+    // flow when the slot was created and is the only surviving record.
+    if (typeof slot.spacing !== 'number') {
+        throw new Error(`_vsRecalcItem: slot has no spacing — slot for ${el.className} was created outside _vsActivate/_vsRecalculate/_vsAppendMessage`);
+    }
+    const newHeight = rect.height + slot.spacing;
 
     // Restore transitions
     for (const { node, v } of savedTransitions) {
@@ -3282,6 +3323,104 @@ function _vsRecalcItem(el) {
 
     // The visible range may have shifted — re-evaluate which slots are attached.
     _vsUpdateVisible(container);
+}
+
+// Append a chat-message element to a container. When virtual scroll is active,
+// register it as a slot at the end of the stage; plain append otherwise.
+// Natural CSS margins are read BEFORE being zeroed (inline margin:0 makes them
+// unreadable afterwards) and stored as slot.spacing together with the
+// container's flex gap — this preserves inter-message spacing across all
+// future re-measurements.
+function _vsAppendMessage(container, el) {
+    if (!container) throw new Error('_vsAppendMessage: container required');
+    const state = _vsState.get(container);
+    if (!state) {
+        container.appendChild(el);
+        return;
+    }
+
+    const offset = state.totalHeight;
+    el.style.position = 'absolute';
+    el.style.top = offset + 'px';
+    if (el.classList.contains('user')) {
+        el.style.right = '0';
+        el.style.left = 'auto';
+    } else if (el.classList.contains('tool')) {
+        el.style.left = '0';
+        el.style.right = '0';
+    } else {
+        el.style.left = '0';
+        el.style.right = 'auto';
+    }
+    state.stage.appendChild(el);
+
+    const cs = getComputedStyle(el);
+    const spacing = (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0) + state.gap;
+    el.style.margin = '0';
+
+    // Streaming elements grow — their height is corrected on finalize via
+    // _vsRecalcItem. Static elements (tool bubbles) are correct immediately.
+    const height = el.offsetHeight + spacing;
+    state.slots.push({ el, height, offset, spacing });
+    state.attached.add(el);
+    state.totalHeight = offset + height;
+    state.stage.style.height = state.totalHeight + 'px';
+}
+
+// Remove every rendered element of an exchange without a full re-render —
+// the deletion equivalent of _vsRecalcItem. The slots array is the source of
+// truth: detached elements are NOT in the DOM, so querySelectorAll would miss
+// them. clickedEl anchors the container lookup (the clicked element is always
+// attached).
+function _vsRemoveExchangeDom(clickedEl, exchangeId) {
+    const container = clickedEl.closest('.conversation-container');
+    if (!container) throw new Error(`_vsRemoveExchangeDom: element for exchange ${exchangeId} is not inside a conversation container`);
+
+    const state = _vsState.get(container);
+    if (!state) {
+        // Virtual scroll inactive — plain flow removal
+        for (const el of container.querySelectorAll(`.chat-message[data-exchange-id="${exchangeId}"]`)) el.remove();
+        if (!container.querySelector('.chat-message')) {
+            renderConversation(); // chat emptied — show the welcome message
+            return;
+        }
+        updateOverallContext();
+        return;
+    }
+
+    const removed = state.slots.filter(s => s.el.dataset.exchangeId === exchangeId);
+    if (removed.length === 0) {
+        // Element was never registered as a slot (edge: appended outside the stage)
+        clickedEl.remove();
+        updateOverallContext();
+        return;
+    }
+
+    for (const s of removed) {
+        if (state.attached.has(s.el)) {
+            state.stage.removeChild(s.el);
+            state.attached.delete(s.el);
+        }
+    }
+    state.slots = state.slots.filter(s => s.el.dataset.exchangeId !== exchangeId);
+
+    if (state.slots.length === 0) {
+        renderConversation(); // chat emptied — show the welcome message
+        return;
+    }
+
+    // Cascade all offsets from the top (a deletion can remove multiple slots)
+    let offset = 0;
+    for (const s of state.slots) {
+        s.offset = offset;
+        s.el.style.top = offset + 'px';
+        offset += s.height;
+    }
+    state.totalHeight = offset;
+    state.stage.style.height = offset + 'px';
+
+    _vsUpdateVisible(container);
+    updateOverallContext();
 }
 
 function renderExchange(exchange, targetContainer = null) {
@@ -3331,7 +3470,7 @@ function renderExchange(exchange, targetContainer = null) {
                 </div>
             </div>
         `;
-        container?.appendChild(toolEl);
+        if (container) _vsAppendMessage(container, toolEl);
 
         // Use textContent to prevent SVG/code examples from being parsed as HTML
         const resultEl = toolEl.querySelector('.tool-result');
@@ -3342,7 +3481,7 @@ function renderExchange(exchange, targetContainer = null) {
         toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
             e.stopPropagation();
             conversation.deleteExchange(exchange.id);
-            renderConversation();
+            _vsRemoveExchangeDom(toolEl, exchange.id);
         });
 
         toolEl.querySelector('.message-header').addEventListener('click', (e) => {
@@ -3369,9 +3508,10 @@ function renderExchange(exchange, targetContainer = null) {
             updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
             const aEmbed = assistantEl.querySelector('.embed-status');
             if (aEmbed) _applyEmbedStatusAttrs(aEmbed, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
-            // In renderExchange, toolEl is already in DOM, so we can insert assistant as sibling
-            // This keeps tool and assistant as separate message bubbles
-            toolEl.insertAdjacentElement('afterend', assistantEl);
+            // toolEl was just appended as the last message, so appending the
+            // assistant next preserves ordering. _vsAppendMessage registers a
+            // slot when virtual scroll is active; plain append otherwise.
+            if (container) _vsAppendMessage(container, assistantEl);
             // User embed status: userEl is already in DOM at this point, so setEmbedStatus works
             setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
             if (exchange.assistant.isComplete) {
@@ -3424,10 +3564,10 @@ function renderExchange(exchange, targetContainer = null) {
     userEl.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchange.id, 'user'));
     userEl.querySelector('.delete-message')?.addEventListener('click', () => {
         conversation.deleteExchange(exchange.id);
-        renderConversation();
+        _vsRemoveExchangeDom(userEl, exchange.id);
     });
 
-    container?.appendChild(userEl);
+    if (container) _vsAppendMessage(container, userEl);
 
     setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
 
@@ -3464,7 +3604,7 @@ function renderExchange(exchange, targetContainer = null) {
         updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
         const aEmbed = assistantEl.querySelector('.embed-status');
         if (aEmbed) _applyEmbedStatusAttrs(aEmbed, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
-        container?.appendChild(assistantEl);
+        if (container) _vsAppendMessage(container, assistantEl);
 
         if (exchange.assistant.isComplete) {
             finalizeAssistantElement(assistantEl, exchange.id);
@@ -3514,7 +3654,7 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
     el.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchangeId, 'assistant'));
     el.querySelector('.delete-message')?.addEventListener('click', () => {
         conversation.deleteExchange(exchangeId);
-        renderConversation();
+        _vsRemoveExchangeDom(el, exchangeId);
     });
 
     return el;
@@ -3764,7 +3904,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
                 </div>
             </div>
         `;
-        toolContainer?.appendChild(toolEl);
+        if (toolContainer) _vsAppendMessage(toolContainer, toolEl);
         
         // Continue with normal response (don't stream again, just finalize)
         return;
@@ -3832,13 +3972,15 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
                   <div class="tool-result"></div>
     `;
 
-    toolContainer?.appendChild(toolEl);
+    // Register as a virtual-scroll slot when active — a plain container append
+    // would land OUTSIDE the stage, unmanaged and unfindable by _vsRecalcItem.
+    if (toolContainer) _vsAppendMessage(toolContainer, toolEl);
     scrollToBottom();
 
     toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
         e.stopPropagation();
         toolConversation.deleteExchange(exchange.id);
-        renderConversation();
+        _vsRemoveExchangeDom(toolEl, exchange.id);
     });
 
 // Toggle expand/collapse

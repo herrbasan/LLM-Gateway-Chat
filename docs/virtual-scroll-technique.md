@@ -320,6 +320,12 @@ Fixed by using `getBoundingClientRect().height` for measurement, freezing CSS tr
 
 The render → measure → empty → re-attach pipeline was visible to the user as a janky flash. Fixed with a spinner overlay on `.chat-main` — the only panel with stable dimensions during virtual-scroll activation. Shown before any DOM work, hidden after the post-activation visibility pass.
 
+### Hidden-Container Height Corruption (FIXED 2026-07-12)
+
+Background chats live in `display:none` containers, where all height reads return 0. Three paths measured hidden containers: the container `ResizeObserver` (fires on every chat switch, size W→0), `_vsRecalcItem` (background streaming finalize), and `_vsActivate` (chat switched away during the 300ms settle window). Result: all slot heights cached as 0 → `_vsUpdateVisible` re-attached ALL elements (every `[0,0]` range overlaps the viewport) → hidden 700-element layout hit and a broken-scrollbar flash on switch-back.
+
+Fixed with a `container.clientHeight === 0` guard on all three measurement paths plus a `state.staleMeasurements` flag; the RO settle handler reconciles on switch-back, and skips the full re-measure entirely when `clientWidth === state.measuredWidth` and nothing is stale (cached heights are width-scoped). Rule: **never measure while hidden; track staleness; reconcile on visibility.** See `docs/plan-virtual-scroll-v2.md` §1.
+
 ### Regenerate / Version Switch (OPEN)
 
 Regenerate and version-switch handlers call `_vsRecalcItem` on the changed slot. But reported: regenerate may break version navigation. Image storage also reported broken. Neither is related to virtual-scroll code; investigation needed in `conversation.js` and `file-store.js`.
