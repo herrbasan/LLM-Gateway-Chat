@@ -234,6 +234,41 @@ During the render → measure → activate pipeline, the user saw intermediate D
 
 ---
 
+## Proposal: Reactive Height Observer — 2026-07-12
+
+Currently 7 interaction sites (4 tool toggles, thinking toggle, regenerate, version switch) explicitly call `_vsRecalcItem(el)`. This is fragile — every new interaction that changes slot height needs its own call.
+
+Replace explicit calls with a per-container `requestAnimationFrame` loop that polls attached slots' heights and cascades when anything changed. Pattern lifted from `nui-list`'s frame-time update:
+
+```
+per-frame (rAF, per active container):
+  for each slot in state.slots:
+    if slot is attached to stage → read getBoundingClientRect().height
+    if height !== slot.height → mark dirty, cascade from here
+  if no diffs → return
+  if diffs → cascade offsets below first changed slot, update stage height, _vsUpdateVisible
+```
+
+**Why rAF instead of ResizeObserver:**
+- ResizeObserver fires on ALL attached slots simultaneously during resize events, flooding the loop. rAF throttles to once per frame.
+- During streaming, slots resize on every token — ResizeObserver would fire thousands of times. rAF lets `finalizeAssistantElement` remain the single trigger.
+- Observer setup/teardown per slot (~12–15 instances active) adds complexity with no benefit over a single per-container loop.
+
+**Benefits over current:**
+- Zero wiring for new interaction types. Any CSS change that alters slot height (max-height animation, image load, font resize) is handled transparently.
+- Smooth animation: thinking-toggle `transition: max-height 0.3s` cascades via mid-animation `getBoundingClientRect().height` readings (no freeze). 6–8ms per frame for 700 slots, well under the 16ms budget.
+- Resilience: a slot whose height drifts for any reason (NUI component re-render, embedded iframe load) self-corrects on the next frame.
+
+**Cost:** per-frame loop walks all state.slots. For a 700-slot chat this is ~0.5ms of integer iteration (O(n) linear scan). The current code already has O(n) in `_vsUpdateVisible` (attached/detached check), so combining them adds no meaningful overhead. Binary search on offset array remains the optimization path for large lists.
+
+**Migration path:**
+1. Add `state.heightDirty = false` and an `_vsOnFrame(container)` rAF loop.
+2. `_vsOnFrame` checks `getBoundingClientRect().height` on every attached slot. If any differ, cascade + `_vsUpdateVisible`.
+3. Remove all 7 explicit `_vsRecalcItem` calls — any height change is caught by the rAF.
+4. `toggleThinking` reverts to pure CSS class toggle. No custom JS needed.
+
+---
+
 ## Porting to NUI Library
 
 To generalize this as an NUI component (e.g., `nui-virtual-scroll`):
