@@ -2,6 +2,7 @@ const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { EventEmitter } = require('events');
 
 const { Database: nDB } = require('../lib/ndb/napi');
@@ -463,8 +464,14 @@ function json(res, data, status = 200, req = null) {
     headers['Access-Control-Allow-Origin'] = '*';
   }
 
-  res.writeHead(status, headers);
-  res.end(JSON.stringify(data));
+  const body = JSON.stringify(data);
+  if (req) {
+    sendBody(req, res, body, headers, status);
+  } else {
+    headers['Content-Length'] = Buffer.byteLength(body);
+    res.writeHead(status, headers);
+    res.end(body);
+  }
 }
 
 function readBody(req) {
@@ -479,6 +486,55 @@ function readBody(req) {
       }
     });
   });
+}
+
+// ============================================
+// Compressed Response Helper
+// ============================================
+
+const COMPRESSIBLE_MIMES = new Set([
+  'text/html',
+  'text/css',
+  'text/plain',
+  'text/xml',
+  'text/event-stream',
+  'application/javascript',
+  'application/json',
+  'application/xml',
+  'image/svg+xml'
+]);
+const COMPRESS_THRESHOLD = 1024; // bytes — skip compression for tiny payloads
+
+function acceptsEncoding(req, encoding) {
+  const accept = req.headers['accept-encoding'] || '';
+  return accept.includes(encoding);
+}
+
+function sendBody(req, res, body, headers, status = 200) {
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  const mime = headers['Content-Type'] || '';
+  const baseMime = mime.split(';')[0].trim();
+  const compressible = COMPRESSIBLE_MIMES.has(baseMime);
+
+  if (compressible && buf.length >= COMPRESS_THRESHOLD && acceptsEncoding(req, 'gzip')) {
+    zlib.gzip(buf, (err, compressed) => {
+      if (err) {
+        // Fallback: send uncompressed
+        headers['Content-Length'] = buf.length;
+        res.writeHead(status, headers);
+        res.end(buf);
+      } else {
+        headers['Content-Encoding'] = 'gzip';
+        headers['Content-Length'] = compressed.length;
+        res.writeHead(status, headers);
+        res.end(compressed);
+      }
+    });
+  } else {
+    headers['Content-Length'] = buf.length;
+    res.writeHead(status, headers);
+    res.end(buf);
+  }
 }
 
 // ============================================
@@ -1801,8 +1857,8 @@ function serveFile(req, res, filepath) {
       '.svg': 'image/svg+xml'
     }[ext] || 'application/octet-stream';
     
-    res.writeHead(200, { 'Content-Type': mime });
-    res.end(data);
+    const headers = { 'Content-Type': mime };
+    sendBody(req, res, data, headers, 200);
   });
 }
 
@@ -1926,7 +1982,6 @@ const server = http.createServer(async (req, res) => {
   
   // Intercept JS config to inject environment variables dynamically
   if (pathname === '/chat/js/config.js') {
-    res.writeHead(200, { 'Content-Type': 'application/javascript' });
     const instructions = await fetchPrimeDirective();
 
     const configObj = {
@@ -1944,7 +1999,8 @@ const server = http.createServer(async (req, res) => {
       browserFetchAllowedPrefixes: BROWSER_FETCH_ALLOWLIST,
       instructions
     };
-    res.end(`// Generated dynamically by server.js from .env\nwindow.CHAT_CONFIG = ${JSON.stringify(configObj, null, 4)};`);
+    const body = `// Generated dynamically by server.js from .env\nwindow.CHAT_CONFIG = ${JSON.stringify(configObj, null, 4)};`;
+    sendBody(req, res, body, { 'Content-Type': 'application/javascript' }, 200);
     return;
   }
 
@@ -1953,8 +2009,7 @@ const server = http.createServer(async (req, res) => {
     const arenaPath = path.join(__dirname, '..', 'chat-arena', 'js', 'config.js');
     try {
       const content = await fs.promises.readFile(arenaPath, 'utf8');
-      res.writeHead(200, { 'Content-Type': 'application/javascript' });
-      res.end(content);
+      sendBody(req, res, content, { 'Content-Type': 'application/javascript' }, 200);
     } catch (_) {
       res.writeHead(404);
       res.end('Not found');
@@ -1988,8 +2043,8 @@ const server = http.createServer(async (req, res) => {
         '.jpg': 'image/jpeg',
         '.svg': 'image/svg+xml'
       }[ext] || 'application/octet-stream';
-      res.writeHead(200, { 'Content-Type': mime });
-      res.end(data);
+      const headers = { 'Content-Type': mime };
+      sendBody(req, res, data, headers, 200);
     });
 });
 
