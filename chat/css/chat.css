@@ -1357,13 +1357,13 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
 }
 
 .tool-bubble.pending {
-    border: thin dashed var(--color-shade3);
+    border: thin solid var(--color-shade3);
     opacity: 0.8;
     animation: pulse 2s infinite;
 }
 
 .tool-header {
-    height: 3rem;
+    height: 2.5rem;
     box-sizing: border-box;
     cursor: pointer;
     display: flex;
