@@ -41,9 +41,14 @@ const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   
 const EMBED_MAX_TOKENS = parseInt(process.env.CHAT_EMBED_MAX_TOKENS || cfg.embedMaxTokens) || 30000;
 const EMBED_TOK_RATIO  = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
 
+const EMBED_API_KEY = process.env.GATEWAY_API_KEY || cfg.embedApiKey || null;
+
 const EMBED_HEADERS = {
     'Content-Type': 'application/json'
 };
+if (EMBED_API_KEY) {
+    EMBED_HEADERS['Authorization'] = `Bearer ${EMBED_API_KEY}`;
+}
 
 // browser_fetch allowlist — exposed to the chat frontend as
 // window.CHAT_CONFIG.browserFetchAllowedPrefixes. Each entry is
@@ -350,8 +355,11 @@ function getOrLoadUserDb(dbPath) {
                 for (let idx = 0; idx < c.messages.length; idx++) {
                     const m = c.messages[idx];
                     if (!m.id) continue;
+                    if (m.role === 'tool') continue;
                     if (!embeddingsCol.get(m.id)) {
-                        // Not in nVDB at all — needs full re-embed
+                        // Not in nVDB at all — re-embed regardless of prior status.
+                        // 'failed' messages are retried too (gap filling): transient
+                        // provider failures must not become permanent holes.
                         stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
                     } else if (!m.embedStatus || m.embedStatus === 'pending' || m.embedStatus === 'failed') {
                         // In nVDB but status was never written, still pending, or previously failed — backfill to embedded
@@ -363,13 +371,36 @@ function getOrLoadUserDb(dbPath) {
             if (stale.length > 0) {
                 logger.info('Lazy reconciliation', { count: stale.length, dbPath }, 'Server');
                 (async () => {
+                    let succeeded = 0;
+                    let failed = 0;
+                    let retriedLater = 0;
+                    const t0 = Date.now();
+                    let gapMs = 500;
                     for (let i = 0; i < stale.length; i++) {
                         const { msg, session, convNdbId, idx } = stale[i];
-                        await embedMessageAsync(instance, msg, session, convNdbId, idx).catch(() => {});
-                        if (i % 10 === 9 && i + 1 < stale.length) {
-                            await new Promise(r => setTimeout(r, 2000));
+                        try {
+                            await embedMessageAsync(instance, msg, session, convNdbId, idx);
+                            succeeded++;
+                        } catch (err) {
+                            // embedMessageAsync already retried internally and re-queued
+                            // transient failures into pendingQueue. Permanent failures
+                            // return without throwing, so a throw here means the message
+                            // was re-queued for the background drain — count it separately.
+                            retriedLater++;
+                            logger.warn('Reconciliation item deferred', { msgId: msg.id, kind: err.kind, error: err.message }, 'Embed');
+                        }
+                        await new Promise(r => setTimeout(r, gapMs));
+                        gapMs = Math.max(gapMs * 0.95, 200);
+                        if ((i + 1) % 50 === 0 || i === stale.length - 1) {
+                            const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+                            const done = i + 1;
+                            const remaining = stale.length - done;
+                            const rate = elapsed > 0 ? (done / (Date.now() - t0) * 60000).toFixed(1) : '0';
+                            logger.info('Reconciliation progress', { done, total: stale.length, succeeded, failed, retriedLater, remaining, elapsedSec: elapsed, ratePerMin: rate, dbPath }, 'Server');
                         }
                     }
+                    const totalSec = ((Date.now() - t0) / 1000).toFixed(1);
+                    logger.info('Reconciliation complete', { total: stale.length, succeeded, failed, retriedLater, elapsedSec: totalSec, dbPath }, 'Server');
                 })();
             }
             if (Object.keys(missingStatus).length > 0) {
@@ -538,32 +569,89 @@ function sendBody(req, res, body, headers, status = 200) {
 }
 
 // ============================================
-// Embed Query
+// Embed API
+//
+// embedBatch(texts) — send batch to Gateway, return vectors.
+// Throws Error with err.kind classifying the failure:
+//   'rate_limit'   — 429 or upstream rate-limit; transient, wait Retry-After
+//   'server'       — 5xx / network / timeout; transient, provider-side
+//   'client'       — 4xx (non-429); permanent payload problem, do not retry blindly
+//   'unavailable'  — circuit breaker open (embedAvailable === false)
+//   'response'     — 200 but malformed body; treat as transient
+// Retry-After (seconds or HTTP-date) is honored on err.retryAfterMs.
+// Only 'server'/'response' failures count toward the circuit breaker —
+// a rate-limit or a bad payload is not an outage.
 // ============================================
 
-async function embedQuery(text) {
-    if (!embedAvailable) throw new Error('Embedding unavailable');
+class EmbedError extends Error {
+    constructor(kind, message, retryAfterMs = 0, status = 0) {
+        super(message);
+        this.kind = kind;
+        this.retryAfterMs = retryAfterMs;
+        this.status = status;
+    }
+}
+
+function _parseRetryAfterMs(res) {
+    const h = res.headers.get('retry-after');
+    if (!h) return 0;
+    const secs = Number(h);
+    if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+    const date = Date.parse(h);
+    if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+    return 0;
+}
+
+async function embedBatch(texts) {
+    if (!embedAvailable) throw new EmbedError('unavailable', 'Embedding unavailable');
+    const reqBody = { input: texts, dimensions: EMBEDDING_DIMS };
+    if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
+
+    let res;
     try {
-        const reqBody = { input: [text], dimensions: EMBEDDING_DIMS };
-        if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
-        const res = await fetch(EMBED_URL, {
+        res = await fetch(EMBED_URL, {
             method: 'POST',
             headers: EMBED_HEADERS,
             body: JSON.stringify(reqBody),
-            signal: AbortSignal.timeout(60000)
+            signal: AbortSignal.timeout(120000)
         });
-        if (!res.ok) {
-            throw new Error(`Embed ${res.status}`);
+    } catch (err) {
+        // Network failure / timeout — provider unreachable
+        embedFailCount++;
+        if (embedFailCount >= 3) embedAvailable = false;
+        throw new EmbedError('server', `Embed network: ${err.message}`, 0, 0);
+    }
+
+    if (!res.ok) {
+        const retryAfterMs = _parseRetryAfterMs(res);
+        const body = await res.text().catch(() => '');
+        const detail = body.slice(0, 300);
+        if (res.status === 429) {
+            // Rate-limit is NOT an outage — do not trip the breaker
+            throw new EmbedError('rate_limit', `Embed 429: ${detail}`, retryAfterMs, 429);
         }
-        embedFailCount = 0;
-        const data = await res.json();
-        if (data.error) throw new Error(data.error.message);
-        return data.data?.[0]?.embedding;
+        if (res.status >= 500) {
+            embedFailCount++;
+            if (embedFailCount >= 3) embedAvailable = false;
+            throw new EmbedError('server', `Embed ${res.status}: ${detail}`, retryAfterMs, res.status);
+        }
+        // 4xx — payload problem (auth, too long, malformed). Not an outage.
+        throw new EmbedError('client', `Embed ${res.status}: ${detail}`, 0, res.status);
+    }
+
+    embedFailCount = 0;
+    let data;
+    try {
+        data = await res.json();
     } catch (err) {
         embedFailCount++;
         if (embedFailCount >= 3) embedAvailable = false;
-        throw err;
+        throw new EmbedError('response', `Embed malformed JSON: ${err.message}`, 0, 200);
     }
+    if (data.error) throw new EmbedError('server', `Embed upstream: ${data.error.message || JSON.stringify(data.error)}`, 0, 200);
+    const embeddingData = data.data || [];
+    const sorted = [...embeddingData].sort((a, b) => (a.index || 0) - (b.index || 0));
+    return sorted.map(d => d.embedding);
 }
 
 function buildEmbedText(msg, session, msgIdx = -1) {
@@ -624,8 +712,7 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         } else {
             L().warn('Embed queue full — message dropped', { msgId: msg.id, role: msg.role, queueLen: instance.pendingQueue.length, dbPath: instance.dbPath }, 'Embed');
         }
-        L().info('Embed queued (endpoint down)', { msgId: msg.id, role: msg.role, queueLen: instance.pendingQueue.length, dbPath: instance.dbPath }, 'Embed');
-        return;
+        throw new Error('Embedding endpoint unavailable — queued for retry');
     }
 
     const rawText = buildEmbedText(msg, session, msgIdx);
@@ -639,10 +726,11 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
 
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            const vector = await embedQuery(text);
+            const vectors = await embedBatch([text]);
+            const vector = vectors[0];
 
             if (!Array.isArray(vector) || vector.length === 0 || vector.length !== EMBEDDING_DIMS) {
-                throw new Error('invalid_vector_shape');
+                throw new EmbedError('response', 'invalid_vector_shape');
             }
 
             instance.embeddingsCol.insert(msg.id, vector, JSON.stringify({
@@ -668,39 +756,42 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         } catch (err) {
             lastError = err;
 
-            if (err.message?.includes('too many') && err.message?.includes('token')) {
-                L().error('Embed too many tokens', err, { msgId: msg.id, charLen: text.length }, 'Embed');
+            // Permanent payload problems — retrying cannot help
+            const isTokenOverflow = err.message?.includes('too many') && err.message?.includes('token');
+            const isClientError = err.kind === 'client';
+            if (isTokenOverflow || isClientError) {
+                const reason = isTokenOverflow ? 'too_many_tokens' : (err.message || 'client_error');
+                L().error('Embed permanent failure', err, { msgId: msg.id, kind: err.kind, charLen: text.length }, 'Embed');
                 try {
                     instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, 'too_many_tokens');
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, reason);
                     embedEvents.emit('status', {
                         chatId: session.id, msgIdx, messageId: msg.id,
-                        embedStatus: 'failed', embedError: 'too_many_tokens'
+                        embedStatus: 'failed', embedError: reason
                     });
                 } catch (e) {
                     L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
                 }
-                break;
+                // Do NOT re-queue — this is a content problem, not a transient one
+                return;
             }
 
+            // Transient — back off before next attempt. Honor Retry-After if given.
             if (attempt < 2) {
-                const delay = Math.pow(4, attempt) * 1000;
+                const retryAfter = err.retryAfterMs || 0;
+                const delay = Math.max(Math.pow(4, attempt) * 1000, retryAfter);
                 await new Promise(r => setTimeout(r, delay));
             }
         }
     }
 
-    L().error('Embed failed after retries', lastError, { msgId: msg.id, attempts: 3, prevFails: _prevFails }, 'Embed');
-    try {
-        instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
-        instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, lastError?.message || 'unknown');
-        embedEvents.emit('status', {
-            chatId: session.id, msgIdx, messageId: msg.id,
-            embedStatus: 'failed', embedError: lastError?.message || 'unknown'
-        });
-    } catch (e) {
-        L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
-    }
+    // Transient failure after all retries — re-queue for the background drain loop.
+    // Status stays 'pending' so reconciliation will pick it up again on restart.
+    L().error('Embed failed after retries (transient, re-queued)', lastError, { msgId: msg.id, kind: lastError?.kind, attempts: 3, prevFails: _prevFails }, 'Embed');
+    embedEvents.emit('status', {
+        chatId: session.id, msgIdx, messageId: msg.id,
+        embedStatus: 'pending', embedError: lastError?.message || 'unknown'
+    });
 
     const delays = [5000, 30000, 120000, 600000, 1800000];
     const newFailCount = _prevFails + 1;
@@ -711,6 +802,7 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         nextRetryAt: Date.now() + delay
     });
     L().info('Embed re-queued with backoff', { msgId: msg.id, failCount: newFailCount, delayMs: delay, nextRetry: new Date(Date.now() + delay).toISOString() }, 'Embed');
+    throw lastError;
 }
 
 
@@ -1672,7 +1764,8 @@ const routes = {
     // Semantic search via nVDB (skip if keyword-only)
     if ((searchType === 'semantic' || searchType === 'hybrid') && embeddingsCol && embedAvailable) {
       try {
-        const queryVector = await embedQuery(query);
+        const vectors = await embedBatch([query]);
+        const queryVector = vectors[0];
 
         const vectorResults = await embeddingsCol.search({
           vector: queryVector,
