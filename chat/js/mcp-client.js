@@ -12,8 +12,20 @@ class MCPClient {
         this.enabledTools = new Map(); // Map<serverId, Map<toolName, boolean>>
         this.pendingRequests = new Map(); // requestId -> { resolve, reject, server } for SSE responses
         this._configLoaded = false;
+        this._reqCounter = 0; // monotonic suffix for unique request IDs
         // Resource state per server
         this._resources = new Map(); // serverId -> { resources: [], templates: [], initializedAt: number }
+    }
+
+    /**
+     * Unique request ID. Date.now() alone collides when two calls fire in the
+     * same millisecond — the second pendingRequests.set() overwrites the first,
+     * and the orphaned stream dies with "MCP stream ended without response".
+     * Counter + random suffix makes collisions impossible.
+     */
+    _nextRequestId() {
+        this._reqCounter = (this._reqCounter + 1) % 0xffff;
+        return `${Date.now().toString(36)}-${this._reqCounter.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     }
 
     /**
@@ -64,7 +76,7 @@ class MCPClient {
     }
 
     addServer(url, name) {
-        const id = Date.now().toString();
+        const id = this._nextRequestId();
         this.servers.push({ id, url, name, status: 'disconnected' });
         this.enabledTools.set(id, new Map());
         this.saveConfig();
@@ -487,7 +499,7 @@ class MCPClient {
     async refreshServerTools(server) {
         if (!server.postEndpoint) throw new Error("No POST endpoint discovered for server");
 
-        const requestId = Date.now().toString();
+        const requestId = this._nextRequestId();
         const payload = {
             jsonrpc: '2.0',
             id: requestId,
@@ -814,7 +826,7 @@ class MCPClient {
             throw new Error(`Server for tool ${llmToolName} is disconnected or unavailable`);
         }
 
-        const requestId = Date.now().toString();
+        const requestId = this._nextRequestId();
         const progressToken = `prog-${requestId}`;
 
         console.log(`[MCP executeTool] Dispatching ${record.originalName} → ${server.name}, requestId=${requestId}`);
