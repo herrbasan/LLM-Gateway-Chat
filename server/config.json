@@ -5,6 +5,7 @@
     "usersDbPath": "server/data/users_db/data.jsonl",
     "sessionTtlMinutes": 1440,
     "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
+    "embedApiKey": null,
     "embedDims": 2560,
     "embedMaxTokens": 25000,
     "embedTokRatio": 2.5,

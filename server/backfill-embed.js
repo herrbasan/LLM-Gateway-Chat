@@ -33,6 +33,7 @@ const LOGS_DIR = process.env.CHAT_LOGS_DIR || cfg.logsDir || 'server/logs';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/embeddings';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
+const EMBED_API_KEY = process.env.GATEWAY_API_KEY || cfg.embedApiKey || null;
 
 const MODEL_HEADERS = {
     'Content-Type': 'application/json',
@@ -116,9 +117,11 @@ async function embedViaWrapper(texts, retries) {
 async function embedViaGateway(texts, retries) {
     const body = { input: texts, dimensions: EMBEDDING_DIMS };
     if (GATEWAY_MODEL) body.model = GATEWAY_MODEL;
+    const headers = { 'Content-Type': 'application/json' };
+    if (EMBED_API_KEY) headers['Authorization'] = `Bearer ${EMBED_API_KEY}`;
     const result = await fetchRetry(GATEWAY_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body
     }, retries);
 

@@ -14,6 +14,14 @@ import { storage } from '../../chat/js/storage.js';
 // Helpers
 // ============================================
 
+function _getGatewayApiKey() {
+    return localStorage.getItem('gateway-api-key') || '';
+}
+
+function _createGatewayClient(url) {
+    return new GatewayClient({ baseUrl: url, accessKey: _getGatewayApiKey() });
+}
+
 function _formatArenaTime(date) {
     const pad = (n) => n.toString().padStart(2, '0');
     return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
@@ -32,6 +40,7 @@ class Participant {
         this.name = options.name || 'Unknown';
         this.modelName = options.modelName || '';
         this.gatewayUrl = options.gatewayUrl || localStorage.getItem('gateway-url') || window.ARENA_CONFIG?.gatewayUrl || '';
+        this.gatewayApiKey = options.gatewayApiKey || _getGatewayApiKey();
         this.systemPrompt = options.systemPrompt || null;
         this.temperature = options.temperature !== undefined ? options.temperature : (window.ARENA_CONFIG?.defaultTemperature ?? 0.7);
         this.reasoningEffort = options.reasoningEffort || null;
@@ -39,6 +48,7 @@ class Participant {
 
         this.client = new GatewayClient({
             baseUrl: this.gatewayUrl,
+            accessKey: this.gatewayApiKey,
             sessionId: options.sessionId
         });
         this.responseAccumulator = '';
@@ -293,6 +303,7 @@ class Arena {
         this.id = options.id || this._generateId();
         this.sessionId = options.sessionId || `arena-${this.id}-sess`;
         this.gatewayUrl = options.gatewayUrl || localStorage.getItem('gateway-url') || window.ARENA_CONFIG?.gatewayUrl || '';
+        this.gatewayApiKey = options.gatewayApiKey || _getGatewayApiKey();
         this.maxTurns = options.maxTurns || window.ARENA_CONFIG?.defaultMaxTurns || 10;
         this.autoAdvance = options.autoAdvance !== undefined ? options.autoAdvance : true;
         this.targetTokens = options.targetTokens || null; // Token target for hint (not enforced as hard limit)
@@ -737,7 +748,7 @@ class Arena {
     }
 
     async getModels() {
-        const client = new GatewayClient({ baseUrl: this.gatewayUrl });
+        const client = _createGatewayClient(this.gatewayUrl);
         const response = await client.getModels();
         return response.models || [];
     }
@@ -1056,7 +1067,7 @@ class Arena {
 
         const topic = this.messages.find(m => m.role === 'system' && m.speaker === 'moderator')?.content?.replace('Topic: ', '') || '';
 
-        const client = new GatewayClient({ baseUrl: this.gatewayUrl });
+        const client = _createGatewayClient(this.gatewayUrl);
         const modelToUse = model;
 
         const summarySchema = {
@@ -1222,6 +1233,7 @@ class ArenaUI {
         this.autoAdvanceCheckbox = document.getElementById('auto-advance-checkbox');
         this.startButton = document.getElementById('start-btn');
         this.gatewayUrlInput = document.getElementById('arena-gateway-url');
+        this.gatewayApiKeyInput = document.getElementById('arena-gateway-api-key');
         this.gatewayConnectBtn = document.getElementById('arena-gateway-connect-btn');
         this.stopButton = document.getElementById('stop-btn');
         this.summarizeBtn = document.getElementById('summarize-btn');
@@ -1310,13 +1322,18 @@ class ArenaUI {
             const newUrl = input?.value?.trim();
             if (!newUrl) return;
             localStorage.setItem('gateway-url', newUrl);
+
+            const keyInput = this.gatewayApiKeyInput?.querySelector('input');
+            const newKey = keyInput?.value?.trim() || '';
+            localStorage.setItem('gateway-api-key', newKey);
+
             try {
-                const client = new GatewayClient({ baseUrl: newUrl });
+                const client = _createGatewayClient(newUrl);
                 const response = await client.getModels();
                 this.models = response.data || response.models || [];
                 this._populateModelSelects();
             } catch (err) {
-                this._showError('Failed to connect to gateway. Check the URL.');
+                this._showError('Failed to connect to gateway. Check the URL and API key.');
             }
         });
 
@@ -1469,11 +1486,16 @@ class ArenaUI {
 
         try {
             const gatewayUrl = localStorage.getItem('gateway-url') || '';
+            const gatewayApiKey = _getGatewayApiKey();
             if (this.gatewayUrlInput) {
                 const input = this.gatewayUrlInput.querySelector('input');
                 if (input) input.value = gatewayUrl;
             }
-            const client = new GatewayClient({ baseUrl: gatewayUrl });
+            if (this.gatewayApiKeyInput) {
+                const input = this.gatewayApiKeyInput.querySelector('input');
+                if (input) input.value = gatewayApiKey;
+            }
+            const client = _createGatewayClient(gatewayUrl);
             const response = await client.getModels();
             this.models = response.data || response.models || [];
 
@@ -1571,6 +1593,7 @@ class ArenaUI {
         const config = window.ARENA_CONFIG || {};
         this.arena = new Arena({
             gatewayUrl: localStorage.getItem('gateway-url') || config.gatewayUrl || '',
+            gatewayApiKey: _getGatewayApiKey(),
             maxTurns,
             autoAdvance,
             temperature,
@@ -2142,6 +2165,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
             this.arena = new Arena({
                 gatewayUrl: localStorage.getItem('gateway-url') || window.ARENA_CONFIG?.gatewayUrl || '',
+                gatewayApiKey: _getGatewayApiKey(),
                 onMessage: (msg) => this._renderMessage(msg),
                 onStatusChange: (status) => this._updateStatus(status),
                 onError: (err) => this._showError(err),

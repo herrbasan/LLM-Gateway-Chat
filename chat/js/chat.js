@@ -22,6 +22,7 @@ function _logTool(message, meta = {}) {
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
 const GATEWAY_URL = localStorage.getItem('gateway-url') || '';
+const GATEWAY_API_KEY = localStorage.getItem('gateway-api-key') || '';
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
@@ -656,6 +657,7 @@ let _embedEventChatId = null;
 
 let client = new GatewayClient({
     baseUrl: GATEWAY_URL,
+    accessKey: GATEWAY_API_KEY,
     operationMode: CONFIG.operationMode || 'sse',
     onLog: (category, message, meta) => {
         if (backendClient?.clientLog) backendClient.clientLog(category, message, meta).catch(() => {});
@@ -666,6 +668,12 @@ function updateGatewayUrl(newUrl) {
     localStorage.setItem('gateway-url', newUrl);
     client.restUrl = newUrl;
     client.wsUrl = newUrl.replace(/^http/, 'ws') + '/v1/realtime';
+    if (client.socket) client.socket.close();
+}
+
+function updateGatewayApiKey(newKey) {
+    localStorage.setItem('gateway-api-key', newKey);
+    client.accessKey = newKey;
     if (client.socket) client.socket.close();
 }
 let models = [];
@@ -712,6 +720,7 @@ const elements = {
     sidebarToggle: document.getElementById('sidebar-toggle'),
     sidebarToggleMobile: document.getElementById('sidebar-toggle-mobile'),
     gatewayUrl: document.getElementById('gateway-url'),
+    gatewayApiKey: document.getElementById('gateway-api-key'),
     gatewayConnectBtn: document.getElementById('gateway-connect-btn'),
     gatewayConfigStatus: document.querySelector('#gateway-config-status .status-dot'),
     gatewayConfigStatusText: document.querySelector('#gateway-config-status .gateway-config-status-text'),
@@ -1265,6 +1274,12 @@ async function applyDefaultConfig() {
         if (input) input.value = GATEWAY_URL;
     }
 
+    // Gateway API key input — populate from localStorage
+    if (elements.gatewayApiKey) {
+        const input = elements.gatewayApiKey.querySelector('input');
+        if (input) input.value = GATEWAY_API_KEY;
+    }
+
     // Load TTS preferences
     ttsEndpoint = localStorage.getItem('tts-endpoint') || '';
     const savedTtsVoice = await storage.getPref('tts-voice');
@@ -1756,12 +1771,17 @@ function setupEventListeners() {
         storage.setPref('operation-mode', newMode).catch(() => {});
     });
 
-    // Gateway Connect button — save URL, update client, reload models + status
+    // Gateway Connect button — save URL + API key, update client, reload models + status
     elements.gatewayConnectBtn?.addEventListener('click', async () => {
-        const input = elements.gatewayUrl?.querySelector('input');
-        const newUrl = input?.value?.trim();
+        const urlInput = elements.gatewayUrl?.querySelector('input');
+        const newUrl = urlInput?.value?.trim();
         if (!newUrl) return;
         updateGatewayUrl(newUrl);
+
+        const keyInput = elements.gatewayApiKey?.querySelector('input');
+        const newKey = keyInput?.value?.trim() || '';
+        updateGatewayApiKey(newKey);
+
         await loadModels();
         checkGatewayStatus();
     });
