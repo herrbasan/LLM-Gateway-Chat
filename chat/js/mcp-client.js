@@ -723,7 +723,26 @@ class MCPClient {
             throw new Error(`HTTP ${response.status}: ${text}`);
         }
 
-        // Response is SSE (text/event-stream) - parse manually from fetch stream
+        // Transport detection: streamable HTTP returns 200 + text/event-stream
+        // with the JSON-RPC response in the body. Legacy SSE returns 202 Accepted
+        // (empty body) and pushes the response on the persistent SSE stream.
+        // Treating a 202 body as SSE causes an immediate `done` with no matching
+        // event → false "MCP stream ended without response" rejection that races
+        // against the real response arriving on the SSE stream.
+        const contentType = response.headers.get('content-type') || '';
+        const isStreamable = response.status === 200 && contentType.includes('text/event-stream');
+
+        if (!isStreamable) {
+            // Legacy SSE transport: response body is empty (202 Accepted).
+            // The actual result arrives on the persistent SSE stream via
+            // handleResponse, which resolves the pending promise registered
+            // by executeTool. Nothing to read here — just drain and return.
+            console.log(`[MCP SSE] Legacy transport (status=${response.status}, type=${contentType || 'none'}). Response arrives on SSE stream.`);
+            try { await response.body.cancel(); } catch (_) {}
+            return;
+        }
+
+        // Streamable HTTP: response is SSE (text/event-stream) - parse manually from fetch stream
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
