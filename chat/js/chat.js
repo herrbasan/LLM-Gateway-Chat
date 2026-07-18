@@ -2753,7 +2753,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                                     args: args,
                                     id: tc.id
                                 }, chatId, originalUserExchangeId, false); // false = don't auto-resume stream
-                                toolExchangeIds.push(id);
+                                if (id !== null) toolExchangeIds.push(id); // null = tool error, handled separately
                             } catch (err) {
                                 console.error('Failed to parse tool arguments', tc.function.arguments, err);
                             }
@@ -4088,7 +4088,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         }
     }, toolChatId);
 
-    const result = await toolPromise.catch(err => {
+    const result = await toolPromise.catch(async err => {
         _logTool('Tool FAILED', { name: parsedObj.name, error: err.message || String(err) });
         exchange.tool.status = 'error';
         exchange.tool.content = err.message || String(err);
@@ -4125,6 +4125,14 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             }
             toolEl.querySelector('.dismiss-tool').parentElement.style.display = 'none';
         });
+
+        // Auto-resume the stream so the model sees the tool error as a result
+        // and can respond to it (rephrase, give up, try a different approach).
+        // Without this, the stream halts and the model retries the same failed
+        // call on the next user turn — an infinite loop.
+        if (resumeStream) {
+            await streamResponse(toolExchangeId, toolChatId, userExchangeId);
+        }
 
         return null; // signal: failed, UI handled, bail
     });

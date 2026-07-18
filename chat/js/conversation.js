@@ -824,6 +824,18 @@ export class Conversation {
 
             if (this.exchanges.length > 0) {
                 for (const ex of this.exchanges) {
+                    // Clean orphaned isStreaming flags — a stream that died mid-flight
+                    // (error, network drop, page kill) leaves isStreaming: true persisted.
+                    // On reload, the UI pins these as "still streaming" forever, blocking
+                    // new streams and stacking pending bubbles at the bottom.
+                    if (ex.assistant?.isStreaming === true) {
+                        ex.assistant.isStreaming = false;
+                        // If the exchange never got content, it's a zombie — mark complete
+                        // so the UI doesn't wait for a stream that will never come.
+                        if (!ex.assistant.content && !ex.assistant.reasoning_content) {
+                            ex.assistant.isComplete = true;
+                        }
+                    }
                     if (ex.assistant && Array.isArray(ex.assistant.versions) && ex.assistant.versions.length > 0) {
                         const uniqueVersions = [];
                         const seen = new Set();
