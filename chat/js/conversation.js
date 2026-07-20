@@ -194,17 +194,20 @@ export class Conversation {
         if (attachments.length > 0) {
             const savedFiles = await imageStore.save(exchange.id, attachments);
             exchange.user.attachments = attachments.map((att, idx) => {
-                const savedUrl = (savedFiles && savedFiles[idx] && savedFiles[idx].url)
-                    ? savedFiles[idx].url
-                    : att.dataUrl;
+                const saved = savedFiles && savedFiles[idx] ? savedFiles[idx] : null;
+                const savedUrl = saved?.url || att.dataUrl;
+                // _file compact nURI (images:hash.ext) is what nDB GC counts as a
+                // live reference. URL alone is NOT enough — gc_buckets only marks
+                // compact refs (plus URL form after the 2026-07-20 nDB fix).
                 return {
                     name: att.name,
                     type: att.type,
                     hasImage: !!att.dataUrl,
-                    dataUrl: savedUrl,          // server URL — persisted to DB
-                    url: savedUrl,              // alias for display
-                    blobUrl: savedUrl,          // alias for display
-                    _origDataUrl: att.dataUrl   // original base64 — memory only, used for LLM submission
+                    dataUrl: savedUrl,          // server URL — display + legacy
+                    url: savedUrl,
+                    blobUrl: savedUrl,
+                    _file: saved?._file || null,
+                    _origDataUrl: att.dataUrl   // original base64 — memory only
                 };
             });
         }
@@ -213,7 +216,11 @@ export class Conversation {
         this.save();
         this._syncMessage('user', contentWithTimestamp, null, exchange.id, null,
             exchange.user?.attachments?.map(a => ({
-                name: a.name, type: a.type, dataUrl: a.dataUrl
+                name: a.name,
+                type: a.type,
+                dataUrl: a.dataUrl,
+                url: a.url || a.dataUrl,
+                _file: a._file || null,
             })) || null);
         return exchange.id;
     }

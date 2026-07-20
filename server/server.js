@@ -959,7 +959,25 @@ const routes = {
         const id = filename.slice(0, dotPos);
         const ext = filename.slice(dotPos + 1).toLowerCase();
 
-        const buffer = dbInstance.db.getFile(bucket, id, ext);
+        // Active bucket first; if missing, try restore from trash then retry.
+        // GC previously trashed URL-only refs (no compact _file) — recover them.
+        let buffer = null;
+        try {
+          buffer = dbInstance.db.getFile(bucket, id, ext);
+        } catch (_) {
+          buffer = null;
+        }
+        if (!buffer && typeof dbInstance.db.restoreFile === 'function') {
+          try {
+            const restored = dbInstance.db.restoreFile(bucket, id, ext);
+            if (restored) {
+              logger.info('Restored bucket file from trash', { bucket, id, ext }, 'Storage');
+              buffer = dbInstance.db.getFile(bucket, id, ext);
+            }
+          } catch (restoreErr) {
+            logger.warn('Bucket restore attempt failed', { bucket, id, ext, err: restoreErr.message }, 'Storage');
+          }
+        }
         if (!buffer) {
           json(res, { error: 'File not found' }, 404);
           return;
@@ -1413,9 +1431,19 @@ const routes = {
       for (const m of msgs) {
         if (m.attachments) {
           for (const att of m.attachments) {
-            // Translate nURI compact strings to frontend URLs
-            const ref = att._file || (att.url && /^\w+:/.test(att.url) ? att.url : null);
+            // Prefer compact nURI; derive from URL if older docs only stored the path.
+            let ref = att._file || null;
+            if (!ref) {
+              const u = att.url || att.dataUrl || att.blobUrl || '';
+              if (typeof u === 'string' && /^\w+:[^/]+\.\w+$/.test(u)) {
+                ref = u; // already compact
+              } else if (typeof u === 'string' && u.includes('/api/buckets/')) {
+                const mUrl = u.match(/\/api\/buckets\/([^/?#]+)\/([^/?#]+)/);
+                if (mUrl) ref = `${mUrl[1]}:${mUrl[2]}`;
+              }
+            }
             if (ref) {
+              att._file = ref;
               const [bucket, file] = ref.split(':');
               att.url = `/api/buckets/${bucket}/${file}`;
               att.blobUrl = att.url;
@@ -1548,6 +1576,28 @@ const routes = {
     
     const idx = conv.messages.length;
     const msgId = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+
+    // Ensure every attachment carries compact _file nURI for nDB GC.
+    // Older clients only sent dataUrl/url paths — derive _file from those.
+    const rawAtts = Array.isArray(body.attachments) ? body.attachments : [];
+    const attachments = rawAtts.map((att) => {
+      if (!att || typeof att !== 'object') return att;
+      const out = { ...att };
+      if (!out._file) {
+        const u = out.url || out.dataUrl || out.blobUrl || '';
+        if (typeof u === 'string' && /^\w+:[^/]+\.\w+$/.test(u)) {
+          out._file = u;
+        } else if (typeof u === 'string' && u.includes('/api/buckets/')) {
+          const mUrl = u.match(/\/api\/buckets\/([^/?#]+)\/([^/?#]+)/);
+          if (mUrl) out._file = `${mUrl[1]}:${mUrl[2]}`;
+        }
+      }
+      if (out._file && !out.url) {
+        const [bucket, file] = out._file.split(':');
+        out.url = `/api/buckets/${bucket}/${file}`;
+      }
+      return out;
+    });
     
     const message = {
       idx,
@@ -1557,7 +1607,7 @@ const routes = {
       model: body.model || null,
       content: body.content || '',
       rawContent: body.content || '',
-      attachments: body.attachments || [],
+      attachments,
       createdAt: new Date().toISOString(),
       embedStatus: 'pending',
       embedAttempts: 0,
