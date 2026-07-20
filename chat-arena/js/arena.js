@@ -9,6 +9,7 @@ import { renderMarkdown, parseThinking } from '../../chat/js/markdown.js';
 import { getPlainText } from '../../chat/js/tts-utils.js';
 import { arenaStorage } from './storage.js';
 import { storage } from '../../chat/js/storage.js';
+import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
 
 // ============================================
 // Helpers
@@ -1337,10 +1338,7 @@ class ArenaUI {
             }
         });
 
-        // TTS endpoint change - reload voices
-        this.ttsEndpoint?.querySelector('input')?.addEventListener('change', () => {
-            this._loadTtsVoices();
-        });
+        // TTS controls are wired by NSpeechController.init() — no manual listeners here
 
         // Arena history list controls
         this.historySortSelect?.addEventListener('nui-change', async (e) => {
@@ -1362,26 +1360,7 @@ class ArenaUI {
             this._renderHistoryList();
         });
 
-        // TTS voice A
-        this.ttsVoiceASelect?.querySelector('select')?.addEventListener('change', async (e) => {
-            const voice = e.target.value;
-            await this._setPref('arena-tts-voice-a', voice);
-            this._ttsVoiceA = voice;
-        });
-
-        // TTS voice B
-        this.ttsVoiceBSelect?.querySelector('select')?.addEventListener('change', async (e) => {
-            const voice = e.target.value;
-            await this._setPref('arena-tts-voice-b', voice);
-            this._ttsVoiceB = voice;
-        });
-
-        // TTS speed
-        this.ttsSpeed?.querySelector('input')?.addEventListener('change', async (e) => {
-            const speed = parseFloat(e.target.value) || 1.0;
-            await this._setPref('arena-tts-speed', speed);
-            this._ttsSpeed = speed;
-        });
+        // (TTS voice A/B and speed listeners removed — controller wires its own)
     }
 
     async _getPref(key, fallback = null) {
@@ -1703,159 +1682,52 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     }
 
     // ============================================
-    // TTS Methods
+    // TTS Methods — delegated to shared NSpeechController
     // ============================================
 
     async _initTts() {
         const config = window.ARENA_CONFIG || {};
-
-        this._ttsEndpoint = localStorage.getItem('tts-endpoint') || '';
-        this._ttsVoiceA = await this._getPref('arena-tts-voice-a', config.ttsVoiceA || '');
-        this._ttsVoiceB = await this._getPref('arena-tts-voice-b', config.ttsVoiceB || '');
-        const storedSpeed = await this._getPref('arena-tts-speed', null);
-        this._ttsSpeed = storedSpeed !== null ? parseFloat(storedSpeed) : (config.ttsSpeed ?? 1.0);
-        this._ttsVoices = [];
-        this._ttsAudio = null;
-        this._ttsMessageEl = null;
-
-        if (this.ttsEndpoint) {
-            const input = this.ttsEndpoint.querySelector('input');
-            if (input) input.value = this._ttsEndpoint;
-        }
-        if (this.ttsSpeed) {
-            const input = this.ttsSpeed.querySelector('input');
-            if (input) input.value = this._ttsSpeed;
-        }
-
-        await this._loadTtsVoices();
-    }
-
-    async _loadTtsVoices() {
-        const input = this.ttsEndpoint?.querySelector('input');
-        const endpoint = input?.value || this._ttsEndpoint;
-        if (!endpoint) return;
-
-        try {
-            const resp = await fetch(`${endpoint}/voices`);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const data = await resp.json();
-            this._ttsVoices = data.voices || [];
-            localStorage.setItem('tts-endpoint', endpoint);
-            this._ttsEndpoint = endpoint;
-            this._updateTtsVoiceSelects();
-            this._showTtsStatus(null);
-        } catch (error) {
-            // Silently disable TTS on connection failure — service may not be running
-            this._ttsVoices = [];
-            this._showTtsStatus('TTS unavailable');
-        }
-    }
-
-    _updateTtsVoiceSelects() {
-        const voices = this._ttsVoices;
-        if (voices.length === 0) return;
-
-        const items = voices.map(v => ({ label: v.name || v, value: v.name || v }));
-
-        [this.ttsVoiceASelect, this.ttsVoiceBSelect].forEach(select => {
-            if (!select) return;
-            if (select.setItems) select.setItems(items);
-            const innerSelect = select.querySelector('select');
-            if (!innerSelect) return;
-
-            const voiceKey = select === this.ttsVoiceASelect ? this._ttsVoiceA : this._ttsVoiceB;
-            if (voiceKey) {
-                innerSelect.value = voiceKey;
-                innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
-            } else if (voices.length > 0) {
-                const first = voices[0].name || voices[0];
-                innerSelect.value = first;
-                innerSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                if (select === this.ttsVoiceASelect) {
-                    this._ttsVoiceA = first;
-                    this._setPref('arena-tts-voice-a', first);
-                } else {
-                    this._ttsVoiceB = first;
-                    this._setPref('arena-tts-voice-b', first);
-                }
-            }
+        this._tts = new NSpeechController({
+            voiceCount: 2,
+            storage,
+            elements: {
+                endpoint: this.ttsEndpoint,
+                voiceASelect: this.ttsVoiceASelect,
+                voiceBSelect: this.ttsVoiceBSelect,
+                speed: this.ttsSpeed,
+                status: this.ttsStatus,
+            },
+            serverDefaults: {
+                endpoint: config.ttsEndpoint || '',
+                voice: config.ttsVoiceA || '',
+                speed: config.ttsSpeed ?? 1.0,
+            },
         });
+        // Fire-and-forget — TTS is non-critical and must NOT block arena init.
+        this._tts.init().catch((err) => console.warn('[Arena TTS] init failed:', err.message));
     }
 
-    _showTtsStatus(message) {
-        if (!this.ttsStatus) return;
-        if (message) {
-            this.ttsStatus.textContent = message;
-            this.ttsStatus.style.display = 'block';
-        } else {
-            this.ttsStatus.textContent = '';
-            this.ttsStatus.style.display = 'none';
-        }
-    }
-
-    _getTtsVoiceForSpeaker(speakerName) {
-        if (!this.arena || !this.arena.participantA || !this.arena.participantB) return this._ttsVoiceA;
-        if (speakerName === this.arena.participantA.name) return this._ttsVoiceA;
-        if (speakerName === this.arena.participantB.name) return this._ttsVoiceB;
-        return this._ttsVoiceA;
+    _getTtsSlotForSpeaker(speakerName) {
+        if (!this.arena || !this.arena.participantA || !this.arena.participantB) return 'A';
+        if (speakerName === this.arena.participantA.name) return 'A';
+        if (speakerName === this.arena.participantB.name) return 'B';
+        return 'A';
     }
 
     _stopTts() {
-        if (this._ttsAudio) {
-            this._ttsAudio.pause();
-            this._ttsAudio.src = '';
-            this._ttsAudio.load();
-            this._ttsAudio = null;
-        }
-        if (this._ttsMessageEl) {
-            const btn = this._ttsMessageEl.querySelector('.speaker');
-            if (btn) {
-                btn.classList.remove('playing');
-                btn.setAttribute('title', 'Read Aloud');
-                const icon = btn.querySelector('nui-icon');
-                if (icon) icon.setAttribute('name', 'volume');
-            }
-            this._ttsMessageEl = null;
-        }
+        if (this._tts) this._tts.stop();
     }
 
     _toggleTts(msg, messageEl) {
+        if (!this._tts) return;
         const btn = messageEl.querySelector('.speaker');
         if (!btn) return;
-
-        if (this._ttsMessageEl === messageEl && this._ttsAudio) {
-            this._stopTts();
-            return;
-        }
-
-        this._stopTts();
 
         const text = this._getPlainText(msg.content);
         if (!text) return;
 
-        const voice = this._getTtsVoiceForSpeaker(msg.speaker);
-        const url = `${this._ttsEndpoint}/tts?text=${encodeURIComponent(text)}&voice_name=${encodeURIComponent(voice)}&speed=${this._ttsSpeed}&output_format=mp3`;
-
-        const audio = new Audio(url);
-        audio.preload = 'auto';
-        audio.onended = () => this._stopTts();
-        audio.onerror = () => {
-            console.warn('[Arena TTS] Playback failed');
-            this._stopTts();
-        };
-
-        this._ttsAudio = audio;
-        this._ttsMessageEl = messageEl;
-
-        btn.classList.add('playing');
-        btn.setAttribute('title', 'Stop Reading');
-        const icon = btn.querySelector('nui-icon');
-        if (icon) icon.setAttribute('name', 'close');
-
-        audio.play().catch((err) => {
-            console.warn('[Arena TTS] Playback error:', err.message);
-            this._stopTts();
-        });
+        const slot = this._getTtsSlotForSpeaker(msg.speaker);
+        this._tts.toggle(text, messageEl, { slot });
     }
 
     _getPlainText(content) {

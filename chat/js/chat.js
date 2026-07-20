@@ -11,6 +11,7 @@ import { chatHistory } from './chat-history.js';
 import { storage } from './storage.js';
 import { getPlainText } from './tts-utils.js';
 import { backendClient } from './api-client.js';
+import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
 
 // Fire-and-forget client log to server nLogger — never throws
 function _logTool(message, meta = {}) {
@@ -683,12 +684,8 @@ let currentExchangeId = null;
 let attachedImages = []; // Array of {dataUrl, name, type}
 let useVisionAnalysis = false; // Toggle for using vision tool instead of direct image upload
 
-// TTS State
-let ttsEndpoint = TTS_ENDPOINT;
-let ttsVoice = TTS_VOICE;
-let ttsSpeed = TTS_SPEED;
-let ttsVoices = [];
-let currentTtsAudio = null;
+// TTS State — managed by NSpeechController (instantiated after DOM elements are bound)
+let tts = null;
 let currentTtsExchangeId = null;
 
 // DOM Elements
@@ -1190,9 +1187,7 @@ async function init() {
         }
     });
 
-    // Non-critical: load TTS voices in background after main init
-    loadTtsVoices();
-
+    // TTS controller initializes inside applyDefaultConfig() — no separate call needed
 }
 
 async function applyDefaultConfig() {
@@ -1280,24 +1275,20 @@ async function applyDefaultConfig() {
         if (input) input.value = GATEWAY_API_KEY;
     }
 
-    // Load TTS preferences
-    ttsEndpoint = localStorage.getItem('tts-endpoint') || '';
-    const savedTtsVoice = await storage.getPref('tts-voice');
-    const savedTtsSpeed = await storage.getPref('tts-speed');
-
-    ttsVoice = savedTtsVoice !== null ? savedTtsVoice : TTS_VOICE;
-    ttsSpeed = savedTtsSpeed !== null ? parseFloat(savedTtsSpeed) : TTS_SPEED;
-
-    if (elements.ttsEndpoint) {
-        const input = elements.ttsEndpoint.querySelector('input');
-        if (input) input.value = ttsEndpoint;
-    }
-    if (elements.ttsSpeed) {
-        const input = elements.ttsSpeed.querySelector('input');
-        if (input) input.value = ttsSpeed;
-    }
-
-    // TTS voices loaded asynchronously after init — see end of init()
+    // Initialize shared TTS controller (talks to nSpeech V3 API).
+    // Fire-and-forget — TTS is non-critical and must NOT block chat init.
+    tts = new NSpeechController({
+        voiceCount: 1,
+        storage,
+        elements: {
+            endpoint: elements.ttsEndpoint,
+            voiceSelect: elements.ttsVoiceSelect,
+            speed: elements.ttsSpeed,
+            status: elements.ttsStatus,
+        },
+        serverDefaults: { endpoint: TTS_ENDPOINT, voice: TTS_VOICE, speed: TTS_SPEED },
+    });
+    tts.init().catch((err) => console.warn('[TTS] init failed:', err.message));
 }
 
 // ============================================
@@ -1654,67 +1645,6 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
 }
 
 // ============================================
-// TTS Voice Loading
-// ============================================
-
-async function loadTtsVoices() {
-    if (!ttsEndpoint) return;
-    try {
-        const resp = await fetch(`${ttsEndpoint}/voices`, {
-            signal: AbortSignal.timeout(5000)
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        ttsVoices = data.voices || [];
-        updateTtsVoiceSelect();
-        showTtsStatus(null);
-    } catch (error) {
-        // Silently disable TTS on connection failure — service may not be running
-        ttsVoices = [];
-    }
-}
-
-function updateTtsVoiceSelect() {
-    const select = elements.ttsVoiceSelect;
-    if (!select) return;
-
-    if (ttsVoices.length === 0) {
-        const items = [{ value: '', label: 'No voices available', disabled: true }];
-        if (select.setItems) select.setItems(items);
-        return;
-    }
-
-    const items = ttsVoices.map(v => ({ label: v.name || v, value: v.name || v }));
-    if (select.setItems) {
-        select.setItems(items);
-    }
-
-    if (ttsVoice) {
-        if (select.setValue) {
-            select.setValue(ttsVoice);
-        }
-    } else if (ttsVoices.length > 0) {
-        const firstVoice = ttsVoices[0].name || ttsVoices[0];
-        ttsVoice = firstVoice;
-        if (select.setValue) {
-            select.setValue(firstVoice);
-        }
-        storage.setPref('tts-voice', firstVoice).catch(() => {});
-    }
-}
-
-function showTtsStatus(message) {
-    if (!elements.ttsStatus) return;
-    if (message) {
-        elements.ttsStatus.textContent = message;
-        elements.ttsStatus.style.display = 'block';
-    } else {
-        elements.ttsStatus.textContent = '';
-        elements.ttsStatus.style.display = 'none';
-    }
-}
-
-// ============================================
 // Event Listeners
 // ============================================
 
@@ -1786,25 +1716,8 @@ function setupEventListeners() {
         checkGatewayStatus();
     });
 
-    // TTS endpoint - save and reload voices on change
-    elements.ttsEndpoint?.querySelector('input')?.addEventListener('change', (e) => {
-        ttsEndpoint = e.target.value || '';
-        localStorage.setItem('tts-endpoint', ttsEndpoint);
-        loadTtsVoices();
-    });
+    // TTS controls are wired by NSpeechController.init() — no manual listeners here
 
-    // TTS voice
-    elements.ttsVoiceSelect?.addEventListener('nui-change', (e) => {
-        ttsVoice = (e.detail?.values?.[0]) || e.detail?.value || '';
-        storage.setPref('tts-voice', ttsVoice).catch(() => {});
-    });
-
-    // TTS speed
-    elements.ttsSpeed?.querySelector('input')?.addEventListener('change', (e) => {
-        ttsSpeed = parseFloat(e.target.value) || 1.0;
-        storage.setPref('tts-speed', ttsSpeed).catch(() => {});
-    });
-    
     // Send message / Toggle Stop
     elements.sendBtn?.addEventListener('click', (e) => {
         if (client.hasActiveStream(currentChatId)) {
@@ -4682,64 +4595,23 @@ function getAssistantPlainText(exchangeId) {
 }
 
 function stopTts() {
-    if (currentTtsAudio) {
-        currentTtsAudio.pause();
-        currentTtsAudio.src = '';
-        currentTtsAudio.load();
-        currentTtsAudio = null;
-    }
-    if (currentTtsExchangeId) {
-        const el = document.querySelector(`.chat-message.assistant[data-exchange-id="${currentTtsExchangeId}"]`);
-        if (el) {
-            const speakerBtn = el.querySelector('.speaker');
-            if (speakerBtn) {
-                speakerBtn.classList.remove('playing');
-                speakerBtn.setAttribute('title', 'Read Aloud');
-                const icon = speakerBtn.querySelector('nui-icon');
-                if (icon) icon.setAttribute('name', 'volume');
-            }
-        }
-        currentTtsExchangeId = null;
-    }
+    if (tts) tts.stop();
+    currentTtsExchangeId = null;
 }
 
 function toggleTts(exchangeId, el) {
-    if (currentTtsExchangeId === exchangeId) {
+    if (!tts) return;
+    if (currentTtsExchangeId === exchangeId && tts.isPlaying()) {
         stopTts();
         return;
     }
-
     stopTts();
 
     const text = getAssistantPlainText(exchangeId);
     if (!text) return;
 
-    const url = `${ttsEndpoint}/tts?text=${encodeURIComponent(text)}&voice_name=${encodeURIComponent(ttsVoice)}&speed=${ttsSpeed}&output_format=mp3`;
-
-    const audio = new Audio(url);
-    audio.preload = 'auto';
-
-    audio.onended = () => stopTts();
-    audio.onerror = () => {
-        console.warn('[TTS] Playback failed');
-        stopTts();
-    };
-
-    currentTtsAudio = audio;
     currentTtsExchangeId = exchangeId;
-
-    const speakerBtn = el.querySelector('.speaker');
-    if (speakerBtn) {
-        speakerBtn.classList.add('playing');
-        speakerBtn.setAttribute('title', 'Stop Reading');
-        const icon = speakerBtn.querySelector('nui-icon');
-        if (icon) icon.setAttribute('name', 'close');
-    }
-
-    audio.play().catch((err) => {
-        console.warn('[TTS] Playback error:', err.message);
-        stopTts();
-    });
+    tts.speak(text, el);
 }
 
 async function regenerate(exchangeId) {
