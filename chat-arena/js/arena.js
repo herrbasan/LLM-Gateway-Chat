@@ -10,6 +10,7 @@ import { getPlainText } from '../../chat/js/tts-utils.js';
 import { arenaStorage } from './storage.js';
 import { storage } from '../../chat/js/storage.js';
 import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
+import { TtsPlayerHost } from '../../lib/tts/tts-player.js';
 
 // ============================================
 // Helpers
@@ -1705,6 +1706,20 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
         });
         // Fire-and-forget — TTS is non-critical and must NOT block arena init.
         this._tts.init().catch((err) => console.warn('[Arena TTS] init failed:', err.message));
+
+        // Floating player — mount on nui-main (parent of the scrolling
+        // .arena-messages). Absolute inside the scroller would scroll away.
+        const mount = this.messagesContainer?.parentElement || this.messagesContainer;
+        if (mount && !this._ttsPlayer) {
+            if (getComputedStyle(mount).position === 'static') {
+                mount.style.position = 'relative';
+            }
+            this._ttsPlayer = new TtsPlayerHost({
+                controller: this._tts,
+                mount,
+            });
+            this._ttsPlayer.attach();
+        }
     }
 
     _getTtsSlotForSpeaker(speakerName) {
@@ -1720,14 +1735,26 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
     _toggleTts(msg, messageEl) {
         if (!this._tts) return;
-        const btn = messageEl.querySelector('.speaker');
-        if (!btn) return;
+
+        // Same bubble while active:
+        //   loading → cancel generation; playing/paused → pause/resume (download continues)
+        // Else start (replaces session / aborts prior download).
+        if (this._tts.targetEl === messageEl && this._tts.isActive()) {
+            if (this._tts.getPlaybackState() === 'loading') {
+                this._stopTts(); // cancel
+                return;
+            }
+            this._ttsPlayer?.reveal();
+            this._tts.togglePause();
+            return;
+        }
 
         const text = this._getPlainText(msg.content);
         if (!text) return;
 
         const slot = this._getTtsSlotForSpeaker(msg.speaker);
-        this._tts.toggle(text, messageEl, { slot });
+        this._ttsPlayer?.reveal();
+        this._tts.speak(text, messageEl, { slot });
     }
 
     _getPlainText(content) {

@@ -12,6 +12,7 @@ import { storage } from './storage.js';
 import { getPlainText } from './tts-utils.js';
 import { backendClient } from './api-client.js';
 import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
+import { TtsPlayerHost } from '../../lib/tts/tts-player.js';
 
 // Fire-and-forget client log to server nLogger — never throws
 function _logTool(message, meta = {}) {
@@ -686,6 +687,7 @@ let useVisionAnalysis = false; // Toggle for using vision tool instead of direct
 
 // TTS State — managed by NSpeechController (instantiated after DOM elements are bound)
 let tts = null;
+let ttsPlayer = null;
 let currentTtsExchangeId = null;
 
 // DOM Elements
@@ -1288,6 +1290,17 @@ async function applyDefaultConfig() {
         },
         serverDefaults: { endpoint: TTS_ENDPOINT, voice: TTS_VOICE, speed: TTS_SPEED },
     });
+
+    // Floating player host — sibling of conversation containers inside #messages
+    // (outside virtual-scroll stage). One global active playback.
+    const messagesMount = elements.messages || document.getElementById('messages');
+    if (messagesMount) {
+        ttsPlayer = new TtsPlayerHost({ controller: tts, mount: messagesMount });
+        ttsPlayer.attach();
+        tts.on('state', ({ state }) => {
+            if (state === 'idle') currentTtsExchangeId = null;
+        });
+    }
     tts.init().catch((err) => console.warn('[TTS] init failed:', err.message));
 }
 
@@ -4601,16 +4614,26 @@ function stopTts() {
 
 function toggleTts(exchangeId, el) {
     if (!tts) return;
-    if (currentTtsExchangeId === exchangeId && tts.isPlaying()) {
-        stopTts();
+
+    // Same message while active:
+    //   loading → cancel generation (only explicit cancel path besides stop/new speak)
+    //   playing/paused → pause/resume (download keeps running)
+    // Different message → new speak (replaces session, aborts prior download).
+    if (currentTtsExchangeId === exchangeId && tts.isActive()) {
+        if (tts.getPlaybackState() === 'loading') {
+            stopTts(); // cancel()
+            return;
+        }
+        ttsPlayer?.reveal();
+        tts.togglePause();
         return;
     }
-    stopTts();
 
     const text = getAssistantPlainText(exchangeId);
     if (!text) return;
 
     currentTtsExchangeId = exchangeId;
+    ttsPlayer?.reveal();
     tts.speak(text, el);
 }
 

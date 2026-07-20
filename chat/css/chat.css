@@ -1244,6 +1244,15 @@ nui-app:not(.nui-ready) { display: none; }
     color: var(--color-base);
 }
 
+.message-actions .speaker.paused {
+    background: var(--color-shade3);
+    border-color: var(--border-shade2);
+}
+
+.message-actions .speaker.paused nui-icon {
+    color: var(--color-highlight);
+}
+
 /* TTS loading state — model loading / waiting for first audio byte */
 .message-actions .speaker.loading nui-icon {
     animation: tts-spin 0.8s linear infinite;
@@ -1252,6 +1261,219 @@ nui-app:not(.nui-ready) { display: none; }
 
 @keyframes tts-spin {
     to { transform: rotate(360deg); }
+}
+
+/* ============================================
+   TTS floating player — top-right on #messages
+   Outside virtual-scroll stage. Idle = hidden.
+   Collapsed: shrink-wrap to chip (no 22rem ghost box).
+   Pretty = negative space, one accent on fill.
+   ============================================ */
+
+.tts-player {
+    position: absolute;
+    top: var(--nui-space-half);
+    right: var(--nui-space-half);
+    z-index: 30;
+    width: min(20rem, calc(100% - var(--nui-space)));
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    pointer-events: none;
+}
+
+/* Collapsed chip must not keep the expanded panel width — that left a
+   wide invisible box and made the mini control sit mid-text awkwardly. */
+.tts-player.is-collapsed {
+    width: auto;
+    max-width: calc(100% - var(--nui-space));
+}
+
+.tts-player[hidden] {
+    display: none !important;
+}
+
+.tts-player-panel,
+.tts-player-chip {
+    pointer-events: auto;
+}
+
+.tts-player-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-space-half);
+    width: 100%;
+    padding: var(--nui-space-half) var(--nui-space);
+    background: color-mix(in srgb, var(--color-shade1) 92%, var(--color-base));
+    border: thin solid var(--border-shade2);
+    border-radius: var(--border-radius2);
+    box-shadow: 0 0.25rem 1rem color-mix(in srgb, var(--shadow-color, #000) 22%, transparent);
+    backdrop-filter: blur(10px);
+}
+
+.tts-player.is-collapsed .tts-player-panel {
+    display: none;
+}
+
+.tts-player-chip {
+    display: none;
+    align-items: center;
+    gap: var(--nui-space-half);
+    width: fit-content;
+    max-width: 9rem;
+    padding: var(--nui-space-quarter) var(--nui-space-half);
+    background: color-mix(in srgb, var(--color-shade1) 92%, var(--color-base));
+    border: thin solid var(--border-shade2);
+    border-radius: var(--border-radius3);
+    box-shadow: 0 0.25rem 1rem color-mix(in srgb, var(--shadow-color, #000) 22%, transparent);
+    backdrop-filter: blur(10px);
+    cursor: pointer;
+    color: var(--text-color-dim);
+}
+
+.tts-player.is-collapsed .tts-player-chip {
+    display: inline-flex;
+}
+
+.tts-player-chip:hover {
+    border-color: var(--color-highlight);
+    color: var(--text-color);
+}
+
+.tts-player-chip-icon {
+    width: var(--icon-size);
+    height: var(--icon-size);
+    flex-shrink: 0;
+}
+
+.tts-player.is-loading .tts-player-chip-icon {
+    animation: tts-spin 0.8s linear infinite;
+    color: var(--color-highlight);
+}
+
+.tts-player-chip-bar {
+    display: block;
+    width: 3.5rem;
+    height: 0.2rem;
+    border-radius: var(--border-radius1);
+    background: var(--color-shade3);
+    overflow: hidden;
+}
+
+.tts-player-chip-fill {
+    display: block;
+    height: 100%;
+    width: 0%;
+    background: var(--color-highlight);
+}
+
+.tts-player-row {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-space-half);
+    min-width: 0;
+}
+
+.tts-player-main {
+    gap: var(--nui-space-quarter);
+}
+
+.tts-player-btn {
+    flex-shrink: 0;
+}
+
+.tts-player-time {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--font-size-xsmall);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-color-dim);
+    letter-spacing: 0.02em;
+    padding-inline: var(--nui-space-quarter);
+}
+
+.tts-player-time-sep {
+    margin-inline: 0.2em;
+    opacity: 0.6;
+}
+
+.tts-player-collapse-icon {
+    transform: rotate(-90deg);
+}
+
+.tts-player-scrub-row {
+    padding-bottom: var(--nui-space-quarter);
+}
+
+.tts-player-scrub {
+    flex: 1;
+    min-width: 0;
+    height: 1.25rem;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    touch-action: none;
+    outline: none;
+}
+
+.tts-player-scrub:focus-visible .tts-player-scrub-track {
+    outline: thin solid var(--color-highlight);
+    outline-offset: 0.2rem;
+}
+
+.tts-player-scrub-track {
+    position: relative;
+    width: 100%;
+    height: 0.25rem;
+    border-radius: var(--border-radius1);
+    background: var(--color-shade3);
+    overflow: hidden;
+}
+
+.tts-player-scrub-buffer,
+.tts-player-scrub-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    pointer-events: none;
+}
+
+.tts-player-scrub-buffer {
+    /* Buffered / still-generating audio — visible growth while paused */
+    background: color-mix(in srgb, var(--color-highlight) 35%, var(--color-shade3));
+}
+
+.tts-player-scrub-fill {
+    background: var(--color-highlight);
+    transition: width 0.05s linear;
+    z-index: 1;
+}
+
+/* While paused, buffer lane keeps animating width via JS; soften playhead */
+.tts-player.is-paused .tts-player-scrub-buffer {
+    background: color-mix(in srgb, var(--color-highlight) 45%, var(--color-shade3));
+}
+
+.tts-player.is-seeking .tts-player-scrub-fill {
+    transition: none;
+}
+
+.tts-player.is-loading .tts-player-icon-play {
+    animation: tts-spin 0.8s linear infinite;
+    color: var(--color-highlight);
+}
+
+@media (max-width: 40rem) {
+    .tts-player {
+        width: min(18rem, calc(100% - var(--nui-space)));
+    }
+
+    .tts-player.is-collapsed {
+        width: auto;
+    }
 }
 
 /* Progress Status */
