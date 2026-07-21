@@ -277,6 +277,20 @@ function renderCode(codeContent, language) {
     content.replaceChildren(codeBlock);
 }
 
+/**
+ * Get the active item's content as plain text suitable for TTS.
+ * Strips markdown formatting via the same getPlainText utility the chat uses.
+ * Returns empty string if no active item.
+ *
+ * @param {Function} plainTextFn - The getPlainText function from tts-utils.js
+ * @returns {string}
+ */
+function getActivePlainText(plainTextFn) {
+    if (!activeId || !items.has(activeId)) return '';
+    const item = items.get(activeId);
+    return plainTextFn(item.content);
+}
+
 // ============================================
 // Module exports
 // ============================================
@@ -285,5 +299,6 @@ export const preview = {
     init,
     show,
     close,
-    reset
+    reset,
+    getActivePlainText
 };

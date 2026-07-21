@@ -1184,6 +1184,24 @@ async function init() {
     // Initialize preview pane (needs DOM ready + NUI loaded for enableDrag)
     preview.init();
 
+    // Wire preview speak button — replicates chat's toggleTts pattern.
+    // The controller's _applyButtonState looks for .speaker inside the targetEl,
+    // so we pass the button's parent (the header) and give the button class "speaker".
+    const previewSpeakBtn = document.getElementById('preview-speak-btn');
+    if (previewSpeakBtn) {
+        previewSpeakBtn.classList.add('speaker');
+        const previewHeader = document.querySelector('.preview-header');
+        previewSpeakBtn.addEventListener('click', () => {
+            if (!tts) return;
+            const text = preview.getActivePlainText(getPlainText);
+            if (!text) return;
+            // Use the controller's toggle() — handles same-item pause/resume/cancel
+            // and different-item new-speak, same as chat messages.
+            tts.toggle(text, previewHeader);
+            ttsPlayer?.reveal();
+        });
+    }
+
     // Create vision toggle UI
     ensureVisionToggleUI();
 
