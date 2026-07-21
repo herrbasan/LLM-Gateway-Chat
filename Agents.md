@@ -43,7 +43,7 @@ The server auto-restarts when files change.
 | **Embedding** | Gateway `/v1/embeddings` (Qwen3-Embedding-4B via OpenRouter, 2560d) |
 | **Communication** | SSE (default) or WebSocket (JSON-RPC 2.0) to gateway + REST to backend |
 | **Logging** | nLogger (JSON Lines structured logger) |
-| **Markdown** | markdown-it + DOMPurify + Prism.js |
+| **Markdown** | NUI's `nui-markdown` component (regex-based `markdownToHtml` parser with inline `nui-code` syntax highlighting for web languages) |
 
 ---
 
@@ -78,7 +78,8 @@ The server auto-restarts when files change.
 │   ├── ndb/napi/              # nDB Node bindings
 │   ├── nvdb/napi/             # nVDB Node bindings
 │   ├── nlogger/               # nLogger (ESM)
-│   └── nlogger-cjs.js         # nLogger CJS bridge
+│   ├── nlogger-cjs.js         # nLogger CJS bridge
+│   └── tts/                   # TTS controller + player (NSpeechController, TtsPlayerHost)
 ├── server/                    # Node.js backend
 │   ├── server.js              # HTTP server (REST API, static files, search, embeddings, auth)
 │   ├── embed.js               # Shared embedding utilities (chunking, fetch, vector ops)
@@ -96,7 +97,8 @@ The server auto-restarts when files change.
 │   ├── api_websocket.md       # Gateway WebSocket/JSON-RPC protocol
 │   ├── bugs.md                # Known bugs and their status
 │   ├── features_backlog.md    # Feature backlog (completed + pending)
-│   └── dev_plan_user_settings.md  # Multi-user auth architecture plan
+│   ├── plan-preview-pane.md   # Chat preview pane feature plan
+│   └── _Archive/              # Historical dev plans, handovers, migration docs
 └── package.json               # Minimal metadata
 ```
 
@@ -141,7 +143,7 @@ UI_DEFAULT_MODEL=
 UI_DEFAULT_TEMP=0.7
 UI_DEFAULT_TOKENS=
 UI_OPERATION_MODE=sse
-TTS_ENDPOINT=http://localhost:2244
+TTS_ENDPOINT=
 TTS_VOICE=
 TTS_SPEED=1.0
 ```
@@ -212,7 +214,7 @@ The server auto-restarts when files change (nodemon or similar). The share is at
 | `mcp-client.js` | `MCPClient` class - SSE connections to MCP servers, tool registry, execution |
 | `file-store.js` | File storage — sends base64 to server `/api/buckets/images/`, returns lightweight URLs |
 | `image-store.js` | Re-exports `fileStore` as `imageStore` for backward compatibility |
-| `markdown.js` | `renderMarkdown()` - markdown-it with Prism highlighting, DOMPurify sanitization |
+| `markdown.js` | `renderMarkdown()` — thin wrapper that emits `<nui-markdown>` elements; all parsing delegated to NUI's `markdownToHtml()` |
 | `tts-utils.js` | Text-to-speech utilities (endpoint management, voice list, playback) |
 | `storage.js` | localStorage/IndexedDB fallback for preferences (MCP config, presets) |
 
@@ -467,15 +469,15 @@ const result = await mcpClient.executeTool(toolName, parameters, onProgress);
 2. Tool execution: `chat/js/mcp-client.js` - `executeTool()` method
 3. Message formatting: `chat/js/conversation.js` - `getMessagesForApi()`
 
-### Updating Vendor Libraries
+### Updating the NUI Submodule
 
-Vendored dependencies (markdown-it, Prism.js, DOMPurify) are served from `nui_wc2` (the NUI submodule). When WebAdmin vendor files change, update the submodule:
+All UI components, markdown rendering, and syntax highlighting live in the NUI library (Git submodule at `lib/nui_wc2/`). When NUI is updated upstream:
 
 ```bash
 git submodule update --remote lib/nui_wc2
 ```
 
-No separate vendor directory or update scripts are needed.
+There are no other vendored dependencies to update.
 
 ---
 
@@ -498,7 +500,7 @@ The LLM Gateway is our proprietary project - we can and should modify it when ne
 
 1. **Cookie-only auth**: No API keys or secrets in frontend code. HttpOnly cookies prevent XSS token theft.
 2. **Password hashing**: `crypto.scryptSync` with random salt per user, stored in isolated `users_db`.
-3. **XSS Protection**: DOMPurify sanitizes all rendered markdown.
+3. **XSS Protection**: NUI's `markdownToHtml()` HTML-escapes `&`, `<`, `>` before applying formatting regexes. **Note:** attribute-value injection (`"`) and URL scheme validation gaps are being hardened — see `docs/plan-preview-pane.md` prerequisite section for details.
 4. **Same-origin by default**: Server serves both frontend and API — no CORS needed in production.
 5. **Image validation**: Only `image/*` MIME types accepted.
 6. **Database isolation**: Each user gets a physically separate nDB + nVDB at their `dbPath`.
@@ -580,19 +582,18 @@ Before submitting changes:
 
 - `docs/api_rest.md` - REST API specification
 - `docs/api_websocket.md` - WebSocket/JSON-RPC protocol
-- `docs/MCP_TOOL_INTEGRATION.md` - Frontend MCP architecture
+- `docs/_Archive/MCP_TOOL_INTEGRATION.md` - Frontend MCP architecture (archived)
+- `docs/plan-preview-pane.md` - Chat preview pane feature plan (current)
 - `nui_wc2/docs/playground-component-quickstart.md` - NUI component usage
 - `nui_wc2/Agents.md` - NUI library agent instructions
 
 ---
 
-## External Dependencies (Vendored)
+## External Dependencies
 
-| Library | Version | Purpose | Source |
-|---------|---------|---------|--------|
-| markdown-it | 14.x | Markdown parsing | WebAdmin/shared |
-| markdown-it-prism | latest | Syntax highlighting | WebAdmin/shared |
-| PrismJS | 1.29.x | Code highlighting | WebAdmin/shared |
-| DOMPurify | 3.x | XSS sanitization | WebAdmin/shared |
+This project has **zero external runtime dependencies**. All UI components, markdown rendering, and syntax highlighting are provided by the NUI library (Git submodule at `lib/nui_wc2/`). There is no `node_modules` for the frontend, no vendored third-party JS libraries, and no build step.
 
-These are copied from the WebAdmin project via `update-vendor.js`.
+The NUI submodule is updated via:
+```bash
+git submodule update --remote lib/nui_wc2
+```
