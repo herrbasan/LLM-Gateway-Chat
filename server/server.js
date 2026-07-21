@@ -220,12 +220,14 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 // File Bucket Garbage Collection (runs every 6 hours)
+// gcBuckets() returns a number (count of trashed files), not an object.
+// Log unconditionally when >0 so orphaning is always visible in logs.
 setInterval(() => {
   for (const [dbPath, instance] of activeDbs.entries()) {
     try {
-      const stats = instance.db.gcBuckets();
-      if (stats.trashed > 0) {
-        logger.info('File GC completed', { dbPath, stats }, 'Storage');
+      const trashed = instance.db.gcBuckets();
+      if (trashed > 0) {
+        logger.info('File GC completed', { dbPath, trashed }, 'Storage');
       }
     } catch(err) {
       logger.error('nDB gcBuckets failed', err, { dbPath }, 'Storage');
