@@ -88,6 +88,17 @@ const ARCHIVE_TOOLS = [
     {
         type: 'function',
         function: {
+            name: 'chat_preview_state',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\n\nReturns the current state of the preview pane: which items have been shown, which item the user is currently viewing (selected in the dropdown), and whether the pane is open. Use this to check what the user is looking at before proposing edits or when the user refers to "this" or "the current one". Returns metadata only (id, title, language, source) — not content, since you already have the content in your context from when you called chat_preview_show.',
+            parameters: {
+                type: 'object',
+                properties: {}
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
             name: 'chat_archive_update_metadata',
             description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nUpdate the metadata for a specific session/chat. Use this to assign categories (folders), write summaries, or update titles for better organization.',
             parameters: {
@@ -216,6 +227,9 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
         }
         case 'chat_preview_show': {
             return preview.show(args);
+        }
+        case 'chat_preview_state': {
+            return preview.getState();
         }
         case 'read_resource': {
             return mcpClient.executeReadResource(args, exchangeId);
@@ -837,6 +851,43 @@ async function buildHistoricalDomForChat(conv, container) {
     }
 }
 
+// ============================================
+// Preview tool-call button — "Show in preview" on chat_preview_show tool bubbles
+// ============================================
+//
+// When the conversation is reloaded, the tool call (with full content in args)
+// is in the history. This button lets the user reopen the preview from that
+// stored data — no localStorage, no backend, no context bloat. The conversation
+// IS the persistence layer.
+
+function _decoratePreviewToolButton(toolEl, toolName, args) {
+    if (toolName !== 'chat_preview_show') return;
+    if (!args || typeof args !== 'object') return;
+
+    const header = toolEl.querySelector('.tool-header');
+    if (!header) return;
+    // Don't double-add if already decorated (re-render safety)
+    if (header.querySelector('.reopen-preview')) return;
+
+    const btn = document.createElement('nui-button');
+    btn.className = 'action-btn reopen-preview';
+    btn.setAttribute('variant', 'icon');
+    btn.setAttribute('title', 'Show in preview');
+    btn.innerHTML = '<button type="button"><nui-icon name="article"></nui-icon></button>';
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        preview.show(args);
+    });
+
+    // Insert before the delete button if present, else append
+    const deleteBtn = header.querySelector('.delete-tool');
+    if (deleteBtn) {
+        header.insertBefore(btn, deleteBtn);
+    } else {
+        header.appendChild(btn);
+    }
+}
+
 /**
  * Builds a single exchange DOM element (used for historical DOM building).
  * Similar to renderExchange but doesn't append — returns the element.
@@ -886,6 +937,8 @@ function buildExchangeElement(exchange) {
                 </div>
             </div>
         `;
+
+        _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
 
         toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -3515,6 +3568,8 @@ function renderExchange(exchange, targetContainer = null) {
         `;
         if (container) _vsAppendMessage(container, toolEl);
 
+        _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
+
         // Use textContent to prevent SVG/code examples from being parsed as HTML
         const resultEl = toolEl.querySelector('.tool-result');
         if (isSuccess) resultEl.innerHTML = `<strong>Result:</strong><br>`;
@@ -4019,6 +4074,8 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     // would land OUTSIDE the stage, unmanaged and unfindable by _vsRecalcItem.
     if (toolContainer) _vsAppendMessage(toolContainer, toolEl);
     scrollToBottom();
+
+    _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
 
     toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
         e.stopPropagation();

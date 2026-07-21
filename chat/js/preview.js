@@ -291,6 +291,33 @@ function getActivePlainText(plainTextFn) {
     return plainTextFn(item.content);
 }
 
+/**
+ * Get the current preview state for the LLM.
+ * Returns metadata only (no content) — the LLM already has the content
+ * in its context from when it called chat_preview_show.
+ *
+ * @returns {Object} MCP-style result { content: [{ type: 'text', text }] }
+ */
+function getState() {
+    const state = {
+        paneOpen: pane ? !pane.hidden : false,
+        activeId,
+        activeTitle: activeId && items.has(activeId) ? items.get(activeId).title : null,
+        items: [...items.values()].map(item => ({
+            id: item.id,
+            title: item.title,
+            language: item.language,
+            source: item.source
+        }))
+    };
+    return {
+        content: [{
+            type: 'text',
+            text: JSON.stringify(state, null, 2)
+        }]
+    };
+}
+
 // ============================================
 // Module exports
 // ============================================
@@ -300,5 +327,6 @@ export const preview = {
     show,
     close,
     reset,
-    getActivePlainText
+    getActivePlainText,
+    getState
 };
