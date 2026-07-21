@@ -252,35 +252,53 @@
             <nui-main>
                 <!-- Main Chat Area -->
                 <div class="chat-main">
-                    
-                    <!-- Messages Area -->
-                    <div class="chat-messages" id="messages">
-                        <!-- Welcome message is managed dynamically per container -->
+                    <div class="chat-pane">
+                        <!-- Messages Area -->
+                        <div class="chat-messages" id="messages">
+                            <!-- Welcome message is managed dynamically per container -->
+                        </div>
+                        
+                        <!-- Input Area -->
+                        <footer class="chat-input-area">
+                            <!-- Images Row -->
+                            <div class="images-row" id="images-row">
+                                <div class="attachment-preview" id="attachment-preview"></div>
+                            </div>
+                            <!-- Input Row -->
+                            <div class="input-row">
+                                <div id="overall-context-progress-wrap" class="context-progress-wrap">
+                                    <nui-progress id="overall-context-progress" type="circular" value="0" size="28px" hide-text></nui-progress>
+                                </div>
+                                <nui-tooltip id="overall-context-tooltip" class="context-tooltip">Context Usage</nui-tooltip>
+                                <nui-rich-text id="message-input" class="chat-input" no-toolbar placeholder="Type a message... (Shift+Enter for new line, Ctrl+Alt+V for code block)"></nui-rich-text>
+                                <nui-button id="attach-btn" class="icon-only" title="Attach Image">
+                                    <button type="button" aria-label="Image"><nui-icon name="image"></nui-icon></button>
+                                </nui-button>
+                                <nui-button id="send-btn" variant="primary" title="Send">
+                                    <button type="button" aria-label="Send"><nui-icon name="send"></nui-icon></button>
+                                </nui-button>
+                            </div>
+                            <input type="file" id="file-input" accept="image/*" multiple hidden>
+                            <input type="file" id="import-chat-input" accept=".json" hidden>
+                        </footer>
                     </div>
                     
-                    <!-- Input Area -->
-                    <footer class="chat-input-area">
-                        <!-- Images Row -->
-                        <div class="images-row" id="images-row">
-                            <div class="attachment-preview" id="attachment-preview"></div>
-                        </div>
-                        <!-- Input Row -->
-                        <div class="input-row">
-                            <div id="overall-context-progress-wrap" class="context-progress-wrap">
-                                <nui-progress id="overall-context-progress" type="circular" value="0" size="28px" hide-text></nui-progress>
-                            </div>
-                            <nui-tooltip id="overall-context-tooltip" class="context-tooltip">Context Usage</nui-tooltip>
-                            <nui-rich-text id="message-input" class="chat-input" no-toolbar placeholder="Type a message... (Shift+Enter for new line, Ctrl+Alt+V for code block)"></nui-rich-text>
-                            <nui-button id="attach-btn" class="icon-only" title="Attach Image">
-                                <button type="button" aria-label="Image"><nui-icon name="image"></nui-icon></button>
+                    <!-- Preview Pane Resizer (drag handle) -->
+                    <div class="preview-resizer" id="preview-resizer" hidden></div>
+                    
+                    <!-- Preview Pane (LLM-driven second rendering surface) -->
+                    <div class="preview-pane" id="preview-pane" hidden>
+                        <header class="preview-header">
+                            <nui-select id="preview-select" data-label="No items">
+                                <select></select>
+                            </nui-select>
+                            <span class="preview-source" id="preview-source"></span>
+                            <nui-button id="preview-close-btn" class="icon-only" title="Close preview">
+                                <button type="button" aria-label="Close preview"><nui-icon name="close"></nui-icon></button>
                             </nui-button>
-                            <nui-button id="send-btn" variant="primary" title="Send">
-                                <button type="button" aria-label="Send"><nui-icon name="send"></nui-icon></button>
-                            </nui-button>
-                        </div>
-                        <input type="file" id="file-input" accept="image/*" multiple hidden>
-                        <input type="file" id="import-chat-input" accept=".json" hidden>
-                    </footer>
+                        </header>
+                        <div class="preview-content" id="preview-content"></div>
+                    </div>
                 </div>
             </nui-main>
         </nui-content>

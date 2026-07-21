@@ -13,6 +13,7 @@ import { getPlainText } from './tts-utils.js';
 import { backendClient } from './api-client.js';
 import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
 import { TtsPlayerHost } from '../../lib/tts/tts-player.js';
+import { preview } from './preview.js';
 
 // Fire-and-forget client log to server nLogger — never throws
 function _logTool(message, meta = {}) {
@@ -63,6 +64,24 @@ const ARCHIVE_TOOLS = [
                     max_inline_bytes: { type: 'number', description: 'Max bytes to return inline as text (default 5,242,880 = 5 MB). Set to 0 to always upload to bucket and return a URL.' }
                 },
                 required: ['url']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_preview_show',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\n\nRender content in the chat\'s preview pane — a separate surface from the chat scrollback. Use it to show files, proposed edits, diffs, or any work product the user should see alongside the conversation. Calling with an existing id updates that item in place and brings it to front. The user can switch between shown items via a dropdown.\n\nPrefer content under ~32KB; for larger files, show the relevant excerpt. Content over 256KB is rejected. Syntax coloring is applied for html, css, javascript, typescript, and json; other languages render as plain monospace (still correct, just uncolored).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    id: { type: 'string', description: 'Stable identifier for this preview item. Reusing an id updates the existing item rather than creating a new one. Example: \'file:server.js\' or \'proposed-edit:config.json\'.' },
+                    title: { type: 'string', description: 'Human-readable label shown in the dropdown and header. Example: \'server.js\' or \'Proposed: config.json\'.' },
+                    language: { type: 'string', description: 'Content type. Use \'markdown\' for rendered MD preview. Any other value (javascript, python, json, text, etc.) renders as syntax-highlighted code. Default: text.', 'default': 'text' },
+                    content: { type: 'string', description: 'The full content to render. For markdown, this is the raw MD source. For code, this is the source text.' },
+                    source: { type: 'string', description: 'Optional provenance label. Example: \'storage:foo.js\', \'proposed-edit:foo.js\', \'generated\'. Shown as a subtitle in the header.' }
+                },
+                required: ['id', 'title', 'content']
             }
         }
     },
@@ -194,6 +213,9 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
     switch (toolName) {
         case 'browser_fetch': {
             return executeBrowserFetch(args, exchangeId, headers);
+        }
+        case 'chat_preview_show': {
+            return preview.show(args);
         }
         case 'read_resource': {
             return mcpClient.executeReadResource(args, exchangeId);
@@ -1158,6 +1180,9 @@ async function init() {
     // Setup event listeners first
     setupEventListeners();
     setupDialogEventListeners();
+
+    // Initialize preview pane (needs DOM ready + NUI loaded for enableDrag)
+    preview.init();
 
     // Create vision toggle UI
     ensureVisionToggleUI();
@@ -4882,6 +4907,10 @@ async function switchChat(targetChatId) {
     const oldConv = conversation;
     currentChatId = targetChatId;
     storage.setActiveChatId(currentChatId).catch(() => {});
+
+    // Reset preview pane — it's a shared surface across per-chat containers.
+    // Without this, chat B would see chat A's preview. Idempotent: safe on init.
+    preview.reset();
 
     // Save the outgoing conversation (now safe — currentChatId already updated)
     if (oldConv) {

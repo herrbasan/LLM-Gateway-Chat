@@ -167,12 +167,12 @@ nui-code pre {
     background: #22c55e;
 }
 
-/* Main Chat Area */
+/* Main Chat Area — flex-row container holding chat pane + optional preview pane */
 .chat-main {
     min-height: 0;
     flex: 1;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     background: var(--color-base);
     position: relative;
     height: 100%;
@@ -180,6 +180,95 @@ nui-code pre {
     margin: 0;
     padding: 0;
     overflow: hidden;
+}
+
+/* Chat pane — preserves the old column layout (.chat-messages + footer) */
+.chat-pane {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+/* Preview pane — LLM-driven second rendering surface */
+.preview-pane {
+    flex: 0 0 var(--preview-width, 42rem);
+    min-width: 20rem;
+    max-width: 80%;
+    border-left: thin solid var(--border-shade1);
+    background: var(--color-shade1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+/* [hidden] must override display: flex — keep both rules adjacent.
+   A future "cleanup" that drops this will break the hide behavior. */
+.preview-pane[hidden] { display: none; }
+
+/* Resizer: wide hit area (8px) with visible 1px line via ::after.
+   nui-slider gets away with a thin handle because its track is tall;
+   a vertical strip needs a wider grab target. */
+.preview-resizer {
+    flex: 0 0 8px;
+    margin-left: -4px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 1;
+}
+.preview-resizer::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--border-shade1);
+}
+.preview-resizer[hidden] { display: none; }
+.preview-resizer.dragging::after,
+.preview-resizer:hover::after {
+    background: var(--color-highlight);
+    width: 2px;
+}
+
+.preview-header {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-space-half);
+    padding: var(--nui-space-half) var(--nui-space);
+    border-bottom: thin solid var(--border-shade1);
+    flex: 0 0 auto;
+}
+
+.preview-header nui-select {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.preview-source {
+    font-size: 0.75rem;
+    color: var(--text-color-dim);
+    padding: 0 var(--nui-space-half);
+    flex: 0 0 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 12rem;
+}
+
+.preview-content {
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: var(--nui-space);
+    min-height: 0;
+}
+
+/* Desktop-only for v1. Below 60rem viewport, hide the pane entirely. */
+@media (max-width: 60rem) {
+    .preview-pane, .preview-resizer { display: none !important; }
 }
 
 /* Mobile Sidebar Toggle */
