@@ -16,6 +16,10 @@
 
 const items = new Map();   // id → { id, title, language, content, source }
 let activeId = null;       // currently displayed item id
+let _renderedContent = null;  // tracks what's currently on screen (for TTS invalidation)
+
+// Callback fired when the active content changes (chat.js registers a TTS stop here)
+let _onContentChange = null;
 
 // ============================================
 // DOM references (populated in init())
@@ -119,6 +123,10 @@ function show(args) {
     const source = typeof args.source === 'string' ? args.source : null;
 
     // Upsert into items map
+    const isNew = !items.has(args.id);
+    const prevItem = items.get(args.id);
+    const contentChanged = isNew || prevItem.content !== args.content;
+
     items.set(args.id, {
         id: args.id,
         title: args.title,
@@ -136,6 +144,11 @@ function show(args) {
     // Update dropdown + render
     syncDropdown();
     renderActive();
+
+    // If content changed, fire the callback so chat.js can stop stale TTS.
+    // The old audio no longer matches what's on screen — keeping it playing
+    // would be a silent lie (user sees new content, hears old content).
+    if (contentChanged && _onContentChange) _onContentChange();
 
     return {
         content: [{
@@ -168,6 +181,7 @@ function close() {
 function reset() {
     items.clear();
     activeId = null;
+    _renderedContent = null;
     if (content) content.replaceChildren();
     if (sourceEl) sourceEl.textContent = '';
     close();
@@ -230,6 +244,14 @@ function renderActive() {
     }
 
     const item = items.get(activeId);
+
+    // Detect content change from dropdown switch (show() handles its own detection).
+    // If the rendered content differs from what's on screen, fire the callback
+    // so chat.js can stop stale TTS.
+    if (_renderedContent !== item.content) {
+        _renderedContent = item.content;
+        if (_onContentChange) _onContentChange();
+    }
 
     // Update source label
     if (sourceEl) {
@@ -328,5 +350,6 @@ export const preview = {
     close,
     reset,
     getActivePlainText,
-    getState
+    getState,
+    set onContentChange(fn) { _onContentChange = fn; }
 };

@@ -1237,6 +1237,15 @@ async function init() {
     // Initialize preview pane (needs DOM ready + NUI loaded for enableDrag)
     preview.init();
 
+    // When preview content changes, stop any active TTS — the old audio
+    // no longer matches what's on screen. The user can click speak again
+    // to generate fresh audio for the new content.
+    preview.onContentChange = () => {
+        if (tts && tts.isActive()) {
+            tts.stop();
+        }
+    };
+
     // Wire preview speak button — replicates chat's toggleTts pattern.
     // The controller's _applyButtonState looks for .speaker inside the targetEl,
     // so we pass the button's parent (the header) and give the button class "speaker".
