@@ -246,7 +246,8 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
                 headers,
                 body: JSON.stringify(reqBody)
             });
-            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            if (res.status === 401) throw new Error('chat_archive_update_metadata: session expired (401). The user needs to log in again.');
+            if (!res.ok) throw new Error(`chat_archive_update_metadata: backend error ${res.status}`);
             
             // Reload the sidebar silently to reflect changes if it's not the active chat trying to overwrite something we'd override local state for
             chatHistory.refreshList().then(() => renderHistoryList());
@@ -270,7 +271,8 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
                     date_to: args.date_to || null
                 })
             });
-            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            if (res.status === 401) throw new Error('chat_archive_search: session expired (401). The user needs to log in again.');
+            if (!res.ok) throw new Error(`chat_archive_search: backend error ${res.status}`);
             const data = await res.json();
             return {
                 content: [{
@@ -297,7 +299,8 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
             const offset = args.offset || 0;
             const limit = args.limit || 100;
             const res = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, { method: 'GET', headers });
-            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            if (res.status === 401) throw new Error('chat_archive_get_session: session expired (401). The user needs to log in again.');
+            if (!res.ok) throw new Error(`chat_archive_get_session: backend error ${res.status}`);
             const data = await res.json();
 
             // saveToStorage: bypass LLM context window — write session JSON
@@ -377,21 +380,32 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
 
         case 'chat_archive_list_chats': {
             const res = await fetch(`${BACKEND_URL}/api/chats`, { method: 'GET', headers });
-            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            if (res.status === 401) throw new Error('chat_archive_list_chats: session expired (401). The user needs to log in again.');
+            if (!res.ok) throw new Error(`chat_archive_list_chats: backend error ${res.status}`);
             const data = await res.json();
             // Filter strictly for direct/normal chats (exclude arena)
-            let results = data.data.filter(s => s.mode !== 'arena');
+            const allDirect = data.data.filter(s => s.mode !== 'arena');
+            let results = allDirect;
             if (args.date_from) results = results.filter(a => a.createdAt >= args.date_from);
             if (args.date_to) results = results.filter(a => a.createdAt <= args.date_to);
             const limit = args.limit || 20;
             const offset = args.offset || 0;
+            // When date-filtered results are empty, include the actual date range
+            // of available sessions so the LLM can adjust its query.
+            const dateRange = results.length === 0 && allDirect.length > 0 ? {
+                available_oldest: allDirect.reduce((min, s) => s.createdAt < min ? s.createdAt : min, allDirect[0].createdAt),
+                available_newest: allDirect.reduce((max, s) => s.createdAt > max ? s.createdAt : max, allDirect[0].createdAt),
+                total_in_archive: allDirect.length
+            } : undefined;
             return {
                 content: [{
                     type: 'text',
                     text: JSON.stringify({
                         total: results.length,
+                        total_before_date_filter: allDirect.length,
                         offset,
                         limit,
+                        ...(dateRange ? { hint: 'No sessions match the date filter. Here is the actual date range of available sessions.', ...dateRange } : {}),
                         results: results.slice(offset, offset + limit).map(a => ({
                             id: a.id, title: a.title,
                             model: a.model || 'unknown',
@@ -407,20 +421,29 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
 
         case 'chat_archive_list_arena': {
             const res = await fetch(`${BACKEND_URL}/api/arena`, { method: 'GET', headers });
-            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            if (res.status === 401) throw new Error('chat_archive_list_arena: session expired (401). The user needs to log in again.');
+            if (!res.ok) throw new Error(`chat_archive_list_arena: backend error ${res.status}`);
             const data = await res.json();
-            let results = data.data;
+            const allArena = data.data;
+            let results = allArena;
             if (args.date_from) results = results.filter(a => a.createdAt >= args.date_from);
             if (args.date_to) results = results.filter(a => a.createdAt <= args.date_to);
             const limit = args.limit || 20;
             const offset = args.offset || 0;
+            const dateRange = results.length === 0 && allArena.length > 0 ? {
+                available_oldest: allArena.reduce((min, s) => s.createdAt < min ? s.createdAt : min, allArena[0].createdAt),
+                available_newest: allArena.reduce((max, s) => s.createdAt > max ? s.createdAt : max, allArena[0].createdAt),
+                total_in_archive: allArena.length
+            } : undefined;
             return {
                 content: [{
                     type: 'text',
                     text: JSON.stringify({
                         total: results.length,
+                        total_before_date_filter: allArena.length,
                         offset,
                         limit,
+                        ...(dateRange ? { hint: 'No sessions match the date filter. Here is the actual date range of available sessions.', ...dateRange } : {}),
                         results: results.slice(offset, offset + limit).map(a => ({
                             id: a.id, title: a.title,
                             models: a.arenaConfig ? `${a.arenaConfig.modelA} vs ${a.arenaConfig.modelB}` : 'unknown',
@@ -436,7 +459,8 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
 
         case 'chat_archive_find_similar': {
             const srcRes = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, { method: 'GET', headers });
-            if (!srcRes.ok) throw new Error(`Backend ${srcRes.status}`);
+            if (srcRes.status === 401) throw new Error('chat_archive_find_similar: session expired (401). The user needs to log in again.');
+            if (!srcRes.ok) throw new Error(`chat_archive_find_similar: backend error ${srcRes.status}`);
             const srcData = await srcRes.json();
             const srcTitle = srcData.session?.title || args.session_id;
             const srcMessages = srcData.messages || [];
@@ -454,7 +478,8 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
                 method: 'POST', headers,
                 body: JSON.stringify({ query: queryText, limit: (args.limit || 5) + 1 })
             });
-            if (!searchRes.ok) throw new Error(`Backend ${searchRes.status}`);
+            if (searchRes.status === 401) throw new Error('chat_archive_find_similar: session expired (401). The user needs to log in again.');
+            if (!searchRes.ok) throw new Error(`chat_archive_find_similar: search backend error ${searchRes.status}`);
             const searchData = await searchRes.json();
 
             const similar = searchData.results
@@ -492,7 +517,8 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
                     direction: args.direction || 'both'
                 })
             });
-            if (!res.ok) throw new Error(`Backend ${res.status}`);
+            if (res.status === 401) throw new Error('chat_archive_find_references: session expired (401). The user needs to log in again.');
+            if (!res.ok) throw new Error(`chat_archive_find_references: backend error ${res.status}`);
             const data = await res.json();
             return {
                 content: [{
@@ -587,11 +613,13 @@ async function executeBrowserFetch(args, exchangeId, _headers) {
         const errType = fetchErr.name || 'NetworkError';
         const errMsg = fetchErr.message || String(fetchErr);
         console.error(`[browser_fetch] Fetch failed: ${errType}: ${errMsg}`, fetchErr);
+        // Auto-diagnose: run probes so the error message contains actionable data.
+        const diag = await _browserFetchDiagnose(fullUrl, errMsg);
         throw new Error(
             `browser_fetch: network request failed (${errType}). ` +
             `URL: ${fullUrl}. ` +
-            `Common causes: target server not running, CORS blocked the request, or the browser cannot reach localhost:3100 from this origin. ` +
-            `Detail: ${errMsg}`
+            `Detail: ${errMsg}\n\n` +
+            `--- DIAGNOSTICS ---\n${JSON.stringify(diag, null, 2)}`
         );
     }
     console.log(`[browser_fetch] Response ${res.status} ${res.statusText}, content-type: ${res.headers.get('content-type') || 'unknown'}`);
@@ -650,6 +678,107 @@ async function executeBrowserFetch(args, exchangeId, _headers) {
             text: JSON.stringify(payload, null, 2)
         }]
     };
+}
+
+// ============================================
+// browser_fetch diagnostics — runs on fetch failure
+// ============================================
+//
+// Probes the target URL from multiple angles to isolate the failure mode.
+// Returns a structured object the LLM can reason about.
+
+// Timeout helper — AbortSignal.timeout may not exist in older browsers.
+function _fetchTimeout(ms) {
+    if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), ms);
+    return ctrl.signal;
+}
+
+async function _browserFetchDiagnose(url, originalError) {
+    const origin = typeof window !== 'undefined' ? window.location?.origin : 'unknown';
+    const parsed = (() => { try { return new URL(url); } catch { return null; } })();
+    const result = {
+        browser_origin: origin,
+        target_url: url,
+        target_host: parsed?.hostname || 'unparseable',
+        target_port: parsed?.port || '(default)',
+        same_origin: parsed && origin ? `${parsed.origin}` === origin : false,
+        original_error: originalError,
+        probes: {}
+    };
+
+    // Probe 1: CORS preflight (OPTIONS). If this succeeds, the server is up
+    // and CORS is configured — the GET failure is something else.
+    try {
+        const preflight = await fetch(url, {
+            method: 'OPTIONS',
+            headers: { 'Access-Control-Request-Method': 'GET', 'Origin': origin || 'null' },
+            signal: _fetchTimeout(5000)
+        });
+        const acao = preflight.headers.get('access-control-allow-origin');
+        result.probes.cors_preflight = {
+            status: preflight.status,
+            access_control_allow_origin: acao,
+            allows_this_origin: acao === '*' || acao === origin,
+            verdict: preflight.ok ? 'server_responded' : `server_returned_${preflight.status}`
+        };
+    } catch (e) {
+        result.probes.cors_preflight = { verdict: 'preflight_failed', error: e.message };
+    }
+
+    // Probe 2: no-cors mode. A successful opaque response means the server is
+    // reachable but normal CORS is blocking the response body.
+    try {
+        const noCorsRes = await fetch(url, {
+            mode: 'no-cors',
+            signal: _fetchTimeout(5000)
+        });
+        result.probes.no_cors_fetch = {
+            type: noCorsRes.type,
+            status: noCorsRes.status,
+            verdict: noCorsRes.type === 'opaque' ? 'server_reachable_cors_blocking' : 'unexpected_response_type'
+        };
+    } catch (e) {
+        result.probes.no_cors_fetch = { verdict: 'no_cors_also_failed', error: e.message };
+    }
+
+    // Probe 3: localhost alternate. If the URL uses a LAN IP, test whether
+    // localhost resolves to the same service (helps when browser is on the
+    // same machine as the server).
+    if (parsed && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+        const localhostUrl = url.replace(parsed.hostname, 'localhost');
+        try {
+            const lhRes = await fetch(localhostUrl, {
+                mode: 'no-cors',
+                signal: _fetchTimeout(5000)
+            });
+            result.probes.localhost_alternate = {
+                url: localhostUrl,
+                type: lhRes.type,
+                verdict: lhRes.type === 'opaque' ? 'localhost_reachable' : 'unexpected'
+            };
+        } catch (e) {
+            result.probes.localhost_alternate = { url: localhostUrl, verdict: 'localhost_unreachable', error: e.message };
+        }
+    }
+
+    // Synthesize a human-readable diagnosis
+    const parts = [];
+    if (result.probes.cors_preflight?.verdict === 'preflight_failed') {
+        parts.push('SERVER_UNREACHABLE: the target server did not respond. It may be down or the network route is blocked.');
+    } else if (result.probes.cors_preflight?.access_control_allow_origin === null) {
+        parts.push('CORS_MISSING: server responded but sent no Access-Control-Allow-Origin header. CORS is not configured.');
+    } else if (result.probes.cors_preflight && !result.probes.cors_preflight.allows_this_origin) {
+        parts.push(`CORS_ORIGIN_REJECTED: server allows "${result.probes.cors_preflight.access_control_allow_origin}" but this browser is at "${origin}".`);
+    } else if (result.probes.no_cors_fetch?.verdict === 'server_reachable_cors_blocking') {
+        parts.push('CORS_BLOCKING_RESPONSE: server is reachable (no-cors succeeded) but CORS headers are missing or wrong on the actual GET response.');
+    } else {
+        parts.push('AMBIGUOUS: probes did not isolate a single cause. Check the raw probe data above.');
+    }
+    result.diagnosis = parts.join(' ');
+
+    return result;
 }
 
 // Convert Blob → data URL (browser only).
