@@ -1382,7 +1382,7 @@ nui-app:not(.nui-ready) { display: none; }
 .tts-player {
     position: absolute;
     top: var(--nui-space-half);
-    right: var(--nui-space-half);
+    right: var(--nui-space);
     z-index: 30;
     width: min(20rem, calc(100% - var(--nui-space)));
     display: flex;
