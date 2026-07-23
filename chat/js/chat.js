@@ -36,16 +36,19 @@ const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http:
 const BACKEND_API_KEY = CONFIG.backendApiKey || '';
 const ENABLE_ARCHIVE_TOOLS = CONFIG.enableArchiveTools !== false;
 
-// LAN allowlist for browser_fetch — must match an entry's `match` prefix (string or RegExp).
-// Default covers the chat backend, workshop storage/MCP server, and the home gateway.
-// Server can override via server/config.json → browserFetchAllowedPrefixes.
-const DEFAULT_BROWSER_FETCH_ALLOWLIST = [
-    { label: 'localhost', match: /^https?:\/\/localhost(:\d+)?(\/|$)/i },
-    { label: '127.0.0.1', match: /^https?:\/\/127\.0\.0\.1(:\d+)?(\/|$)/i },
-    { label: '192.168.x.x', match: /^https?:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?(\/|$)/i },
-    { label: '10.x.x.x', match: /^https?:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?(\/|$)/i },
-    { label: '172.16-31.x.x', match: /^https?:\/\/172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}(:\d+)?(\/|$)/i }
-];
+// Resolve the configured MCP server origin — the single source of truth for
+// how THIS client reaches the workshop (LAN IP locally, dyndns remotely).
+// Never hardcode a storage/MCP host: derive it from the user's configured
+// server list so the same code works from any network location.
+function getMcpServerOrigin() {
+    const server = (mcpClient.servers || []).find(s => s.url);
+    if (!server) return null;
+    try {
+        return new URL(server.url).origin;
+    } catch (_) {
+        return null;
+    }
+}
 
 // Local tool definitions (executed directly in the browser, never routed to MCP servers)
 const ARCHIVE_TOOLS = [
@@ -53,7 +56,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'browser_fetch',
-            description: 'Execution context: Chat App browser ONLY. This is NOT an MCP method — it is intercepted by the chat frontend and executed with the browser\'s native fetch() API, bypassing MCP JSON-RPC size limits entirely.\\n\\nUse this tool to download a file or resource from a LAN/local URL when the response may be too large for MCP (which is typically capped around 64 KB). The response is made available to the model either as inline text or as a chat-bucket URL.\\n\\n**Allowed URLs**: only LAN/local addresses are permitted (localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x, 172.16-31.x.x). Public internet URLs are rejected.\\n\\n**Response handling**: text/* and application/json responses up to max_inline_bytes (default 5 MB) are returned inline. Anything larger, or any binary type (images, PDFs, audio, etc.), is uploaded to the chat\'s bucket and a `/api/buckets/images/...` URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when `storage_read` fails due to size.',
+            description: 'Execution context: Chat App browser ONLY. This is NOT an MCP method — it is intercepted by the chat frontend and executed with the browser\'s native fetch() API, bypassing MCP JSON-RPC size limits entirely.\\n\\nUse this tool to download a file or resource from ANY URL when the response may be too large for MCP (which is typically capped around 64 KB). Works for storage files, LAN addresses, and public internet URLs alike — it is a plain fetch, nothing more. Cross-origin requests are subject to normal browser CORS rules. The response is made available to the model either as inline text or as a chat-bucket URL.\\n\\n**Response handling**: text/* and application/json responses up to max_inline_bytes (default 5 MB) are returned inline. Anything larger, or any binary type (images, PDFs, audio, etc.), is uploaded to the chat\'s bucket and a `/api/buckets/images/...` URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when `storage_read` returns a relative `path` pointer (prepend your MCP origin and fetch it).',
             parameters: {
                 type: 'object',
                 properties: {
@@ -325,9 +328,11 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
                 });
 
                 const storagePath = `sessions/${args.session_id}.json`;
-                const storageUrl = `http://192.168.0.100:3100/storage/${storagePath}`;
+                const storageBase = getMcpServerOrigin();
+                if (!storageBase) throw new Error('chat_archive_get_session: no MCP server configured — cannot reach storage');
+                const storageUrl = `${storageBase}/storage/${storagePath}`;
 
-                const putRes = await fetch(`http://192.168.0.100:3100/api/storage/write`, {
+                const putRes = await fetch(`${storageBase}/api/storage/write`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ path: storagePath, content: storagePayload })
@@ -343,9 +348,10 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
                         text: JSON.stringify({
                             ok: true,
                             url: storageUrl,
+                            path: `/storage/${storagePath}`,
                             sessionId: args.session_id,
                             messageCount: data.messages?.length,
-                            hint: 'Use this URL as forge.call payload to pass the session data to a forged tool'
+                            hint: 'url is absolute (use as forge.call payload). path is relative to your MCP origin (use with browser_fetch).'
                         })
                     }]
                 };
@@ -577,22 +583,10 @@ async function executeBrowserFetch(args, exchangeId, _headers) {
         throw new Error(`browser_fetch: protocol must be http or https (got ${parsedUrl.protocol})`);
     }
 
-    // Allowlist check — server can extend via CONFIG.browserFetchAllowedPrefixes.
-    const allowlist = (CONFIG.browserFetchAllowedPrefixes && Array.isArray(CONFIG.browserFetchAllowedPrefixes))
-        ? CONFIG.browserFetchAllowedPrefixes
-        : DEFAULT_BROWSER_FETCH_ALLOWLIST;
+    // No allowlist: browser_fetch is a plain fetch. Cross-origin requests are
+    // governed by normal browser CORS rules — that is the only gate, and it
+    // cannot be bypassed or string-matched around.
     const fullUrl = parsedUrl.href;
-    const matched = allowlist.some(entry => {
-        const m = entry?.match;
-        if (!m) return false;
-        if (m instanceof RegExp) return m.test(fullUrl);
-        if (typeof m === 'string') return fullUrl.startsWith(m);
-        return false;
-    });
-    if (!matched) {
-        const allowedLabels = allowlist.map(e => e?.label || '<unlabeled>').join(', ');
-        throw new Error(`browser_fetch: URL not in allowlist. Allowed: ${allowedLabels}. Got: ${fullUrl}`);
-    }
 
     // Build fetch options
     const fetchOpts = {
@@ -2179,28 +2173,26 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
     if (ENABLE_ARCHIVE_TOOLS) {
         prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*. Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.
 
-## Large File Retrieval — browser_fetch
+## Large File Retrieval — storage.read + browser_fetch
 
-browser_fetch is a CHAT-APP-NATIVE tool. It is NOT an MCP method. When you call it, the chat frontend intercepts the call and performs a direct browser fetch() to the URL, bypassing MCP's ~64 KB per-message size limit entirely.
+Your MCP server (workshop) origin is: ${getMcpServerOrigin() || '(not configured)'}
 
-When to use browser_fetch:
-- You have a direct URL for a file/resource and the payload is likely larger than MCP can carry.
-- storage_read or another MCP file tool fails with a size-limit error.
-- You already obtained a LAN/local URL (for example from storage.list or a Forge result) and need to read its contents.
+The rule for ANY storage file: call \`storage.read\` with just the path.
+- Small files come back inline as content. Done.
+- Larger files come back as a pointer containing a \`path\` field like \`/storage/somefile.md\` — RELATIVE, no host. Prepend YOUR MCP origin above and fetch the full URL with \`browser_fetch\`. Example: \`browser_fetch({ url: "${getMcpServerOrigin() || 'http://<mcp-origin>'}/storage/somefile.md" })\`.
+- To read only PART of a file (page through a big file, or grab the end of a log), \`storage.read\` also accepts \`offset\`+\`length\` (byte window), \`head\` (first N lines), or \`tail\` (last N lines).
 
-Allowed URLs: LAN/local addresses ONLY — localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x, and 172.16-31.x.x. Public internet URLs are rejected.
+browser_fetch is a general-purpose fetch tool, native to this chat app (NOT an MCP method). It performs a direct browser fetch(), bypassing MCP's ~64 KB per-message size limit. Use it for any URL you want to retrieve — storage files, or anything else.
 
 How to call browser_fetch:
 1. Use the tool name exactly: browser_fetch
-2. Pass the absolute URL in the "url" argument.
+2. Pass the full absolute URL in the "url" argument.
 3. Optional: set "max_inline_bytes" to control how many bytes are returned as inline text (default 5,242,880 = 5 MB). Set it to 0 to always upload the response to the chat bucket and receive a URL instead.
 4. Optional: set "method", "headers", or "body" for non-GET requests.
 
 What you get back:
 - For text/* or application/json responses that are smaller than max_inline_bytes: a JSON object with the response body in the "body" field.
-- For binary responses, or text larger than max_inline_bytes, or when max_inline_bytes is 0: the response is uploaded to the chat bucket and you receive a "/api/buckets/images/..." URL plus metadata. If the URL points to a text file you can read, call browser_fetch again on that URL to retrieve the text.
-
-Prefer browser_fetch over storage_read when you already know the URL and expect the response to be large. Example flow: storage.list shows a path, storage.read fails due to size, so you call browser_fetch on the file's direct URL.`;
+- For binary responses, or text larger than max_inline_bytes, or when max_inline_bytes is 0: the response is uploaded to the chat bucket and you receive a "/api/buckets/images/..." URL plus metadata. If the URL points to a text file you can read, call browser_fetch again on that URL to retrieve the text.`;
     }
 
     // MCP resource context: list available resources and templates so the LLM can ask to read them
