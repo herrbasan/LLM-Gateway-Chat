@@ -56,14 +56,15 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'browser_fetch',
-            description: 'Execution context: Chat App browser ONLY. This is NOT an MCP method — it is intercepted by the chat frontend and executed with the browser\'s native fetch() API, bypassing MCP JSON-RPC size limits entirely.\\n\\nUse this tool to download a file or resource from ANY URL when the response may be too large for MCP (which is typically capped around 64 KB). Works for storage files, LAN addresses, and public internet URLs alike — it is a plain fetch, nothing more. Cross-origin requests are subject to normal browser CORS rules. The response is made available to the model either as inline text or as a chat-bucket URL.\\n\\n**Response handling**: text/* and application/json responses up to max_inline_bytes (default 5 MB) are returned inline. Anything larger, or any binary type (images, PDFs, audio, etc.), is uploaded to the chat\'s bucket and a `/api/buckets/images/...` URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when `storage_read` returns a relative `path` pointer (prepend your MCP origin and fetch it).',
+            description: 'Execution context: Chat App browser ONLY. This is NOT an MCP method — it is intercepted by the chat frontend and executed with the browser\'s native fetch() API, bypassing MCP JSON-RPC size limits entirely.\\n\\nUse this tool to download a file or resource from ANY URL when the response may be too large for MCP (which is typically capped around 64 KB). Works for storage files, LAN addresses, and public internet URLs alike — it is a plain fetch, nothing more. Cross-origin requests are subject to normal browser CORS rules. The response is made available to the model either as inline text or as a chat-bucket URL.\\n\\n**Binary upload**: use body_type="data_url" with a data URL body to send binary data to HTTP endpoints. NOTE: to save a chat attachment to workshop storage, use attachment_save instead — it handles the transfer in one call.\\n\\n**Response handling**: text/* and application/json responses up to max_inline_bytes (default 5 MB) are returned inline. Anything larger, or any binary type (images, PDFs, audio, etc.), is uploaded to the chat\'s bucket and a `/api/buckets/images/...` URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when `storage_read` returns a relative `path` pointer (prepend your MCP origin and fetch it).',
             parameters: {
                 type: 'object',
                 properties: {
-                    url: { type: 'string', description: 'Absolute URL to fetch. Must be a LAN/local address.' },
+                    url: { type: 'string', description: 'Absolute URL to fetch. Cross-origin requests are subject to normal browser CORS rules.' },
                     method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method (default GET)' },
                     headers: { type: 'object', description: 'Optional request headers as key/value strings' },
-                    body: { type: 'string', description: 'Optional request body for POST/PUT/PATCH. String only.' },
+                    body: { type: 'string', description: 'Optional request body for POST/PUT/PATCH. When body_type is "text" (default), this is sent as-is. When body_type is "data_url", this must be a data URL (data:mime;base64,...) which is decoded to binary before sending.' },
+                    body_type: { type: 'string', enum: ['text', 'data_url'], description: 'How to interpret the body. "text" (default): send as string. "data_url": parse body as a data URL, decode base64 to binary Blob, and send with the MIME type from the data URL as Content-Type. Use "data_url" to upload images or other binary files to HTTP endpoints (e.g. PUT /storage/* on the MCP server).' },
                     max_inline_bytes: { type: 'number', description: 'Max bytes to return inline as text (default 5,242,880 = 5 MB). Set to 0 to always upload to bucket and return a URL.' }
                 },
                 required: ['url']
@@ -214,6 +215,21 @@ const ARCHIVE_TOOLS = [
                 required: ['session_id']
             }
         }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'attachment_save',
+            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\n\nCopy a binary file (image, PDF, etc.) from the chat file bucket to workshop storage. Use this to persist attached images or other binaries into the MCP server\'s filesystem — e.g. saving a user-uploaded image to digital-twin/images/.\n\nThe source URL is the bucket URL from the attachment manifest line in the user message (looks like http://<host>/api/buckets/images/<id>.<ext>). The destination is a path relative to the MCP storage root. Returns the storage path and byte count on success.\n\nThis is a server-to-browser-to-server copy — no base64 in your context, no token cost. One call does the whole transfer.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'The source URL — a bucket URL from the attachment manifest, or any reachable URL that returns the binary bytes.' },
+                    storage_path: { type: 'string', description: 'Destination path in workshop storage, relative to the storage root. Example: "digital-twin/images/photo.jpg"' }
+                },
+                required: ['url', 'storage_path']
+            }
+        }
     }
 ];
 
@@ -227,6 +243,9 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
     switch (toolName) {
         case 'browser_fetch': {
             return executeBrowserFetch(args, exchangeId, headers);
+        }
+        case 'attachment_save': {
+            return executeAttachmentSave(args);
         }
         case 'chat_preview_show': {
             return preview.show(args);
@@ -563,6 +582,9 @@ async function executeBrowserFetch(args, exchangeId, _headers) {
     if (args.body !== undefined && typeof args.body !== 'string') {
         throw new Error('browser_fetch: body must be a string');
     }
+    if (args.body_type !== undefined && !['text', 'data_url'].includes(args.body_type)) {
+        throw new Error(`browser_fetch: invalid body_type "${args.body_type}" — must be "text" or "data_url"`);
+    }
     const maxInlineBytes = args.max_inline_bytes === 0 ? 0 : (args.max_inline_bytes ?? 5 * 1024 * 1024);
     if (typeof maxInlineBytes !== 'number' || maxInlineBytes < 0) {
         throw new Error('browser_fetch: max_inline_bytes must be a non-negative number');
@@ -589,10 +611,41 @@ async function executeBrowserFetch(args, exchangeId, _headers) {
     const fullUrl = parsedUrl.href;
 
     // Build fetch options
+    const bodyType = args.body_type || 'text';
+    let fetchBody = args.body;
+    let fetchHeaders = args.headers ? { ...args.headers } : undefined;
+
+    // data_url mode: parse "data:mime;base64,..." into a Blob for binary upload.
+    // This lets the LLM push images and other binaries to HTTP endpoints (e.g.
+    // PUT /storage/* on the MCP server) without base64-through-JSON-RPC overhead.
+    if (bodyType === 'data_url' && args.body !== undefined) {
+        const commaIdx = args.body.indexOf(',');
+        if (commaIdx === -1) {
+            throw new Error('browser_fetch: data_url body must be a valid data URL (data:mime;base64,...)');
+        }
+        const meta = args.body.substring(5, commaIdx); // strip "data:" prefix
+        const isBase64 = meta.includes(';base64');
+        const mimeType = meta.split(';')[0] || 'application/octet-stream';
+        const dataPart = args.body.substring(commaIdx + 1);
+        if (!isBase64) {
+            throw new Error('browser_fetch: data_url body must be base64-encoded (data:mime;base64,...)');
+        }
+        // Decode base64 → Uint8Array → Blob
+        const binaryStr = atob(dataPart);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+        fetchBody = new Blob([bytes], { type: mimeType });
+        // Set Content-Type from the data URL unless the caller overrode it via headers
+        if (!fetchHeaders || !Object.keys(fetchHeaders).some(h => h.toLowerCase() === 'content-type')) {
+            fetchHeaders = fetchHeaders || {};
+            fetchHeaders['Content-Type'] = mimeType;
+        }
+    }
+
     const fetchOpts = {
         method: args.method || 'GET',
-        headers: args.headers ? { ...args.headers } : undefined,
-        body: args.body
+        headers: fetchHeaders,
+        body: fetchBody
     };
     // GET/HEAD cannot have a body per spec — strip silently rather than 400.
     if ((fetchOpts.method === 'GET' || fetchOpts.method === 'HEAD') && fetchOpts.body !== undefined) {
@@ -671,6 +724,64 @@ async function executeBrowserFetch(args, exchangeId, _headers) {
             type: 'text',
             text: JSON.stringify(payload, null, 2)
         }]
+    };
+}
+
+// ============================================
+// attachment_save — copy a bucket file to MCP storage
+// ============================================
+//
+// Fetches the source URL (same-origin bucket URL, no CORS issue) as a Blob,
+// then PUTs the raw bytes to <mcp origin>/storage/<path>. One tool call,
+// no base64 through the model context.
+
+async function executeAttachmentSave(args) {
+    if (!args || typeof args !== 'object') throw new Error('attachment_save: args object required');
+    if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('attachment_save: url required');
+    if (typeof args.storage_path !== 'string' || args.storage_path.length === 0) throw new Error('attachment_save: storage_path required');
+
+    const mcpOrigin = getMcpServerOrigin();
+    if (!mcpOrigin) throw new Error('attachment_save: no MCP server connected — cannot determine storage endpoint');
+
+    // Fetch the source bytes
+    let blob;
+    try {
+        const res = await fetch(args.url);
+        if (!res.ok) throw new Error(`source fetch returned ${res.status} ${res.statusText}`);
+        blob = await res.blob();
+    } catch (err) {
+        throw new Error(`attachment_save: failed to fetch source URL — ${err.message}`);
+    }
+    if (!blob || blob.size === 0) throw new Error('attachment_save: source URL returned empty response');
+
+    // PUT the raw bytes to MCP storage
+    const destUrl = `${mcpOrigin}/storage/${args.storage_path.replace(/^\/+/, '')}`;
+    let putRes;
+    try {
+        putRes = await fetch(destUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+            body: blob
+        });
+    } catch (err) {
+        throw new Error(`attachment_save: PUT to MCP storage failed — ${err.message}`);
+    }
+    if (!putRes.ok) {
+        const errBody = await putRes.text().catch(() => '');
+        throw new Error(`attachment_save: MCP storage returned ${putRes.status} ${putRes.statusText} — ${errBody}`);
+    }
+
+    const result = await putRes.json().catch(() => ({}));
+    const summary = JSON.stringify({
+        ok: true,
+        source_url: args.url,
+        storage_path: '/' + args.storage_path.replace(/^\/+/, ''),
+        bytes: result.size ?? blob.size,
+        content_type: result.content_type || blob.type || 'application/octet-stream'
+    }, null, 2);
+
+    return {
+        content: [{ type: 'text', text: summary }]
     };
 }
 
@@ -2192,7 +2303,11 @@ How to call browser_fetch:
 
 What you get back:
 - For text/* or application/json responses that are smaller than max_inline_bytes: a JSON object with the response body in the "body" field.
-- For binary responses, or text larger than max_inline_bytes, or when max_inline_bytes is 0: the response is uploaded to the chat bucket and you receive a "/api/buckets/images/..." URL plus metadata. If the URL points to a text file you can read, call browser_fetch again on that URL to retrieve the text.`;
+- For binary responses, or text larger than max_inline_bytes, or when max_inline_bytes is 0: the response is uploaded to the chat bucket and you receive a "/api/buckets/images/..." URL plus metadata. If the URL points to a text file you can read, call browser_fetch again on that URL to retrieve the text.
+
+## Saving Attachments to Workshop Storage
+
+When a user attaches an image or other binary, the message text includes an attachment manifest line like: \`[attachment 0: name="photo.jpg" mime="image/jpeg" url="http://.../api/buckets/images/..."]\`. To persist that file into workshop storage, use \`attachment_save({ url: "<the bucket URL>", storage_path: "<destination path>" })\`. It copies the bytes server-side — no base64 in your context. Example: \`attachment_save({ url: "http://.../api/buckets/images/abc.jpg", storage_path: "digital-twin/images/photo.jpg" })\`.`;
     }
 
     // MCP resource context: list available resources and templates so the LLM can ask to read them

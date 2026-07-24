@@ -575,9 +575,41 @@ export class Conversation {
                     const gatewayImageUrls = resolvedUrls
                         .map(u => this._resolveImageUrlForGateway(u))
                         .filter(u => u !== null);
+
+                    // Build an attachment manifest for the text layer. This gives
+                    // text-only models awareness that images exist, and gives ALL
+                    // models a resolvable URL they can pass to browser_fetch or
+                    // storage endpoints to persist or re-fetch the bytes.
+                    //
+                    // We use the BUCKET URL (att.dataUrl / att.url), not the
+                    // _origDataUrl base64 — base64 is useless as a reference.
+                    // The bucket URL is relative (/api/buckets/...); we resolve
+                    // it to an absolute URL the gateway can reach.
+                    const manifestEntries = validAttachments
+                        .map((att, idx) => {
+                            const bucketUrl = att.dataUrl || att.url;
+                            const resolved = this._resolveImageUrlForGateway(bucketUrl);
+                            if (!resolved) return null;
+                            return {
+                                index: idx,
+                                name: att.name || 'unnamed',
+                                mime: att.type || 'unknown',
+                                url: resolved
+                            };
+                        })
+                        .filter(e => e !== null);
+
                     if (gatewayImageUrls.length > 0) {
+                        // Prepend manifest to user text so every model sees it.
+                        let fullText = cleanUserContent;
+                        if (manifestEntries.length > 0) {
+                            const manifestStr = manifestEntries.map(e =>
+                                `[attachment ${e.index}: name="${e.name}" mime="${e.mime}" url="${e.url}"]`
+                            ).join(' ');
+                            fullText = (cleanUserContent ? cleanUserContent + '\n' : '') + manifestStr;
+                        }
                         const content = [
-                            { type: 'text', text: cleanUserContent },
+                            { type: 'text', text: fullText },
                             ...gatewayImageUrls.map(url => ({
                                 type: 'image_url',
                                 image_url: { url, detail: 'auto' }
