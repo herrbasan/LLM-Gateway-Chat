@@ -59,7 +59,7 @@ let embedFailCount = 0;
 
 async function fetchPrimeDirective() {
     try {
-        const resp = await fetch('http://192.168.0.100:3100/docs/Workshop/Agents_Prime.md', {
+        const resp = await fetch('http://192.168.0.100:3100/storage/docs/Workshop/Agents_Prime.md', {
             signal: AbortSignal.timeout(3000)
         });
         if (!resp.ok) return '';
