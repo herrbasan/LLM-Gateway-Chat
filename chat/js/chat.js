@@ -930,7 +930,6 @@ let _embedEventChatId = null;
 let client = new GatewayClient({
     baseUrl: GATEWAY_URL,
     accessKey: GATEWAY_API_KEY,
-    operationMode: CONFIG.operationMode || 'sse',
     onLog: (category, message, meta) => {
         if (backendClient?.clientLog) backendClient.clientLog(category, message, meta).catch(() => {});
     }
@@ -939,14 +938,11 @@ let client = new GatewayClient({
 function updateGatewayUrl(newUrl) {
     localStorage.setItem('gateway-url', newUrl);
     client.restUrl = newUrl;
-    client.wsUrl = newUrl.replace(/^http/, 'ws') + '/v1/realtime';
-    if (client.socket) client.socket.close();
 }
 
 function updateGatewayApiKey(newKey) {
     localStorage.setItem('gateway-api-key', newKey);
     client.accessKey = newKey;
-    if (client.socket) client.socket.close();
 }
 let models = [];
 let currentModel = '';
@@ -970,7 +966,6 @@ const elements = {
     presetSelect: document.getElementById('preset-select'),
     managePresetsBtn: document.getElementById('manage-presets-btn'),
     presetsDialog: document.getElementById('presets-dialog'),
-    operationMode: document.getElementById('operation-mode'),
     userName: document.getElementById('user-name'),
     userLocation: document.getElementById('user-location'),
     userLanguage: document.getElementById('user-language'),
@@ -1578,19 +1573,6 @@ async function applyDefaultConfig() {
     }
     updateVisionModeIndicator();
 
-    // Operation mode preference
-    const savedOperationMode = await storage.getPref('operation-mode');
-    const opMode = savedOperationMode !== null ? savedOperationMode : (CONFIG.operationMode || 'sse');
-    client.operationMode = opMode;
-    if (elements.operationMode) {
-        const opModeSelect = elements.operationMode.querySelector('select');
-        if (opModeSelect) {
-            opModeSelect.value = opMode;
-            // Notify NUI component of the programmatic value change
-            opModeSelect.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-    }
-
     if (elements.userName) {
         const input = elements.userName.querySelector('input');
         if (input) input.value = name;
@@ -2045,12 +2027,6 @@ function setupEventListeners() {
         if (currentChatId) {
             updateChatSystemPrompt(currentChatId, e.target.value);
         }
-    });
-
-    elements.operationMode?.querySelector('select')?.addEventListener('change', (e) => {
-        const newMode = e.target.value;
-        client.operationMode = newMode;
-        storage.setPref('operation-mode', newMode).catch(() => {});
     });
 
     // Gateway Connect button — save URL + API key, update client, reload models + status

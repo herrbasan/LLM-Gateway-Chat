@@ -18,7 +18,7 @@ The gateway URL has no UI input at all — it is entirely server-configured. TTS
 
 Service URLs are stored in localStorage only. No server-default fallback chain — if there's no localStorage value, the field is empty and the user must enter one. The server still generates `config.js` with the `.env` values as placeholder text (shown in the input fields), but they are not used as runtime defaults.
 
-No user-profile (nDB) storage for service URLs. The user profile keeps everything else (temperature, presets, name, language, operation mode, etc.).
+No user-profile (nDB) storage for service URLs. The user profile keeps everything else (temperature, presets, name, language, etc.).
 
 The browser talks directly to each service. No backend proxy. Each service must be reachable from the browser's network and have CORS configured if cross-origin.
 
@@ -76,18 +76,16 @@ If empty, the app shows the gateway config section with a placeholder (sourced f
 
 ```javascript
 client.restUrl = newUrl;
-client.wsUrl = newUrl.replace(/^http/, 'ws') + '/v1/realtime';
 ```
 
-  If a WebSocket is open, close it first (`client.socket?.close()`). The next request uses the new URL.
+  The next request uses the new URL. (SSE transport is connectionless — no socket to close.)
 
 - "Connect" button handler:
   1. Read the input value
   2. Save to `localStorage.setItem('gateway-url', value)`
-  3. Mutate `client.restUrl` and `client.wsUrl` in place
-  4. If WebSocket open, close it
-  5. Call `loadModels()` — updates model select (success or "Failed to load models")
-  6. Call `checkGatewayStatus()` — updates the status dot in the config tab
+  3. Mutate `client.restUrl` in place
+  4. Call `loadModels()` — updates model select (success or "Failed to load models")
+  5. Call `checkGatewayStatus()` — updates the status dot in the config tab
 
 - `checkGatewayStatus()` updates `#gateway-config-status` (config tab). The header indicator (`#gateway-status`) is removed from the DOM — one indicator, one update path.
 
@@ -285,7 +283,7 @@ Mirror the chat changes in the arena — gateway URL and TTS endpoint both need 
 
 1. **CORS on upstream services.** Each service (gateway, TTS, MCP) must allow the chat backend's origin when accessed cross-origin. The gateway is already exposed. TTS and MCP may need CORS headers added if they don't have them.
 2. **Mixed content.** If the chat backend is served over HTTPS but an upstream service is HTTP, the browser will block the request. Users must configure HTTPS on upstream services or access the chat backend via HTTP.
-3. **WebSocket open during URL change.** If a WebSocket connection is open when the user clicks Connect, close it first (`client.socket?.close()`). The next request uses the new URL. No state migration needed since we mutate `restUrl`/`wsUrl` in place rather than recreating the client.
+3. **In-flight stream during URL change.** SSE transport is connectionless — mutating `client.restUrl` takes effect on the next request. No socket to close, no state migration needed.
 
 ---
 

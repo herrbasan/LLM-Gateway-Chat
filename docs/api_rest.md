@@ -789,7 +789,7 @@ data: {"ticket":"tkt_abc123","status":"complete"}
 
 ### Thinking Control
 
-Control whether models produce verbose reasoning/thinking output. Works per-request from both REST and WebSocket endpoints. All sources resolve to a single normalized `enable_thinking` field before reaching adapters.
+Control whether models produce verbose reasoning/thinking output. Works per-request from the REST endpoint. All sources resolve to a single normalized `enable_thinking` field before reaching adapters.
 
 **Resolution priority** (highest wins):
 1. Request-level `enable_thinking`

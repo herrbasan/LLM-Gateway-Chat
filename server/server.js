@@ -1343,7 +1343,6 @@ const routes = {
         settings: {
             location: 'Germany',
             language: 'English',
-            operationMode: 'sse',
             defaultTemperature: 0.7,
             defaultModel: '',
             defaultMaxTokens: null,
@@ -2126,7 +2125,6 @@ const server = http.createServer(async (req, res) => {
       defaultModel: process.env.UI_DEFAULT_MODEL || '',
       defaultTemperature: parseFloat(process.env.UI_DEFAULT_TEMP || 0.7),
       defaultMaxTokens: process.env.UI_DEFAULT_TOKENS ? parseInt(process.env.UI_DEFAULT_TOKENS) : null,
-      operationMode: process.env.UI_OPERATION_MODE || 'sse',
       ttsEndpoint: process.env.TTS_ENDPOINT || 'http://localhost:2233',
       ttsVoice: process.env.TTS_VOICE || '',
       ttsSpeed: parseFloat(process.env.TTS_SPEED || 1.0),

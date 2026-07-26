@@ -98,7 +98,7 @@ Navigate to `http://localhost:8080/chat/`
 
 ## Key Features
 
-- **Direct Gateway Integration:** SSE streaming (default) or WebSocket via JSON-RPC 2.0
+- **Direct Gateway Integration:** SSE streaming (Server-Sent Events over REST)
 - **Multi-User Auth:** Cookie-based login with per-user database isolation (nDB + nVDB)
 - **Semantic Search:** Chat archive searchable via nVDB + Qwen3-Embedding-4B vectors with real-time embed status monitoring (SSE)
 - **Embed Status Monitoring:** Per-message colored dots (pending → embedded → failed) pushed via SSE in real-time — no polling, no reloads

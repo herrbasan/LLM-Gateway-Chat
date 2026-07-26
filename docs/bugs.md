@@ -54,7 +54,7 @@ Status: Open — `updatedAt` is updated in backend and in `chatHistory.save()`, 
 ## Operation mode setting doesn't save
 the "operation mode" select does not save the setting to the database. On reload it always defaults to "SSE Rest"
 
-Status: Resolved — Changed event listener from `change` on inner `<select>` to `nui-change` on `<nui-select>` component. Fixed setting initial value on reload to use `.setValue(opMode)`.
+Status: Closed (obsolete) — The operation-mode select was removed when the WebSocket transport was retired. SSE is now the only transport. See `client-sdk.js`.
 
 ## LLM Gateway Issues (external project)
 

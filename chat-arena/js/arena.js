@@ -68,7 +68,8 @@ class Participant {
     }
 
     async connect() {
-        await this.client.connect();
+        // SSE transport is connectionless — no handshake required.
+        // Method retained as a no-op so Arena.start() orchestration is unchanged.
     }
 
     async respond(conversationHistory) {
@@ -106,96 +107,74 @@ class Participant {
             if (this.reasoningEffort) {
                 params.reasoning_effort = this.reasoningEffort;
             }
-            const stream = this.client.chatStream(params);
 
             let hasReceivedDelta = false;
+            let donePayload = null;
 
-            stream.on('delta', (data) => {
-                if (!hasReceivedDelta) {
-                    hasReceivedDelta = true;
-                    this._firstDeltaTime = Date.now();
-                    if (this.onProgress) this.onProgress('generating', { speaker: this.name });
+            for await (const evt of this.client.streamChatIterable(params)) {
+                if (evt.type === 'delta') {
+                    if (!hasReceivedDelta) {
+                        hasReceivedDelta = true;
+                        this._firstDeltaTime = Date.now();
+                        if (this.onProgress) this.onProgress('generating', { speaker: this.name });
+                    }
+                    if (evt.content != null && typeof evt.content === 'string') {
+                        this.responseAccumulator += evt.content;
+                    }
+                    if (evt.reasoning_content !== undefined) {
+                        this.reasoningAccumulator += evt.reasoning_content || '';
+                    }
+                } else if (evt.type === 'progress') {
+                    const data = evt.data;
+                    console.log(`[Arena] Conversation progress [${this.name}]:`, data);
+                    if (data?.phase && this.onProgress) {
+                        this.onProgress(data.phase, data);
+                    }
+                } else if (evt.type === 'done') {
+                    donePayload = evt;
+                    break;
+                } else if (evt.type === 'error') {
+                    throw new Error(evt.error || 'Stream error');
                 }
+            }
 
-                const delta = data?.choices?.[0]?.delta;
-                const content = delta?.content;
-                if (content != null && typeof content === 'string') {
-                    this.responseAccumulator += content;
-                }
-                if (delta?.reasoning_content !== undefined) {
-                    this.reasoningAccumulator += delta.reasoning_content || '';
-                }
-            });
+            this.isStreaming = false;
 
-            stream.on('progress', (data) => {
-                // Log full progress data for analysis
-                console.log(`[Arena] Conversation progress [${this.name}]:`, data);
-                
-                // Some models send content via progress event
-                const content = data?.choices?.[0]?.delta?.content || data?.content;
-                if (content != null && typeof content === 'string') {
-                    this.responseAccumulator += content;
-                }
-                
-                // Forward progress phase to callback (routing, model_routed, context_stats, etc.)
-                if (data?.phase && this.onProgress) {
-                    this.onProgress(data.phase, data);
-                }
-            });
+            let content = this.responseAccumulator;
+            if (!content && donePayload?.content) {
+                content = donePayload.content;
+            }
 
-            stream.on('done', (data) => {
-                this.isStreaming = false;
+            let reasoning_content = this.reasoningAccumulator;
+            if (!reasoning_content && donePayload?.reasoning_content) {
+                reasoning_content = donePayload.reasoning_content;
+            }
 
-                let content = this.responseAccumulator;
-                if (!content && data?.content) {
-                    content = data.content;
-                }
+            const thinking_signature = donePayload?.thinking_signature ?? this.thinkingSignature ?? null;
 
-                let reasoning_content = this.reasoningAccumulator;
-                if (!reasoning_content && data?.reasoning_content) {
-                    reasoning_content = data.reasoning_content;
-                } else if (!reasoning_content && data?.choices?.[0]?.delta?.reasoning_content) {
-                    reasoning_content = data.choices[0].delta.reasoning_content;
-                }
+            const responseEndTime = Date.now();
+            const streamStats = {
+                ttft: this._firstDeltaTime && this._responseStartTime
+                    ? this._firstDeltaTime - this._responseStartTime
+                    : null,
+                durationSecs: this._responseStartTime
+                    ? (responseEndTime - this._responseStartTime) / 1000
+                    : null
+            };
 
-                const thinking_signature = data?._thinking_signature
-                    ?? data?.thinking_signature
-                    ?? data?.choices?.[0]?.delta?.thinking_signature
-                    ?? this.thinkingSignature
-                    ?? null;
-
-                const responseEndTime = Date.now();
-                const streamStats = {
-                    ttft: this._firstDeltaTime && this._responseStartTime
-                        ? this._firstDeltaTime - this._responseStartTime
-                        : null,
-                    durationSecs: this._responseStartTime
-                        ? (responseEndTime - this._responseStartTime) / 1000
-                        : null
-                };
-
-                if (this._resolveResponse) {
-                    this._resolveResponse({
-                        content: content,
-                        usage: data?.telemetry?.usage ?? data?.usage ?? null,
-                        context: data?.context ?? null,
-                        reasoning_content: reasoning_content || null,
-                        thinking_signature: thinking_signature || null,
-                        streamStats
-                    });
-                }
-                this._cleanup();
-            });
-
-            stream.on('error', (err) => {
-                console.error('[Arena] Stream error for', this.modelName, ':', err.message);
-                this.isStreaming = false;
-                if (this._rejectResponse) {
-                    this._rejectResponse(err);
-                }
-                this._cleanup();
-            });
+            if (this._resolveResponse) {
+                this._resolveResponse({
+                    content: content,
+                    usage: donePayload?.usage ?? null,
+                    context: donePayload?.context ?? null,
+                    reasoning_content: reasoning_content || null,
+                    thinking_signature: thinking_signature || null,
+                    streamStats
+                });
+            }
+            this._cleanup();
         } catch (err) {
+            console.error('[Arena] Stream error for', this.modelName, ':', err.message);
             this.isStreaming = false;
             if (this._rejectResponse) {
                 this._rejectResponse(err);
@@ -292,7 +271,7 @@ class Participant {
 
     close() {
         this.cancel();
-        this.client.close();
+        // SSE transport is connectionless — no socket to close.
     }
 }
 
@@ -1117,71 +1096,67 @@ No markdown, no explanation, no text outside the JSON object.`
 
         if (onProgress) onProgress('summary', 'Generating summary...');
 
-        return new Promise((resolve, reject) => {
-            const stream = client.chatStream({
-                model: modelToUse,
-                messages,
-                stream: true,
-                maxTokens: 1000,
-                enable_thinking: false,
-                response_format: {
-                    type: 'json_schema',
-                    json_schema: summarySchema
-                }
-            });
+        let fullText = '';
+        let toolCallArguments = '';
+        let gotToolCall = false;
+        let donePayload = null;
 
-            let fullText = '';
-            let toolCallArguments = '';
-            let gotToolCall = false;
-
-            stream.on('progress', (data) => {
-                if (data?.phase && onProgress) onProgress('summary', `Generating summary: ${data.phase}`);
-            });
-
-            stream.on('delta', (data) => {
-                const delta = data?.choices?.[0]?.delta;
-                if (delta?.tool_calls) {
+        for await (const evt of client.streamChatIterable({
+            model: modelToUse,
+            messages,
+            stream: true,
+            maxTokens: 1000,
+            enable_thinking: false,
+            response_format: {
+                type: 'json_schema',
+                json_schema: summarySchema
+            }
+        })) {
+            if (evt.type === 'progress') {
+                if (evt.data?.phase && onProgress) onProgress('summary', `Generating summary: ${evt.data.phase}`);
+            } else if (evt.type === 'delta') {
+                if (evt.tool_calls) {
                     gotToolCall = true;
-                    for (const tc of delta.tool_calls) {
+                    for (const tc of evt.tool_calls) {
                         if (tc?.function?.arguments) {
                             toolCallArguments += tc.function.arguments;
                         }
                     }
                 }
-                if (delta?.content !== undefined) {
-                    fullText += delta.content;
+                if (evt.content !== undefined) {
+                    fullText += evt.content;
                 }
-            });
+            } else if (evt.type === 'done') {
+                donePayload = evt;
+                break;
+            } else if (evt.type === 'error') {
+                throw new Error(evt.error || 'Summary stream error');
+            }
+        }
 
-            stream.on('done', (data) => {
-                const raw = gotToolCall
-                    ? toolCallArguments
-                    : (data?.content ?? fullText);
+        const raw = gotToolCall
+            ? toolCallArguments
+            : (donePayload?.content ?? fullText);
 
-                let parsed = null;
-                let parseError = null;
-                try {
-                    const cleaned = String(raw).replace(/^```json\s*|\s*```$/gi, '').trim();
-                    parsed = JSON.parse(cleaned);
-                } catch (e) {
-                    parseError = e.message;
-                }
+        let parsed = null;
+        let parseError = null;
+        try {
+            const cleaned = String(raw).replace(/^```json\s*|\s*```$/gi, '').trim();
+            parsed = JSON.parse(cleaned);
+        } catch (e) {
+            parseError = e.message;
+        }
 
-                if (!parsed || typeof parsed.title !== 'string' || typeof parsed.teaser !== 'string' || typeof parsed.reflection !== 'string') {
-                    console.error('[Arena] Summary parse failed:', parseError, 'raw:', raw);
-                    reject(new Error('Summary response did not match expected format'));
-                    return;
-                }
+        if (!parsed || typeof parsed.title !== 'string' || typeof parsed.teaser !== 'string' || typeof parsed.reflection !== 'string') {
+            console.error('[Arena] Summary parse failed:', parseError, 'raw:', raw);
+            throw new Error('Summary response did not match expected format');
+        }
 
-                resolve({
-                    title: parsed.title || 'Untitled Conversation',
-                    teaser: parsed.teaser || '',
-                    reflection: parsed.reflection || ''
-                });
-            });
-
-            stream.on('error', reject);
-        });
+        return {
+            title: parsed.title || 'Untitled Conversation',
+            teaser: parsed.teaser || '',
+            reflection: parsed.reflection || ''
+        };
     }
 }
 
@@ -1485,8 +1460,8 @@ class ArenaUI {
             await this._initTts();
 
             // Set default topic
-            if (config.defaultTopic && this.topicInput) {
-                this.topicInput.value = config.defaultTopic;
+            if (window.ARENA_CONFIG?.defaultTopic && this.topicInput) {
+                this.topicInput.value = window.ARENA_CONFIG.defaultTopic;
             }
         } catch (err) {
             console.error('Failed to fetch models:', err);

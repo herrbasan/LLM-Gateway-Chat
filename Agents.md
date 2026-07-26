@@ -24,7 +24,7 @@ The server auto-restarts when files change.
 
 - **No Build Process**: Directly serve static HTML/JS/CSS files via the backend
 - **Zero Runtime Dependencies**: All vendor libraries are locally vendored
-- **Dual-Mode Transport**: SSE (default) or WebSocket via JSON-RPC 2.0 to gateway
+- **SSE Transport**: SSE (Server-Sent Events) over REST to gateway (WebSocket transport retired)
 - **Frontend-Driven Architecture**: MCP tool execution happens entirely in the browser
 - **AI-First Maintainability**: Code is optimized for LLM parsing, not human readability dogmas
 - **Own Backend**: Node.js server (port from `server/config.json`, default 8080) serves static files + REST API + search
@@ -41,7 +41,7 @@ The server auto-restarts when files change.
 | **Structured DB** | nDB (Rust-based JSON Lines document store) |
 | **Vector DB** | nVDB (Rust-based vector DB, exact search) |
 | **Embedding** | Gateway `/v1/embeddings` (Qwen3-Embedding-4B via OpenRouter, 2560d) |
-| **Communication** | SSE (default) or WebSocket (JSON-RPC 2.0) to gateway + REST to backend |
+| **Communication** | SSE (Server-Sent Events) to gateway + REST to backend |
 | **Logging** | nLogger (JSON Lines structured logger) |
 | **Markdown** | NUI's `nui-markdown` component (regex-based `markdownToHtml` parser with inline `nui-code` syntax highlighting for web languages) |
 
@@ -56,7 +56,7 @@ The server auto-restarts when files change.
 │   │   └── chat.css           # Application styles
 │   └── js/
 │       ├── chat.js            # Main controller (UI, event handling, archive tools)
-│       ├── client-sdk.js      # GatewayClient (WebSocket/REST SDK)
+│       ├── client-sdk.js      # GatewayClient (SSE/REST SDK)
 │       ├── api-client.js      # BackendClient (REST to Node backend)
 │       ├── storage.js         # localStorage/IndexedDB fallback
 │       ├── conversation.js    # Conversation state management
@@ -94,7 +94,7 @@ The server auto-restarts when files change.
 │   └── data/                  # nDB + nVDB database files (gitignored)
 ├── docs/                      # Documentation
 │   ├── api_rest.md            # Gateway REST API reference
-│   ├── api_websocket.md       # Gateway WebSocket/JSON-RPC protocol
+│   ├── api_rest.md            # Gateway REST API reference
 │   ├── bugs.md                # Known bugs and their status
 │   ├── features_backlog.md    # Feature backlog (completed + pending)
 │   ├── plan-preview-pane.md   # Chat preview pane feature plan
@@ -207,7 +207,7 @@ The server auto-restarts when files change (nodemon or similar). The share is at
 | Module | Purpose |
 |--------|---------|
 | `chat.js` | UI controller, event handlers, message rendering, streaming logic, archive tools, login, presets, admin UI, embed status monitoring via SSE |
-| `client-sdk.js` | `GatewayClient` class - dual-mode (SSE + WebSocket) transport, JSON-RPC 2.0, auto-reconnect, stream registry |
+| `client-sdk.js` | `GatewayClient` class - SSE transport over REST, async-iterator streaming, stream registry, per-chat abort |
 | `api-client.js` | `BackendClient` class - REST calls to Node backend (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`, `/api/user/settings`) |
 | `conversation.js` | `Conversation` class - message history, versioning, API message formatting, backend sync, `thinking_signature` propagation |
 | `chat-history.js` | `ChatHistory` class - multi-conversation management, backend CRUD, localStorage fallback |
@@ -271,7 +271,7 @@ Key variables:
 | Sessions | nDB | `_type: 'session'`, `id: chat_xxx` |
 | Conversation messages | nDB | `_type: 'conversation'`, `id: chat_xxx`, inline `messages` array, each with `embedStatus` (`pending`/`embedded`/`failed`) |
 | Embedding vectors | nVDB | `chatId` + `msgIdx` payload, keyed by message ID |
-| User settings | nDB | `_type: 'user_settings'`, `id: {userId}` — operationMode, temperature, language, presets, etc. |
+| User settings | nDB | `_type: 'user_settings'`, `id: {userId}` — temperature, language, presets, etc. |
 | User auth | nDB (`users_db`) | `_type: 'user'` — username, passwordHash, dbPath, rights, userToken |
 | Conversation history (fallback) | localStorage | `chat-conversation-${chatId}` |
 | Chat list metadata (fallback) | localStorage | `chat-history-index` |
@@ -380,26 +380,18 @@ export const singleton = new MyClass();
 
 ```javascript
 const client = new GatewayClient({
-    baseUrl: 'http://localhost:3400',
-    operationMode: 'sse'  // 'sse' (default) or 'websocket'
+    baseUrl: 'http://localhost:3400'
 });
 
 // REST methods
 const models = await client.getModels();
 const health = await client.getHealth();
 
-// WebSocket streaming
-const stream = client.chatStream({
+// SSE streaming via async iterator
+for await (const event of client.streamChatIterable({
     model: 'gemini-flash',
     messages: [{role: 'user', content: 'Hello'}]
-});
-
-stream.on('delta', (data) => console.log(data.choices[0].delta.content));
-stream.on('done', (data) => console.log('Complete'));
-stream.on('error', (err) => console.error(err));
-
-// Modern async iterator (recommended)
-for await (const event of client.streamChatIterable(params)) {
+})) {
     // event.type: 'delta' | 'progress' | 'done' | 'error' | 'aborted'
     // event.content (for delta)
     // event.data (for progress)
@@ -488,7 +480,7 @@ There are no other vendored dependencies to update.
 If a feature requires backend changes, point them out explicitly:
 
 - New API endpoints
-- Additional WebSocket methods
+- Additional REST methods
 - Modified response formats
 - New capabilities in model definitions
 
@@ -581,7 +573,7 @@ Before submitting changes:
 ## Documentation References
 
 - `docs/api_rest.md` - REST API specification
-- `docs/api_websocket.md` - WebSocket/JSON-RPC protocol
+- `docs/api_rest.md` - REST API specification
 - `docs/_Archive/MCP_TOOL_INTEGRATION.md` - Frontend MCP architecture (archived)
 - `docs/plan-preview-pane.md` - Chat preview pane feature plan (current)
 - `nui_wc2/docs/playground-component-quickstart.md` - NUI component usage

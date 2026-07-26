@@ -36,7 +36,7 @@
 
 ## Network & Connection
 - [x] **Streaming Crash Self-Healing**: Properly intercept backend or API aborts (e.g., HTTP 400) mid-stream and auto-inject the raw system error into the completion array.
-- [x] **SSE Operation Mode**: SSE is the **default** mode (`'sse'` in server-generated config.js). Full SSE streaming path implemented in `client-sdk.js` (`_streamChatIterableSSE`). WebSocket is also available.
+- [x] **SSE Transport**: SSE is the **only** transport (`_streamChatIterableSSE` in `client-sdk.js`). WebSocket transport was removed after the gateway retired `/v1/realtime`.
 
 ## Rich Media & Binary Support
 - [ ] **Automatic Thumbnail Generation for Unsupported Image Formats**: Use the nMedia service to generate thumbnails for image formats not natively supported by browsers (e.g., HEIC, TIFF, RAW). Thumbnails render inline while the original file is available for download.
