@@ -1381,6 +1381,21 @@ async function init() {
             document.getElementById('login-dialog').showModal();
         });
 
+        // Backend-offline alarm. The gateway can keep streaming while the
+        // backend (persistence) is dead, so this is the ONLY signal that
+        // messages have stopped being saved. Loud + persistent while offline;
+        // on recovery, drain the local crash-net back to the backend.
+        backendClient.onOfflineChange((offline) => {
+            const banner = document.getElementById('backend-offline-banner');
+            if (banner) banner.dataset.visible = offline ? 'true' : 'false';
+            if (!offline) {
+                // Backend recovered — flush any crash-netted messages.
+                for (const conv of activeConversations.values()) {
+                    conv.drainCrashNet?.().catch(() => {});
+                }
+            }
+        });
+
         const loginForm = document.getElementById('login-form');
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();

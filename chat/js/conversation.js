@@ -17,6 +17,98 @@ export class Conversation {
         this._pendingBackendSync = new Map();
     }
 
+    // ---- Offline crash-net (localStorage) ----
+    // When the backend is unreachable, _syncMessage's catch appends the failed
+    // message here so a reload doesn't lose it. This is NOT the old dual-storage
+    // (removed because it caused render divergence) — it's a write-through,
+    // backend-first queue that ONLY fills when the backend write fails, and
+    // drains back to the backend on reconnect. The backend conversation doc
+    // remains the source of truth.
+    _crashNetKey() {
+        return `chat-crashnet-${this.sessionId}`;
+    }
+
+    _crashNetRead() {
+        try {
+            return JSON.parse(localStorage.getItem(this._crashNetKey()) || '[]');
+        } catch { return []; }
+    }
+
+    _crashNetAppend(entry) {
+        try {
+            const q = this._crashNetRead();
+            q.push(entry);
+            localStorage.setItem(this._crashNetKey(), JSON.stringify(q));
+        } catch (e) {
+            // localStorage full or unavailable — nothing more we can do. The
+            // banner already told the user to export.
+            console.error('[Conversation] Crash-net write failed (localStorage):', e);
+        }
+    }
+
+    _crashNetClear() {
+        try { localStorage.removeItem(this._crashNetKey()); } catch {}
+    }
+
+    // Re-send any crash-netted messages to the backend, in order. Called on
+    // reconnect and at the start of load(). Each message that sends successfully
+    // is dropped from the queue; the first failure stops the drain (keeps order,
+    // retries next reconnect).
+    //
+    // Dedupe: the backend always assigns a fresh message id and appends
+    // unconditionally (it ignores client-supplied ids), so a message that
+    // actually SENT but whose response was lost (e.g. connection dropped after
+    // the write) would duplicate on drain. Guard: fetch the backend's current
+    // messages and skip any crash-net entry whose (role, content) already
+    // exists there. Content+role is a strong-enough fingerprint for this —
+    // identical consecutive messages from the same role are vanishingly rare.
+    async drainCrashNet() {
+        if (!_USE_BACKEND || !backendClient.user || !this.sessionId) return 0;
+        const queue = this._crashNetRead();
+        if (queue.length === 0) return 0;
+
+        // Snapshot what's already on the backend so we don't duplicate it.
+        let existing = new Set();
+        try {
+            const data = await backendClient.getSession(this.sessionId);
+            for (const m of (data?.messages || [])) {
+                existing.add(`${m.role}${m.content || ''}`);
+            }
+        } catch (err) {
+            // Can't verify backend state (still down) — don't drain blind.
+            return 0;
+        }
+
+        let sent = 0;
+        const remaining = [];
+        let stopped = false;
+        for (let i = 0; i < queue.length; i++) {
+            const entry = queue[i];
+            if (stopped) { remaining.push(entry); continue; }
+            // Skip messages that already made it to the backend (response lost).
+            if (existing.has(`${entry.role}${entry.content || ''}`)) continue;
+            try {
+                const body = { role: entry.role, content: entry.content, model: entry.model };
+                if (entry.metadata) Object.assign(body, entry.metadata);
+                await backendClient.sendMessage(this.sessionId, body);
+                sent++;
+            } catch (err) {
+                // Backend still down (or this message is bad) — keep it and the rest.
+                remaining.push(entry, ...queue.slice(i + 1));
+                stopped = true;
+            }
+        }
+        if (remaining.length > 0) {
+            try { localStorage.setItem(this._crashNetKey(), JSON.stringify(remaining)); } catch {}
+        } else {
+            this._crashNetClear();
+        }
+        if (sent > 0) {
+            console.log(`[Conversation] Crash-net drained ${sent} message(s) to backend for ${this.sessionId}`);
+        }
+        return sent;
+    }
+
     _extractId() {
         return this.storageKey.replace('chat-conversation-', '');
     }
@@ -65,6 +157,11 @@ export class Conversation {
             .catch(err => {
                 console.warn('[Conversation] Backend sync failed:', err.message, 'sessionId:', this.sessionId);
                 if (exchangeId) this._pendingBackendSync.set(exchangeId, { role, content, model });
+                // Write-through to the localStorage crash-net so the message
+                // survives a page reload while the backend is down. Drained back
+                // via drainCrashNet() when the backend recovers. This is the
+                // data-loss fix for the backend-down incident (2026-07-29).
+                this._crashNetAppend({ role, content, model, metadata: metadata || null, ts: Date.now() });
             });
     }
 
@@ -845,6 +942,13 @@ export class Conversation {
     }
 
     async load() {
+        // Drain the crash-net FIRST, before pulling from the backend. Messages
+        // crash-netted during a prior outage are re-sent to the backend here, so
+        // the getSession() below picks them up in the same pass and they appear
+        // in this.exchanges immediately. Draining after load would leave the
+        // in-memory view stale until a reload. No-op when empty or backend down.
+        await this.drainCrashNet().catch(() => {});
+
         try {
             const conversationId = this.storageKey.replace('chat-conversation-', '');
             let loadedFromBackend = false;

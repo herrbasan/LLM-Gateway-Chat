@@ -19,6 +19,43 @@ button, input, textarea, select, a {
     --chat-bubble-radius: var(--border-radius2);
 }
 
+/* Backend-offline alarm — fixed at top of the content area, impossible to miss.
+   Hidden by default; chat.js toggles [data-visible]. Uses the error color so it
+   reads as an alarm, not a notification. Non-dismissible while offline. */
+#backend-offline-banner {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9000;
+    align-items: center;
+    gap: 0.6rem;
+    max-width: min(56rem, 92vw);
+    margin-top: 0.5rem;
+    padding: 0.65rem 1rem;
+    background: var(--color-error, #d32f2f);
+    color: #fff;
+    border-radius: var(--border-radius2, 0.5rem);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    font-size: 0.9rem;
+    line-height: 1.35;
+}
+#backend-offline-banner[data-visible="true"] {
+    display: flex;
+    animation: backend-offline-pulse 2s ease-in-out infinite;
+}
+#backend-offline-banner nui-icon {
+    flex: none;
+}
+#backend-offline-banner .banner-text strong {
+    font-weight: 700;
+}
+@keyframes backend-offline-pulse {
+    0%, 100% { box-shadow: 0 6px 24px rgba(211, 47, 47, 0.55); }
+    50% { box-shadow: 0 6px 32px rgba(211, 47, 47, 0.95); }
+}
+
 /* Layout */
 
 nui-main, nui-app[data-layout="app"] nui-content>nui-main {

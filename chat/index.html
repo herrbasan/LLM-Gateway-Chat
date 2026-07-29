@@ -57,6 +57,20 @@
             </div>
         </nui-app-header>
 
+        <!-- Backend-offline alarm: fixed, loud, non-dismissible while offline.
+             Shown by chat.js when backendClient reports a network failure.
+             The gateway may keep streaming, so this is the ONLY signal that
+             persistence has stopped. Kept out of the normal flow so it can't
+             be missed and doesn't shift layout when it appears. -->
+        <div id="backend-offline-banner" role="alert" aria-live="assertive">
+            <nui-icon name="warning"></nui-icon>
+            <span class="banner-text">
+                <strong>Backend offline — messages are NOT being saved to the server.</strong>
+                The chat still works (streaming is unaffected) and messages are kept locally,
+                but <strong>export your conversation now</strong> to be safe.
+            </span>
+        </div>
+
         <nui-sidebar>
             <div class="sidebar-layout">
                 <div class="sidebar-action-area">
