@@ -1905,6 +1905,12 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     display: none;
 }
 
+.tool-error-hint {
+    color: var(--color-shade5);
+    font-style: normal;
+    font-size: 0.85em;
+}
+
 /* ============================================
    Vision Toggle Styles
    ============================================ */

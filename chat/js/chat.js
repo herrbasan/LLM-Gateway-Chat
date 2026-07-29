@@ -1148,6 +1148,11 @@ function buildExchangeElement(exchange) {
         if (isSuccess) resultHtml = `<strong>Result:</strong><br>${exchange.tool.content}`;
         else if (isError) resultHtml = `<strong>Error:</strong> ${exchange.tool.content}`;
 
+        // Compact error summary for the collapsed bubble (full text is in the payload)
+        const errorSummaryHtml = isError
+            ? `<span class="tool-error-text"></span> <span class="tool-error-hint">— click for details</span>`
+            : '';
+
         toolEl.innerHTML = `
             <div class="tool-bubble">
                 <div class="message-header tool-header">
@@ -1156,7 +1161,7 @@ function buildExchangeElement(exchange) {
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
                     <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
-                <div class="tool-notifications"></div>
+                <div class="tool-notifications" style="display: ${isError ? 'block' : 'none'};">${errorSummaryHtml}</div>
                 <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
                 <div class="message-content tool-payload" style="display: none;">
                     <div class="tool-section-title">Arguments</div>
@@ -1166,6 +1171,7 @@ function buildExchangeElement(exchange) {
                 </div>
             </div>
         `;
+        if (isError) toolEl.querySelector('.tool-notifications .tool-error-text').textContent = toolErrorSummary(exchange.tool.content);
 
         _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
 
@@ -3787,6 +3793,10 @@ function renderExchange(exchange, targetContainer = null) {
         if (isSuccess) resultHtml = exchange.tool.content;
         else if (isError) resultHtml = exchange.tool.content;
 
+        const errorSummaryHtml2 = isError
+            ? `<span class="tool-error-text"></span> <span class="tool-error-hint">— click for details</span>`
+            : '';
+
         toolEl.innerHTML = `
             <div class="tool-bubble">
                 <div class="message-header tool-header">
@@ -3795,8 +3805,7 @@ function renderExchange(exchange, targetContainer = null) {
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
                     <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
-                <div class="tool-notifications">
-                  </div>
+                <div class="tool-notifications" style="display: ${isError ? 'block' : 'none'};">${errorSummaryHtml2}</div>
                   <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
                 <div class="message-content tool-payload" style="display: none;">
                     <div class="tool-section-title">Arguments</div>
@@ -3807,6 +3816,7 @@ function renderExchange(exchange, targetContainer = null) {
             </div>
         `;
         if (container) _vsAppendMessage(container, toolEl);
+        if (isError) toolEl.querySelector('.tool-notifications .tool-error-text').textContent = toolErrorSummary(exchange.tool.content);
 
         _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
 
@@ -4367,15 +4377,21 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
 
         toolEl.querySelector('.tool-status').setAttribute('variant', 'danger');
           toolEl.querySelector('.tool-status').innerHTML = 'Failed';
-          toolEl.querySelector('.tool-notifications').style.display = 'none';
+        // Compact one-line summary in the always-visible notifications row —
+        // the full diagnostic stays inside the collapsed payload. Previously the
+        // payload was force-expanded, dumping multi-hundred-line diagnostic JSON
+        // (browser_fetch) into the scrollback and breaking the history visually.
+        const notifEl2 = toolEl.querySelector('.tool-notifications');
+        notifEl2.style.display = 'block';
+        notifEl2.innerHTML = '<span class="tool-error-text"></span> <span class="tool-error-hint">— click for details</span>';
+        notifEl2.querySelector('.tool-error-text').textContent = toolErrorSummary(exchange.tool.content);
         toolEl.querySelector('.tool-result').innerHTML = '<span class="tool-error"></span>' +
             '<div class="tool-error-actions">' +
                 '<nui-button size="small" class="retry-tool"><button>Retry</button></nui-button>' +
                 '<nui-button size="small" class="dismiss-tool"><button>Dismiss & Continue</button></nui-button>' +
             '</div>';
         toolEl.querySelector('.tool-result .tool-error').textContent = exchange.tool.content;
-        toolEl.querySelector('.tool-payload').style.display = 'block';
-        // WI-2: height change detected by the frame loop (container click listener wakes it).
+        // Payload stays collapsed — user clicks the header to expand if needed.
 
         toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
             toolEl.querySelector('.tool-result').innerHTML = '';
@@ -6323,6 +6339,18 @@ function sanitizeForDisplay(value) {
 function jsonStringifyForDisplay(obj, space = 2) {
     const sanitized = sanitizeForDisplay(obj);
     return JSON.stringify(sanitized, null, space);
+}
+
+// Compact one-line summary of a tool error for the collapsed bubble header.
+// Tool error content (esp. browser_fetch) can embed hundreds of lines of
+// diagnostic JSON meant for the MODEL, not the screen. The full text stays in
+// the collapsed payload and in the message sent to the model — only the UI
+// surface is compacted. First line, truncated, with a "details" hint.
+function toolErrorSummary(content) {
+    if (typeof content !== 'string' || content.length === 0) return 'Tool failed';
+    const firstLine = content.split('\n')[0].trim();
+    const MAX = 160;
+    return firstLine.length > MAX ? firstLine.substring(0, MAX) + '…' : firstLine;
 }
 
 function scrollToBottom() {
