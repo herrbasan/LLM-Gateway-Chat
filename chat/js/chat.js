@@ -1144,9 +1144,13 @@ function buildExchangeElement(exchange) {
             imagesHtml += `</div>`;
         }
 
+        // Interpolate content as escaped text, not raw HTML — tool content can
+        // contain arbitrary markup (code examples, SVG, model output), and raw
+        // interpolation would parse it as live HTML on history rebuild.
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         let resultHtml = '';
-        if (isSuccess) resultHtml = `<strong>Result:</strong><br>${exchange.tool.content}`;
-        else if (isError) resultHtml = `<strong>Error:</strong> ${exchange.tool.content}`;
+        if (isSuccess) resultHtml = `<strong>Result:</strong><br>${esc(exchange.tool.content)}`;
+        else if (isError) resultHtml = `<strong>Error:</strong> ${esc(exchange.tool.content)}`;
 
         // Compact error summary for the collapsed bubble (full text is in the payload)
         const errorSummaryHtml = isError
@@ -3117,6 +3121,14 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     } finally {
         markChatAsStreaming(chatId, false);
         updateSendButton();
+        // Re-sort the sidebar: this stream's chat just became the most-recently-
+        // updated. The server owns authoritative updatedAt (bumped on every
+        // POST /messages), but the local copy is only refreshed on page load —
+        // so stamp it locally and re-render, otherwise the chat stays buried
+        // until reload. Cheap DOM rebuild, safe for background streams too.
+        const streamChatMeta = chatHistory.get(chatId);
+        if (streamChatMeta) streamChatMeta.updatedAt = Date.now();
+        renderHistoryList();
         // Only clear currentExchangeId if this stream belongs to the foreground chat.
         // Background streams completing should not interfere with the active chat's state.
         if (chatId === currentChatId) {
