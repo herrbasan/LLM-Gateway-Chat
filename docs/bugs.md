@@ -49,7 +49,7 @@ Status: Resolved — Works as side effect of the image attachment pipeline fix.
 
 The default sorting of chats are currently by "last updated", which is correct. But when I pick up an old chat, it should be sorted up in the UI immediately, once a message is added, making it the most recently updated chat. Currently, the chat session is only sorted when I reload the page.
 
-Status: Open — `updatedAt` is updated in backend and in `chatHistory.save()`, but `renderHistoryList()` is never called after a message is sent/stream completes, so the sidebar doesn't re-sort until page reload. Fix: call `renderHistoryList()` in `streamResponse()` after `setAssistantComplete()` and/or in `sendMessage()` after `chatHistory.save()`. (Audited 2026-05-30: confirmed still open.)
+Status: Resolved (2026-07-29, commit 9c27f7b) — `streamResponse`'s `finally` block now stamps the local `updatedAt` and calls `renderHistoryList()` on every terminal path (done/error/aborted). Root cause was twofold: `renderHistoryList()` was never called after a stream, AND the local `updatedAt` was stale (only refreshed from the server on page load — `chatHistory.save()` is never invoked from chat.js, and `Conversation.save()` is a no-op stub). Re-sorts on completion rather than send to avoid reshuffling the sidebar mid-stream.
 
 ## Operation mode setting doesn't save
 the "operation mode" select does not save the setting to the database. On reload it always defaults to "SSE Rest"
