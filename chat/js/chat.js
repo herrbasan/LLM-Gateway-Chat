@@ -2952,6 +2952,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     
                 case 'error':
                     console.error('[Chat] Received error event:', event.error);
+                    // Remove any pending tool placeholder — the stream died before
+                    // handleToolExecution could run, so its placeholder would
+                    // otherwise stay on screen forever.
+                    const errToolContainer = getOrCreateContainer(chatId);
+                    errToolContainer?.querySelector(`.pending-tool-element[data-pending-exchange-id="${exchangeId}"]`)?.remove();
                     // Reconstruct full content with timestamp for proper stripping
                     const errorTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
                     const errorFullContent = errorTsMatch ? errorTsMatch[0] + contentBuffer : contentBuffer;
@@ -2959,8 +2964,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     showError(assistantEl, event.error);
                     streamConv.setAssistantError(exchangeId, event.error);
                     break;
-                    
+
                 case 'aborted':
+                    // Same pending-tool cleanup as the error case.
+                    const abortToolContainer = getOrCreateContainer(chatId);
+                    abortToolContainer?.querySelector(`.pending-tool-element[data-pending-exchange-id="${exchangeId}"]`)?.remove();
                     // Reconstruct full content with timestamp for proper stripping
                     const abortTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
                     const abortFullContent = abortTsMatch ? abortTsMatch[0] + contentBuffer : contentBuffer;

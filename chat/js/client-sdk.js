@@ -173,15 +173,47 @@ export class GatewayClient extends EventEmitter {
           
           if (tLine.startsWith('data:')) {
             const dataStr = tLine.substring(5).trim();
-            if (dataStr === '[DONE]') continue;
-            
+            if (dataStr === '[DONE]') {
+              // Terminal sentinel: always yield done so the UI tears down the
+              // pending bubble even when no finish_reason chunk ever arrived
+              // (e.g. upstream hung mid-stream and the gateway emitted only an
+              // in-band error chunk). Duplicate done events are harmless — the
+              // consumer finalizes idempotently.
+              yield {
+                type: 'done',
+                finish_reason: 'stop',
+                usage: null,
+                context: null,
+                tool_calls: Object.keys(aggregatedToolCalls).length > 0 ? Object.values(aggregatedToolCalls) : null,
+                content: null,
+                reasoning_content: reasoningContent || null,
+                thinking_signature: thinkingSignature
+              };
+              continue;
+            }
+
             let dataObj;
             try {
               dataObj = JSON.parse(dataStr);
             } catch (e) { continue; }
-            
+
             // Standard token/chunk event (starts without 'event:' or event: message)
             if (!currentEventName || currentEventName === 'message') {
+              // In-band error chunk (no choices): the gateway emits this when the
+              // stream fails after headers were flushed. Surface it as an error
+              // event instead of silently dropping it — otherwise the UI never
+              // learns the request failed and the pending bubble hangs forever.
+              if (dataObj?.error) {
+                const e = dataObj.error;
+                yield {
+                  type: 'error',
+                  error: e.message || JSON.stringify(e),
+                  code: e.code || null,
+                  model: e.model || null
+                };
+                continue;
+              }
+
               const delta = dataObj?.choices?.[0]?.delta;
               if (delta?.content !== undefined) {
                 yield { type: 'delta', content: delta.content || '' };
