@@ -2938,12 +2938,12 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                         const now = performance.now();
                         const delay = Math.max(0, Math.min(RENDER_INTERVAL, RENDER_INTERVAL - (now - lastRender)));
 
-                        const wasNearBottom = isNearBottom();
+                        const wasNearBottom = isNearBottom(100, targetContainer);
                         setTimeout(() => {
                             updateAssistantContent(assistantEl, contentBuffer, reasoningBuffer);
                             lastRender = performance.now();
                             pendingUpdate = false;
-                            if (wasNearBottom) scrollToBottom();
+                            if (wasNearBottom) scrollToBottom(targetContainer);
                         }, delay);
                     }
                     break;
@@ -3086,7 +3086,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     forceFinalizeMarkdownStream(assistantEl, finalContent, reasoningBuffer);
                     setEmbedStatus(exchangeId, 'pending');
                     connectEmbedEvents(chatId);
-                    scrollToBottom();
+                    scrollToBottom(targetContainer);
                     break;
                 case 'progress':
                     if (event.data?.phase === 'context_stats') {
@@ -3108,7 +3108,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                             }
                         }
                     }
-                    if (isNearBottom()) scrollToBottom();
+                    if (isNearBottom(100, targetContainer)) scrollToBottom(targetContainer);
                     break;
             }
         }
@@ -6365,18 +6365,22 @@ function toolErrorSummary(content) {
     return firstLine.length > MAX ? firstLine.substring(0, MAX) + '…' : firstLine;
 }
 
-function scrollToBottom() {
-    const container = getActiveContainer();
-    if (container) {
-        container.scrollTop = container.scrollHeight;
-        _vsUpdateVisible(container);
+function scrollToBottom(container = null) {
+    // Default to the visible chat; pass an explicit container for background
+    // streams so they scroll their own (hidden) container instead of the
+    // foreground chat's. Hidden containers accept scrollTop writes fine —
+    // scroll position persists and is honored when the chat becomes visible.
+    const target = container || getActiveContainer();
+    if (target) {
+        target.scrollTop = target.scrollHeight;
+        _vsUpdateVisible(target);
     }
 }
 
-function isNearBottom(threshold = 100) {
-    const container = getActiveContainer();
-    if (!container) return true;
-    const { scrollTop, scrollHeight, clientHeight } = container;
+function isNearBottom(threshold = 100, container = null) {
+    const target = container || getActiveContainer();
+    if (!target) return true;
+    const { scrollTop, scrollHeight, clientHeight } = target;
     return scrollHeight - scrollTop - clientHeight < threshold;
 }
 
