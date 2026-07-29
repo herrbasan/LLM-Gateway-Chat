@@ -2963,6 +2963,9 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     updateAssistantContent(assistantEl, errorFullContent);
                     showError(assistantEl, event.error);
                     streamConv.setAssistantError(exchangeId, event.error);
+                    // Same force-finalize as the done path: drain the markdown stream
+                    // so the tail doesn't stay as raw markdown when the stream dies.
+                    forceFinalizeMarkdownStream(assistantEl, errorFullContent, reasoningBuffer);
                     break;
 
                 case 'aborted':
@@ -2972,9 +2975,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     // Reconstruct full content with timestamp for proper stripping
                     const abortTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
                     const abortFullContent = abortTsMatch ? abortTsMatch[0] + contentBuffer : contentBuffer;
-                    updateAssistantContent(assistantEl, stripExtraTimestamps(abortFullContent));
+                    const abortFinalContent = stripExtraTimestamps(abortFullContent);
+                    updateAssistantContent(assistantEl, abortFinalContent);
                     showError(assistantEl, 'Stopped');
                     streamConv.setAssistantError(exchangeId, 'Stopped');
+                    forceFinalizeMarkdownStream(assistantEl, abortFinalContent, reasoningBuffer);
                     break;
                     
                 case 'done':
@@ -3063,6 +3068,12 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                         streamStats: streamStats
                     });
                     finalizeAssistantElement(assistantEl, exchangeId, event.usage, event.context, streamStats);
+                    // Force-finalize the markdown stream: flips isStreaming, resets the
+                    // render dedup key, and re-renders complete content so endStream()
+                    // drains the trailing partial block. Without this, a debounced timer
+                    // racing the done event can leave the tail as raw markdown (the bug
+                    // is far more likely in a background tab where timers are throttled).
+                    forceFinalizeMarkdownStream(assistantEl, finalContent, reasoningBuffer);
                     setEmbedStatus(exchangeId, 'pending');
                     connectEmbedEvents(chatId);
                     scrollToBottom();
@@ -4785,6 +4796,24 @@ window.toggleThinking = function(id) {
         // listener wakes it). toggleThinking is now a pure CSS class toggle.
     }
 };
+
+// Force-finalize the nui-markdown streaming render on an assistant bubble.
+// Flips isStreaming to 'false' (idempotent — done path already did it via
+// finalizeAssistantElement, error/aborted paths never did), resets the render
+// dedup keys so the final updateAssistantContent call can't be skipped, then
+// re-renders complete content. The non-streaming branch runs endStream(),
+// draining the trailing partial block from _tempContainer into the stable DOM.
+// Closes the race where a debounced timer fires after the terminal event and
+// leaves the tail as raw markdown (far more likely in background tabs where
+// setTimeout is throttled to ≥1000ms).
+function forceFinalizeMarkdownStream(el, content, reasoningContent = null) {
+    const contentDiv = el.querySelector('.message-content');
+    if (!contentDiv) return;
+    el.dataset.isStreaming = 'false';
+    delete contentDiv.dataset.lastContent;
+    delete contentDiv.dataset.lastReasoning;
+    updateAssistantContent(el, content, reasoningContent);
+}
 
 function showCompactionIndicator(el, data) {
     const contentDiv = el.querySelector('.message-content');
