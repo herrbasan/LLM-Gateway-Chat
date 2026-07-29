@@ -1641,8 +1641,13 @@ const routes = {
 
       L().info('Message added', { sessionId: params.id, role: body.role, idx, contentLen: (body.content || '').length }, 'Message');
     
-    // Async embed (fire-and-forget)
-    embedMessageAsync(dbInstance, message, session, conv._id, idx);
+    // Async embed (fire-and-forget). MUST swallow the rejection: embedMessageAsync
+    // re-throws `lastError` after re-queueing a transient failure, and an
+    // unhandled rejection here is an uncaught exception that kills the process.
+    // The other two call sites (drain loop, reconciliation) already handle it.
+    embedMessageAsync(dbInstance, message, session, conv._id, idx).catch(err => {
+      L().warn('Fire-and-forget embed rejected (already re-queued)', { sessionId: params.id, idx, kind: err?.kind, error: err?.message }, 'Embed');
+    });
     
     json(res, message, 201, req);
   },
