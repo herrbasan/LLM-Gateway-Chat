@@ -22,6 +22,19 @@ function _logTool(message, meta = {}) {
     }
 }
 
+// Persistence hook for MCP request lifecycle endpoints (resolved/rejected/
+// timeout/zombie/orphan). Wired here because mcp-client.js has no backendClient
+// access; the client calls window._mcpTracePersist for terminal events only.
+window._mcpTracePersist = (entry) => {
+    _logTool(`MCP ${entry.event}`, {
+        requestId: entry.requestId,
+        tool: entry.tool,
+        server: entry.server,
+        elapsedMs: entry.elapsed,
+        error: entry.error || null
+    });
+};
+
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
 const GATEWAY_URL = localStorage.getItem('gateway-url') || '';

@@ -15,6 +15,70 @@ class MCPClient {
         this._reqCounter = 0; // monotonic suffix for unique request IDs
         // Resource state per server
         this._resources = new Map(); // serverId -> { resources: [], templates: [], initializedAt: number }
+        // Request lifecycle trace — the source of truth for diagnosing hangs
+        this._trace = [];
+        this._traceMax = 500;
+        this._traceCounters = new Map(); // event name -> count, for quick summary
+        if (typeof window !== 'undefined') {
+            window.__mcpTrace = this._trace;
+            window.mcpTraceDump = (filter) => this.dumpTrace(filter);
+            window.mcpTraceSummary = () => this.traceSummary();
+        }
+    }
+
+    /**
+     * Record one lifecycle event for a request. Never throws — tracing must
+     * never break the request path it observes.
+     */
+    _traceEvent(event, requestId, fields = {}) {
+        try {
+            const req = this.pendingRequests.get(requestId);
+            const entry = {
+                t: Date.now(),
+                event,
+                requestId,
+                tool: fields.tool || req?.toolName || null,
+                server: fields.server || req?.server?.name || null,
+                elapsed: req?.traceStart ? Date.now() - req.traceStart : null,
+                ...fields
+            };
+            this._trace.push(entry);
+            if (this._trace.length > this._traceMax) this._trace.splice(0, this._trace.length - this._traceMax);
+            this._traceCounters.set(event, (this._traceCounters.get(event) || 0) + 1);
+            console.log(`[MCP trace] ${event} ${requestId} ${entry.tool || ''} elapsed=${entry.elapsed ?? '-'}ms`);
+            // Persist lifecycle endpoints to the server log so they survive reloads
+            if (['resolved', 'rejected', 'timeout', 'zombie', 'orphan-response'].includes(event) && typeof window !== 'undefined' && window._mcpTracePersist) {
+                window._mcpTracePersist(entry);
+            }
+        } catch (_) { /* tracing must never throw */ }
+    }
+
+    dumpTrace(filter) {
+        let rows = this._trace;
+        if (typeof filter === 'string') rows = rows.filter(r => r.tool === filter || r.event === filter || r.requestId === filter);
+        console.table(rows.map(r => ({
+            time: new Date(r.t).toISOString().slice(11, 23),
+            event: r.event,
+            tool: r.tool,
+            server: r.server,
+            elapsed_ms: r.elapsed,
+            error: r.error ? String(r.error).slice(0, 120) : ''
+        })));
+        return rows;
+    }
+
+    traceSummary() {
+        const s = Object.fromEntries(this._traceCounters);
+        const timeouts = this._trace.filter(r => r.event === 'timeout');
+        const zombies = this._trace.filter(r => r.event === 'zombie');
+        const orphans = this._trace.filter(r => r.event === 'orphan-response');
+        const resolved = this._trace.filter(r => r.event === 'resolved' && r.elapsed != null);
+        const avg = resolved.length ? Math.round(resolved.reduce((a, r) => a + r.elapsed, 0) / resolved.length) : 0;
+        console.log('MCP trace summary:', { counts: s, avg_resolve_ms: avg, timeouts: timeouts.length, zombies: zombies.length, orphans: orphans.length });
+        if (timeouts.length) console.log('  timeouts:', timeouts.map(r => `${r.tool}@${r.server}`));
+        if (zombies.length) console.log('  zombies:', zombies.map(r => `${r.tool}@${r.server}`));
+        if (orphans.length) console.log('  orphan-responses:', orphans.map(r => `${r.tool}@${r.server}`));
+        return s;
     }
 
     /**
@@ -444,12 +508,17 @@ class MCPClient {
                     });
                 };
 
-                // Start reading; when the stream ends (clean or error), schedule reconnect
+                // Start reading; when the stream ends (clean or error), fail
+                // in-flight requests immediately instead of letting them hang
+                // until the 2-minute timeout. A dead stream cannot deliver
+                // responses — pending requests on it are zombies.
                 read().then(() => {
-                    console.log(`[${server.name}] SSE stream ended cleanly, reconnecting...`);
+                    this._traceEvent('stream-ended', null, { server: server.name });
+                    this._failPendingForServer(server, 'SSE stream ended');
                     this._scheduleReconnect(server);
                 }).catch(err => {
-                    console.error(`[${server.name}] SSE read error:`, err);
+                    this._traceEvent('stream-error', null, { server: server.name, error: err.message });
+                    this._failPendingForServer(server, `SSE stream error: ${err.message}`);
                     this._scheduleReconnect(server);
                 });
             }).catch(err => {
@@ -458,6 +527,21 @@ class MCPClient {
                 reject(err);
             });
         });
+    }
+
+    /**
+     * Fail all pending requests bound to a server. Called when the SSE stream
+     * dies — those requests can never receive their response, so hanging until
+     * timeout is pure latency with zero information gain.
+     */
+    _failPendingForServer(server, reason) {
+        for (const [requestId, pending] of this.pendingRequests.entries()) {
+            if (pending.server !== server) continue;
+            this.pendingRequests.delete(requestId);
+            if (pending.cancelTimeout) pending.cancelTimeout();
+            this._traceEvent('zombie', requestId, { server: server.name, error: reason });
+            pending.reject(new Error(`MCP connection lost: ${reason} (tool: ${pending.toolName || 'unknown'})`));
+        }
     }
 
     /**
@@ -682,19 +766,30 @@ class MCPClient {
     handleResponse(server, data) {
         const requestId = String(data.id);
         const pending = this.pendingRequests.get(requestId);
-        console.log(`[MCP handleResponse] requestId=${requestId} found=${!!pending} error=${!!data.error} resultType=${typeof data.result}`);
-        if (pending) {
-            this.pendingRequests.delete(requestId);
-            if (pending.cancelTimeout) {
-                pending.cancelTimeout();
-            }
-            if (data.error) {
-                console.error('[MCP handleResponse] Rejecting with:', data.error.message || data.error);
-                pending.reject(new Error(`MCP error: ${data.error.message || JSON.stringify(data.error)}`));
-            } else {
-                console.log('[MCP handleResponse] Resolving with result');
-                pending.resolve(data.result);
-            }
+        if (!pending) {
+            // Server answered a request we no longer track — timed out earlier,
+            // or fired before registration. This is the "ghost response" that
+            // makes the chat look like it ignored a successful tool call.
+            this._traceEvent('orphan-response', requestId, {
+                server: server?.name,
+                hasError: !!data.error,
+                error: data.error ? (data.error.message || JSON.stringify(data.error)).slice(0, 200) : undefined
+            });
+            return;
+        }
+        this.pendingRequests.delete(requestId);
+        if (pending.cancelTimeout) {
+            pending.cancelTimeout();
+        }
+        // Capture tool/elapsed explicitly — the pending entry is already deleted,
+        // so _traceEvent's internal lookup would return null for these fields.
+        const resolvedFields = { tool: pending.toolName, server: server?.name, elapsed: pending.traceStart ? Date.now() - pending.traceStart : null, transport: pending.transport || null };
+        if (data.error) {
+            this._traceEvent('rejected', requestId, { ...resolvedFields, error: (data.error.message || JSON.stringify(data.error)).slice(0, 300) });
+            pending.reject(new Error(`MCP error: ${data.error.message || JSON.stringify(data.error)}`));
+        } else {
+            this._traceEvent('resolved', requestId, resolvedFields);
+            pending.resolve(data.result);
         }
     }
 
@@ -737,31 +832,31 @@ class MCPClient {
             // The actual result arrives on the persistent SSE stream via
             // handleResponse, which resolves the pending promise registered
             // by executeTool. Nothing to read here — just drain and return.
-            console.log(`[MCP SSE] Legacy transport (status=${response.status}, type=${contentType || 'none'}). Response arrives on SSE stream.`);
+            const lp = this.pendingRequests.get(requestId);
+            if (lp) lp.transport = 'legacy-sse';
+            this._traceEvent('stream-start', requestId, { transport: 'legacy-sse' });
             try { await response.body.cancel(); } catch (_) {}
             return;
         }
 
         // Streamable HTTP: response is SSE (text/event-stream) - parse manually from fetch stream
+        this._traceEvent('stream-start', requestId, { transport: 'streamable-http' });
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
         let eventCount = 0;
 
-        console.log('[MCP SSE] Starting SSE reader loop...');
-
         while (true) {
             const { done, value } = await reader.read();
             if (done) {
-                console.log(`[MCP SSE] Stream ended after ${eventCount} events`);
                 // Stream closed without a matching response for our requestId.
                 // This is a zombie — the pending promise has no resolution path.
                 // Force-fail it.
                 const pending = this.pendingRequests.get(requestId);
                 if (pending) {
-                    console.error(`[MCP SSE] Stream ended with NO matching response for requestId=${requestId}`);
                     this.pendingRequests.delete(requestId);
                     if (pending.cancelTimeout) pending.cancelTimeout();
+                    this._traceEvent('zombie', requestId, { error: `stream ended after ${eventCount} events with no matching response` });
                     pending.reject(new Error('MCP stream ended without response'));
                 }
                 break;
@@ -863,14 +958,23 @@ class MCPClient {
         console.log('[MCP executeTool] Payload:', JSON.stringify(payload).slice(0, 200));
 
         // Register pending request for progress/cancel callbacks
+        const traceStart = Date.now();
         const pendingPromise = new Promise((resolve, reject) => {
             const timeoutDuration = 120000; // 2 minutes setup
 
             const startTimeout = () => {
                 return setTimeout(() => {
-                    console.warn('[MCP executeTool] Timeout firing for requestId:', requestId);
+                    const elapsed = Date.now() - traceStart;
+                    const lastEvent = this._trace.filter(r => r.requestId === requestId).pop();
+                    this._traceEvent('timeout', requestId, {
+                        error: `no response after ${elapsed}ms (last event: ${lastEvent?.event || 'none'}, server: ${server.name})`
+                    });
                     this.pendingRequests.delete(requestId);
-                    reject(new Error('Tool execution timeout (2 minutes)'));
+                    reject(new Error(
+                        `Tool execution timeout after ${Math.round(elapsed / 1000)}s: ${record.originalName} on ${server.name} ` +
+                        `(requestId: ${requestId}, last trace event: ${lastEvent?.event || 'none'}). ` +
+                        `Server may still be running the tool — its response will arrive as an orphan.`
+                    ));
                 }, timeoutDuration);
             };
 
@@ -885,18 +989,19 @@ class MCPClient {
                 if (timeoutId) clearTimeout(timeoutId);
             }
 
-            this.pendingRequests.set(requestId, { resolve, reject, resetTimeout, cancelTimeout, onProgress, server, chatId });
-            console.log('[MCP executeTool] pendingRequests count:', this.pendingRequests.size);
+            this.pendingRequests.set(requestId, { resolve, reject, resetTimeout, cancelTimeout, onProgress, server, chatId, toolName: record.originalName, traceStart });
+            this._traceEvent('queued', requestId, { tool: record.originalName, server: server.name });
         });
 
         // Use streamableHTTP (streaming response).
         // Reject the pending promise immediately if the fetch or stream fails.
+        this._traceEvent('posted', requestId, { tool: record.originalName, server: server.name });
         this.executeToolStreamableHttp(server, payload).catch(err => {
-            console.error('[MCP executeTool] streamableHTTP failed:', err.message);
             const pending = this.pendingRequests.get(payload.id);
             if (pending) {
                 this.pendingRequests.delete(payload.id);
                 if (pending.cancelTimeout) pending.cancelTimeout();
+                this._traceEvent('rejected', payload.id, { error: `transport: ${err.message}` });
                 pending.reject(err);
             }
         });
