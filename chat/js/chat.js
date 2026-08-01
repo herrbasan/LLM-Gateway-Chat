@@ -88,7 +88,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_preview_show',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\n\nRender content in the chat\'s preview pane — a separate surface from the chat scrollback. Use it to show files, proposed edits, diffs, or any work product the user should see alongside the conversation. Calling with an existing id updates that item in place and brings it to front. The user can switch between shown items via a dropdown.\n\nPrefer content under ~32KB; for larger files, show the relevant excerpt. Content over 256KB is rejected. Syntax coloring is applied for html, css, javascript, typescript, and json; other languages render as plain monospace (still correct, just uncolored).',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\n\nRender content in the chat\'s preview pane — a separate surface from the chat scrollback. Use it to show files, proposed edits, diffs, or any work product the user should see alongside the conversation. Calling with an existing id updates that item in place and brings it to front. The user can switch between shown items via a dropdown.\n\nPrefer content under ~32KB; for larger files, show the relevant excerpt. Content over 256KB is rejected. Syntax coloring is applied for html, css, javascript, typescript, and json; other languages render as plain monospace (still correct, just uncolored).',
             parameters: {
                 type: 'object',
                 properties: {
@@ -106,7 +106,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_preview_state',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\n\nReturns the current state of the preview pane: which items have been shown, which item the user is currently viewing (selected in the dropdown), and whether the pane is open. Use this to check what the user is looking at before proposing edits or when the user refers to "this" or "the current one". Returns metadata only (id, title, language, source) — not content, since you already have the content in your context from when you called chat_preview_show.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\n\nReturns the current state of the preview pane: which items have been shown, which item the user is currently viewing (selected in the dropdown), and whether the pane is open. Use this to check what the user is looking at before proposing edits or when the user refers to "this" or "the current one". Returns metadata only (id, title, language, source) — not content, since you already have the content in your context from when you called chat_preview_show.',
             parameters: {
                 type: 'object',
                 properties: {}
@@ -117,7 +117,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_update_metadata',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nUpdate the metadata for a specific session/chat. Use this to assign categories (folders), write summaries, or update titles for better organization.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nUpdate the metadata for a specific session/chat. Use this to assign categories (folders), write summaries, or update titles for better organization.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -134,7 +134,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_search',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nSearch the conversation archive. Use semantic mode for themes/ideas, keyword mode for specific terms, hybrid for both. Returns messages ranked by relevance.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nSearch the conversation archive. Use semantic mode for themes/ideas, keyword mode for specific terms, hybrid for both. Returns messages ranked by relevance.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -154,7 +154,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_get_session',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nRetrieve a specific conversation session by ID.\\n\\nTo process session data with a forge tool: (1) call this tool to get session data, (2) call storage.write to persist it, (3) pass the storage URL as forge.call payload.\\n\\nWhen saveToStorage is true, this tool writes the full session JSON directly to workshop storage and returns ONLY the URL — use this when you need to pass large session data to a forge tool that would overflow the context window.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nRetrieve a specific conversation session by ID.\\n\\nTo process session data with a forge tool: (1) call this tool to get session data, (2) call storage.write to persist it, (3) pass the storage URL as forge.call payload.\\n\\nWhen saveToStorage is true, this tool writes the full session JSON directly to workshop storage and returns ONLY the URL — use this when you need to pass large session data to a forge tool that would overflow the context window.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -171,7 +171,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_list_chats',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nList all direct (normal) chat sessions with metadata. Use to browse past conversations.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nList all direct (normal) chat sessions with metadata. Use to browse past conversations.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -187,7 +187,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_list_arena',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nList all arena sessions with metadata. Use to browse available conversations.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nList all arena sessions with metadata. Use to browse available conversations.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -203,7 +203,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_find_similar',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nGiven a session ID, find the most semantically similar sessions in the archive. Use to discover related conversations without guessing search terms.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nGiven a session ID, find the most semantically similar sessions in the archive. Use to discover related conversations without guessing search terms.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -218,7 +218,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_find_references',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\\n\\nTrace conversation lineage. Finds which sessions reference this one (inbound) and which sessions this one references (outbound). Matches session IDs in message content.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nTrace conversation lineage. Finds which sessions reference this one (inbound) and which sessions this one references (outbound). Matches session IDs in message content.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -233,7 +233,7 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'attachment_save',
-            description: 'Execution context: Chat App (browser). NOT accessible from MCP server tools or Forge workers.\n\nCopy a binary file (image, PDF, etc.) from the chat file bucket to workshop storage. Use this to persist attached images or other binaries into the MCP server\'s filesystem — e.g. saving a user-uploaded image to digital-twin/images/.\n\nThe source URL is the bucket URL from the attachment manifest line in the user message (looks like http://<host>/api/buckets/images/<id>.<ext>). The destination is a path relative to the MCP storage root. Returns the storage path and byte count on success.\n\nThis is a server-to-browser-to-server copy — no base64 in your context, no token cost. One call does the whole transfer.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\n\nCopy a binary file (image, PDF, etc.) from the chat file bucket to workshop storage. Use this to persist attached images or other binaries into the MCP server\'s filesystem — e.g. saving a user-uploaded image to digital-twin/images/.\n\nThe source URL is the bucket URL from the attachment manifest line in the user message (looks like http://<host>/api/buckets/images/<id>.<ext>). The destination is a path relative to the MCP storage root. Returns the storage path and byte count on success.\n\nThis is a server-to-browser-to-server copy — no base64 in your context, no token cost. One call does the whole transfer.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -2296,7 +2296,7 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
 
     // Archive tool context: let the LLM know it can search past conversations
     if (ENABLE_ARCHIVE_TOOLS) {
-        prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*. Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.
+        prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*, chat_preview_*, attachment_save, browser_fetch.\n    Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n    Call these tools DIRECTLY by name. Never invoke them through the\n    workshop tools dispatcher or any MCP server — that returns\n    "Unknown method" errors. They execute natively in this browser.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.
 
 ## Large File Retrieval — storage.read + browser_fetch
 
@@ -2743,6 +2743,17 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
 }
 
 async function streamResponse(exchangeId, streamChatId, origUserExchangeId = null) {
+    // Fail fast: a stream without a valid exchange ID corrupts the whole
+    // tool-call chain — the done handler's `if (id != null)` guard depends on
+    // handleToolExecution returning null on failure, and every caller passes a
+    // real exchange. An undefined exchangeId here means a caller bug upstream
+    // (e.g. a tool-failure path returning undefined instead of null), and it
+    // used to silently create `data-pending-exchange-id="undefined"` placeholders
+    // in an infinite retry loop. Crash loudly instead.
+    if (!exchangeId) {
+        throw new Error(`streamResponse: exchangeId required, got ${String(exchangeId)}`);
+    }
+
     // Use provided chatId if given (for background tool continuations), otherwise use current
     const chatId = streamChatId || currentChatId;
 
@@ -2990,11 +3001,13 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     
                 case 'error':
                     console.error('[Chat] Received error event:', event.error);
-                    // Remove any pending tool placeholder — the stream died before
-                    // handleToolExecution could run, so its placeholder would
-                    // otherwise stay on screen forever.
+                    // Remove ALL pending tool placeholders for this exchange — the
+                    // stream died before handleToolExecution could run, so its
+                    // placeholders would otherwise stay on screen forever. Must be
+                    // querySelectorAll: the old single-querySelector only removed the
+                    // first match, leaking the rest as stuck "Pending" bubbles.
                     const errToolContainer = getOrCreateContainer(chatId);
-                    errToolContainer?.querySelector(`.pending-tool-element[data-pending-exchange-id="${exchangeId}"]`)?.remove();
+                    errToolContainer?.querySelectorAll(`.pending-tool-element[data-pending-exchange-id="${exchangeId}"]`).forEach(el => el.remove());
                     // Reconstruct full content with timestamp for proper stripping
                     const errorTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
                     const errorFullContent = errorTsMatch ? errorTsMatch[0] + contentBuffer : contentBuffer;
@@ -3007,9 +3020,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                     break;
 
                 case 'aborted':
-                    // Same pending-tool cleanup as the error case.
+                    // Same pending-tool cleanup as the error case — remove ALL
+                    // placeholders for this exchange, not just the first.
                     const abortToolContainer = getOrCreateContainer(chatId);
-                    abortToolContainer?.querySelector(`.pending-tool-element[data-pending-exchange-id="${exchangeId}"]`)?.remove();
+                    abortToolContainer?.querySelectorAll(`.pending-tool-element[data-pending-exchange-id="${exchangeId}"]`).forEach(el => el.remove());
                     // Reconstruct full content with timestamp for proper stripping
                     const abortTsMatch = exchange.assistant.content.match(TIMESTAMP_REGEX);
                     const abortFullContent = abortTsMatch ? abortTsMatch[0] + contentBuffer : contentBuffer;
@@ -3047,7 +3061,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                                     args: args,
                                     id: tc.id
                                 }, chatId, originalUserExchangeId, false); // false = don't auto-resume stream
-                                if (id !== null) toolExchangeIds.push(id); // null = tool error, handled separately
+                                if (id != null) toolExchangeIds.push(id); // null/undefined = tool failure, handled separately
                             } catch (err) {
                                 console.error('Failed to parse tool arguments', tc.function.arguments, err);
                             }
@@ -4295,7 +4309,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         if (toolContainer) _vsAppendMessage(toolContainer, toolEl);
         
         // Continue with normal response (don't stream again, just finalize)
-        return;
+        return null;
     }
 
     // Use forcedChatId if provided (passed from streamResponse which knows the correct chat),
@@ -4315,7 +4329,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     // oldEx could be undefined if the user switched chats and this exchange doesn't exist in the new chat's conversation
     if (!oldEx) {
         _logTool('Exchange not found', { originalExchangeId, toolChatId, currentChatId, reason: 'chat context switch or deleted exchange' });
-        return;
+        return null;
     }
     // Trim trailing whitespace
     oldEx.assistant.content = oldEx.assistant.content.trim();
@@ -4324,6 +4338,13 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     let originalEl = toolContainer?.querySelector(`.chat-message.assistant[data-exchange-id="${originalExchangeId}"]`);
     if (originalEl) {
         updateAssistantContent(originalEl, oldEx.assistant.content, oldEx.assistant.reasoning_content);
+        // Finalize the pre-tool bubble — the tool_calls done path in streamResponse
+        // never runs finalizeAssistantElement on this bubble (it only finalizes the
+        // post-tool continuation bubble), so without this the action toolbar stayed
+        // hidden and the streaming indicator kept spinning. Pass toolConversation so
+        // version/usage lookups hit the right chat even if the user switched chats.
+        finalizeAssistantElement(originalEl, originalExchangeId, null, null, null, toolConversation);
+        forceFinalizeMarkdownStream(originalEl, oldEx.assistant.content, oldEx.assistant.reasoning_content);
     }
 
     const pendingEl = toolContainer?.querySelector(`.pending-tool-element[data-pending-exchange-id="${originalExchangeId}"]`);
@@ -4459,7 +4480,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         return null; // signal: failed, UI handled, bail
     });
 
-    if (result === null) return;
+    if (result === null) return null;
 
     exchange.tool.status = 'success';
         // Extract the actual content from MCP result structure
@@ -4906,14 +4927,18 @@ function showError(el, message) {
     if (indicator) indicator.style.display = 'none';
 }
 
-function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null, streamStats = null) {
+// conversationRef: explicit conversation to read exchange data from. The tool
+// execution path (handleToolExecution) passes the per-chat toolConversation —
+// the global may point at a different chat if the user switched mid-tool.
+function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null, streamStats = null, conversationRef = null) {
+    const convRef = conversationRef || conversation;
     el.dataset.isStreaming = 'false';
     // Hide streaming indicator
     const indicator = el.querySelector('.streaming-indicator');
     if (indicator) indicator.classList.remove('visible');
 
     // Update static usage text if we have it
-    const exchange = conversation.getExchange(exchangeId);
+    const exchange = convRef.getExchange(exchangeId);
     let finalUsage = usage || exchange?.assistant?.usage;
     let finalContext = contextInfo || exchange?.assistant?.context;
     let finalStats = streamStats || exchange?.assistant?.streamStats;
@@ -4933,7 +4958,7 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     } else if (exchange && exchange.assistant?.content) {
         // Fallback: estimate cumulative tokens by summing all exchanges up to this one
         let cumulativeChars = 0;
-        const allExchanges = conversation.getAll();
+        const allExchanges = convRef.getAll();
         for (const ex of allExchanges) {
             const userText = ex.user && typeof ex.user.content === 'string' ? ex.user.content : '';
             let asstText = ex.assistant && typeof ex.assistant.content === 'string' ? ex.assistant.content : '';
@@ -4946,11 +4971,11 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     }
 
     // Show actions only if we have multiple versions or after regeneration
-    const info = conversation.getVersionInfo(exchangeId);
+    const info = convRef.getVersionInfo(exchangeId);
     const actions = el.querySelector('.message-actions');
     if (actions && info?.hasMultiple) {
         actions.classList.add('visible');
-        updateVersionControls(el, exchangeId);
+        updateVersionControls(el, exchangeId, convRef);
         actions.querySelector('.speaker').style.display = 'inline-block';
     } else if (actions) {
         // Only show regenerate and speaker buttons initially
@@ -4978,8 +5003,9 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
     }
 }
 
-function updateVersionControls(el, exchangeId) {
-    const info = conversation.getVersionInfo(exchangeId);
+function updateVersionControls(el, exchangeId, conversationRef = null) {
+    const convRef = conversationRef || conversation;
+    const info = convRef.getVersionInfo(exchangeId);
     if (!info) return;
     
     const infoEl = el.querySelector('.version-info');
