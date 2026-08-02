@@ -1146,6 +1146,28 @@ async function buildHistoricalDomForChat(conv, container) {
 }
 
 // ============================================
+// Tool display names
+// ============================================
+//
+// Compact MCP servers (workshop /mcp/compact) expose ONE generic tool whose
+// real operation lives in the `method` field of the arguments. Display that
+// (storage.write, memory.recall) instead of the meaningless generic name.
+function formatToolDisplayName(name, args) {
+    const method = args && typeof args === 'object' && typeof args.method === 'string'
+        ? args.method.trim()
+        : '';
+    return method ? method : name;
+}
+
+// Tool arguments stream as JSON deltas — the pending placeholder may see a
+// partial blob. Parse best-effort, return null on any failure.
+function parsePartialToolArgs(toolCall) {
+    const raw = toolCall?.function?.arguments;
+    if (!raw || typeof raw !== 'string') return null;
+    try { return JSON.parse(raw); } catch { return null; }
+}
+
+// ============================================
 // Preview tool-call button — "Show in preview" on chat_preview_show tool bubbles
 // ============================================
 //
@@ -1226,7 +1248,7 @@ function buildExchangeElement(exchange) {
             <div class="tool-bubble">
                 <div class="message-header tool-header">
                     <nui-icon name="extension"></nui-icon>
-                    <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
+                    <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
                     <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
@@ -2868,6 +2890,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         // plain append otherwise.
         if (targetContainer) _vsAppendMessage(targetContainer, assistantEl);
     }
+    // The assistant's "Waiting for response…" bubble replaces the user pending
+    // dots — two simultaneous activity indicators are redundant.
+    const userPendingEl = targetContainer?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
+    if (userPendingEl) userPendingEl.classList.remove('visible');
     // Store timestamp info for stripping during rendering (reset on regeneration)
     const tsLen = timestampWithSpace.length;
     assistantEl.dataset.timestampLen = tsLen.toString();
@@ -3020,7 +3046,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                         isReceivingTool = true;
                         // Sort tool_calls by index if present so pending UI appears in canonical order
                         const sortedPending = [...event.tool_calls].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-                        showPendingToolUI(exchangeId, chatId, sortedPending.length);
+                        showPendingToolUI(exchangeId, chatId, sortedPending);
                     }
 
                     // Debounce DOM updates to prevent freezing
@@ -3907,7 +3933,7 @@ function renderExchange(exchange, targetContainer = null) {
             <div class="tool-bubble">
                 <div class="message-header tool-header">
                     <nui-icon name="extension"></nui-icon>
-                    <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
+                    <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
                     <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
@@ -4085,7 +4111,12 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
             </span>
         </div>
         <div class="progress-status"></div>
-        <div class="message-content"></div>
+        <div class="message-content">
+            <div class="assistant-waiting">
+                <span class="assistant-waiting-spinner"></span>
+                <span class="assistant-waiting-text">Waiting for response…</span>
+            </div>
+        </div>
         <div class="message-actions">
             <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="volume"></nui-icon></button></nui-button>
             <nui-button class="action-btn regenerate" title="Regenerate"><button type="button"><nui-icon name="sync"></nui-icon></button></nui-button>
@@ -4292,12 +4323,19 @@ async function updateOverallContext(contextData = null) {
 // PHASE-3: MCP Tool Execution Logic
 // ============================================
 
-function showPendingToolUI(exchangeId, chatId) {
+function showPendingToolUI(exchangeId, chatId, toolCalls = []) {
     // Hide user bubble pending indicator when tool is detected
     // Use getOrCreateContainer with chatId since tool belongs to that chat (may differ from current if user switched)
     const container = getOrCreateContainer(chatId);
     const userPendingEl = container?.querySelector(`.chat-message.user[data-exchange-id="${exchangeId}"] .user-pending-indicator`);
     if (userPendingEl) userPendingEl.classList.remove('visible');
+
+    // The first tool call's name (compact MCP: method from partial args).
+    // Args stream as JSON deltas, so parse best-effort.
+    const firstCall = Array.isArray(toolCalls) && toolCalls.length > 0 ? toolCalls[0] : null;
+    const pendingName = firstCall
+        ? formatToolDisplayName(firstCall.function?.name || '', parsePartialToolArgs(firstCall))
+        : '';
 
     const toolEl = document.createElement('div');
     toolEl.className = 'chat-message tool pending-tool-element';
@@ -4307,8 +4345,11 @@ function showPendingToolUI(exchangeId, chatId) {
         <div class="tool-bubble pending">
             <div class="message-header tool-header pending">
                 <nui-icon name="extension"></nui-icon>
-                <strong class="tool-title">SYSTEM TOOL</strong>
-                <nui-badge variant="primary" class="tool-status">Pending</nui-badge>
+                <strong class="tool-title">${pendingName || 'Tool'}</strong>
+                <nui-badge variant="primary" class="tool-status">Running</nui-badge>
+            </div>
+            <div class="tool-notifications" style="display: block;">
+                <span class="tool-spinner"></span> Executing…
             </div>
         </div>
     `;
@@ -4349,7 +4390,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
             <div class="tool-bubble">
                 <div class="message-header tool-header">
                     <nui-icon name="extension"></nui-icon>
-                    <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
+                    <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
                     <nui-badge variant="danger" class="tool-status">Blocked</nui-badge>
                 </div>
                 <div class="message-content tool-payload" style="display: block;">
@@ -4419,12 +4460,13 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
           <div class="tool-bubble">
               <div class="message-header tool-header">
                   <nui-icon name="extension"></nui-icon>
-                  <strong class="tool-title">SYSTEM TOOL: ${parsedObj.name}</strong>
-                  <nui-badge variant="primary" class="tool-status">Pending</nui-badge>
+                  <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
+                  <nui-badge variant="primary" class="tool-status">Running</nui-badge>
                   <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
               </div>
-              <div class="tool-notifications">
-                  </div>
+              <div class="tool-notifications" style="display: block;">
+                  <span class="tool-spinner"></span> Running…
+              </div>
                   <div class="tool-images" style="display: none;"></div>
               <div class="message-content tool-payload" style="display: none;">
                   <div class="tool-section-title">Arguments</div>
@@ -4508,7 +4550,7 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
 
         toolEl.querySelector('.retry-tool')?.addEventListener('click', () => {
             toolEl.querySelector('.tool-result').innerHTML = '';
-            toolEl.querySelector('.tool-status').innerHTML = 'Pending';
+            toolEl.querySelector('.tool-status').innerHTML = 'Running';
             toolEl.querySelector('.tool-notifications').innerHTML = '<span class="tool-spinner"></span> Running...';
             toolEl.querySelector('.tool-status').setAttribute('variant', 'primary');
             handleToolExecution(originalExchangeId, parsedObj, toolChatId, origUserExchangeId, resumeStream);
@@ -4726,6 +4768,11 @@ function _applyEmbedEvent(event) {
 function updateAssistantContent(el, content, reasoningContent = null) {
     const contentDiv = el.querySelector('.message-content');
     if (!contentDiv) return;
+
+    // The waiting-for-response placeholder is a pre-stream state. Any content
+    // pass (even empty — history rebuild) means the stream started; drop it.
+    const waitingEl = contentDiv.querySelector('.assistant-waiting');
+    if (waitingEl) waitingEl.remove();
 
     let visibleContent = content;
 
@@ -4974,6 +5021,10 @@ function showError(el, message) {
         contentDiv.innerHTML += `<div class="error-message">Error: ${escapeHtml(message)}</div>`;
     }
     
+    // Remove waiting placeholder — the bubble now shows an error state
+    const waitingEl = el.querySelector('.assistant-waiting');
+    if (waitingEl) waitingEl.remove();
+
     // Hide streaming indicator
     const indicator = el.querySelector('.streaming-indicator');
     if (indicator) indicator.style.display = 'none';
@@ -4985,6 +5036,9 @@ function showError(el, message) {
 function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null, streamStats = null, conversationRef = null) {
     const convRef = conversationRef || conversation;
     el.dataset.isStreaming = 'false';
+    // Remove waiting placeholder — the bubble is now complete or errored
+    const waitingEl = el.querySelector('.assistant-waiting');
+    if (waitingEl) waitingEl.remove();
     // Hide streaming indicator
     const indicator = el.querySelector('.streaming-indicator');
     if (indicator) indicator.classList.remove('visible');

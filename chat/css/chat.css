@@ -1635,6 +1635,28 @@ nui-app:not(.nui-ready) { display: none; }
     display: block;
 }
 
+/* Assistant "Waiting for response…" state — shown between the user message
+   and the first streamed token, when the bubble has no content yet. */
+.assistant-waiting {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0;
+    color: var(--text-color-dim);
+    font-style: italic;
+    font-size: 0.9em;
+}
+
+.assistant-waiting-spinner {
+    width: 0.9rem;
+    height: 0.9rem;
+    flex-shrink: 0;
+    border: 0.15rem solid var(--color-shade3);
+    border-top-color: var(--color-highlight);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+}
+
 /* Version Controls */
 .version-info {
     min-width: 3rem;
@@ -1940,6 +1962,21 @@ nui-rich-text.edit-textarea .nui-rich-text-editor {
     padding: 0 1rem 0.5rem 1rem;
     font-style: italic;
     display: none;
+}
+
+/* Base spinner for tool notifications / running state. Previously only the
+   vision indicator had a scoped rule — the tool-notifications spinner was
+   unstyled and invisible. */
+.tool-spinner {
+    display: inline-block;
+    width: 0.9rem;
+    height: 0.9rem;
+    vertical-align: -0.125rem;
+    margin-right: 0.375rem;
+    border: 0.125rem solid var(--color-shade3);
+    border-top-color: var(--color-highlight);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
 }
 
 .tool-error-hint {
