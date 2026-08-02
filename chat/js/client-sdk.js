@@ -248,12 +248,14 @@ export class GatewayClient extends EventEmitter {
               }
 
               if (dataObj?.choices?.[0]?.finish_reason) {
+                const _doneToolCalls = Object.keys(aggregatedToolCalls).length > 0 ? Object.values(aggregatedToolCalls) : null;
+                if (this.onLog) this.onLog('Stream', 'done event', { finish_reason: dataObj.choices[0].finish_reason, toolCallCount: _doneToolCalls?.length || 0, toolNames: _doneToolCalls?.map(t=>t.function?.name), argsTotalLen: _doneToolCalls?.reduce((s,t)=>s+(t.function?.arguments?.length||0),0) });
                 yield { 
                   type: 'done', 
                   finish_reason: dataObj.choices[0].finish_reason,
                   usage: dataObj?.usage || null,
                   context: dataObj?.context || null,
-                  tool_calls: Object.keys(aggregatedToolCalls).length > 0 ? Object.values(aggregatedToolCalls) : null,
+                  tool_calls: _doneToolCalls,
                   content: dataObj?.content || null,
                   reasoning_content: reasoningContent || null,
                   thinking_signature: thinkingSignature

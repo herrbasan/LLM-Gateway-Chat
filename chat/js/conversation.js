@@ -618,10 +618,21 @@ export class Conversation {
                     }
                     // ----------------------------------
 
+                    // Cap tool result content in the API payload. Large results
+                    // (e.g. 55KB session transcripts) are persisted for display
+                    // but don't need to be resent to the provider on every turn —
+                    // they bloat the request and can cause upstream hangs.
+                    const MAX_TOOL_CONTENT_API = 4096;
+                    let toolContent = exchange.tool.content || '';
+                    if (toolContent.length > MAX_TOOL_CONTENT_API) {
+                        toolContent = toolContent.slice(0, MAX_TOOL_CONTENT_API) +
+                            `\n[...truncated — full result (${exchange.tool.content.length} chars) persisted in chat]`;
+                    }
+
                     const toolResultObj = {
                         role: 'tool',
                         tool_call_id: callId,
-                        content: exchange.tool.content || ''
+                        content: toolContent
                     };
                     
                     if (exchange.tool.images && exchange.tool.images.length > 0) {
@@ -820,6 +831,23 @@ export class Conversation {
                 if (msg.tool_calls.length === 0) {
                     delete msg.tool_calls;
                 }
+            }
+        }
+
+        // Auto-heal (reverse): Remove orphaned tool results — tool messages whose
+        // tool_call_id has no matching assistant tool_calls. This happens when a
+        // stream stalls after tool results were persisted but before the assistant
+        // exchange completed (e.g. gateway restart mid-stream). These orphans create
+        // an invalid message sequence that providers reject (tokenization failed).
+        const validAssistantCallIds = new Set();
+        for (const msg of messages) {
+            if (msg.role === 'assistant' && msg.tool_calls) {
+                for (const tc of msg.tool_calls) validAssistantCallIds.add(tc.id);
+            }
+        }
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'tool' && messages[i].tool_call_id && !validAssistantCallIds.has(messages[i].tool_call_id)) {
+                messages.splice(i, 1);
             }
         }
 

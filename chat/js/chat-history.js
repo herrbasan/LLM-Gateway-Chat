@@ -41,14 +41,20 @@ export class ChatHistory {
         if (USE_BACKEND && backendClient.user) {
             for (const conv of this.conversations) {
                 if (conv._dirty) {
-                    backendClient.updateSession(conv.id, { 
+                    // Only send summary when it's a real object — the backend
+                    // PATCH validates summary must be an object {title, teaser,
+                    // reflection}; a '' or null triggers a 400 on every save.
+                    const fields = {
                         pinned: !!conv.pinned,
                         title: conv.title,
                         model: conv.model,
                         systemPrompt: conv.systemPrompt,
-                        category: conv.category,
-                        summary: conv.summary
-                    }).catch(() => {});
+                        category: conv.category
+                    };
+                    if (conv.summary && typeof conv.summary === 'object' && !Array.isArray(conv.summary)) {
+                        fields.summary = conv.summary;
+                    }
+                    backendClient.updateSession(conv.id, fields).catch(() => {});
                     conv._dirty = false;
                 }
             }
