@@ -117,13 +117,23 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_archive_update_metadata',
-            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nUpdate the metadata for a specific session/chat. Use this to assign categories (folders), write summaries, or update titles for better organization.',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\\n\\nUpdate the metadata for a specific session/chat. Use this to assign categories (folders), write structured summaries, or update titles for better organization. The summary is an OBJECT {title, teaser, reflection} — never a bare string. Pass it either as a nested object (summary: {title, teaser, reflection}) or as the flat title/teaser/reflection params, which are assembled into the object. The response echoes storedSummary so you can verify the object was stored correctly.',
             parameters: {
                 type: 'object',
                 properties: {
                     session_id: { type: 'string', description: 'The session ID to update' },
-                    title: { type: 'string', description: 'Optional new title for the chat' },
-                    summary: { type: 'string', description: 'Optional new summary of the chat' },
+                    title: { type: 'string', description: 'Optional new title — sets the top-level session title AND summary.title' },
+                    summary: {
+                        type: 'object',
+                        description: 'Optional structured summary object. Schema: {title: string, teaser: string, reflection: string}. Stored as an object, never stringified.',
+                        properties: {
+                            title: { type: 'string', description: 'Short title for the session' },
+                            teaser: { type: 'string', description: 'One-line teaser describing the session' },
+                            reflection: { type: 'string', description: 'Longer reflection or notes on the session' }
+                        }
+                    },
+                    teaser: { type: 'string', description: 'Optional flat teaser — merged into summary.teaser' },
+                    reflection: { type: 'string', description: 'Optional flat reflection — merged into summary.reflection' },
                     category: { type: 'string', description: 'Optional category (acts as a folder for grouping)' }
                 },
                 required: ['session_id']
@@ -271,25 +281,67 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
         }
         case 'chat_archive_update_metadata': {
             console.log('[Archive Update Metadata] Args:', JSON.stringify(args));
+
+            // Summary must be stored as an OBJECT {title, teaser, reflection} — the
+            // established arena schema. Accept a nested object, a JSON object string,
+            // or flat title/teaser/reflection params (merged below). A plain string
+            // that is not JSON fails loudly — silent stringification caused schema
+            // corruption (see issue #6).
+            let summaryObj = {};
+            const rawSummary = args.summary;
+            if (rawSummary !== undefined && rawSummary !== null) {
+                if (typeof rawSummary === 'object' && !Array.isArray(rawSummary)) {
+                    summaryObj = { ...rawSummary };
+                } else if (typeof rawSummary === 'string') {
+                    const trimmed = rawSummary.trim();
+                    if (trimmed.startsWith('{')) {
+                        try {
+                            summaryObj = JSON.parse(trimmed);
+                        } catch (e) {
+                            throw new Error(`chat_archive_update_metadata: summary string is not valid JSON: ${e.message}`);
+                        }
+                    } else {
+                        throw new Error('chat_archive_update_metadata: summary must be an object {title, teaser, reflection} or a JSON object string — a plain string is rejected. Pass teaser/reflection as separate params instead.');
+                    }
+                } else {
+                    throw new Error(`chat_archive_update_metadata: summary must be an object or JSON string, got ${typeof rawSummary}`);
+                }
+                if (typeof summaryObj !== 'object' || Array.isArray(summaryObj)) {
+                    throw new Error('chat_archive_update_metadata: summary JSON did not parse to an object {title, teaser, reflection}');
+                }
+            }
+
+            // Flat params merge over the summary object (model-friendly alternative)
+            if (args.title !== undefined && args.title !== null) summaryObj.title = args.title;
+            if (args.teaser !== undefined && args.teaser !== null) summaryObj.teaser = args.teaser;
+            if (args.reflection !== undefined && args.reflection !== null) summaryObj.reflection = args.reflection;
+
             const reqBody = {};
-            if (args.title) reqBody.title = args.title;
-            if (args.summary) reqBody.summary = args.summary;
+            // Keep top-level session.title in sync with summary.title (arena write pattern)
+            const effectiveTitle = args.title || summaryObj.title || '';
+            if (effectiveTitle) reqBody.title = effectiveTitle;
             if (args.category) reqBody.category = args.category;
-            
+            if (Object.keys(summaryObj).length > 0) reqBody.summary = summaryObj;
+
             const res = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, {
                 method: 'PATCH',
                 headers,
                 body: JSON.stringify(reqBody)
             });
             if (res.status === 401) throw new Error('chat_archive_update_metadata: session expired (401). The user needs to log in again.');
-            if (!res.ok) throw new Error(`chat_archive_update_metadata: backend error ${res.status}`);
-            
+            if (!res.ok) {
+                const errBody = await res.json().catch(() => null);
+                throw new Error(`chat_archive_update_metadata: backend error ${res.status}${errBody?.error ? `: ${errBody.error}` : ''}`);
+            }
+
+            const saved = await res.json();
+
             // Reload the sidebar silently to reflect changes if it's not the active chat trying to overwrite something we'd override local state for
             chatHistory.refreshList().then(() => renderHistoryList());
-            
+
             return {
                 type: 'text',
-                text: JSON.stringify({ success: true, updatedFields: Object.keys(reqBody) })
+                text: JSON.stringify({ success: true, updatedFields: Object.keys(reqBody), storedSummary: saved?.summary ?? null })
             };
         }
 
@@ -2296,7 +2348,7 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
 
     // Archive tool context: let the LLM know it can search past conversations
     if (ENABLE_ARCHIVE_TOOLS) {
-        prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*, chat_preview_*, attachment_save, browser_fetch.\n    Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n    Call these tools DIRECTLY by name. Never invoke them through the\n    workshop tools dispatcher or any MCP server — that returns\n    "Unknown method" errors. They execute natively in this browser.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, summary, or title to keep sessions organized.
+        prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*, chat_preview_*, attachment_save, browser_fetch.\n    Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n    Call these tools DIRECTLY by name. Never invoke them through the\n    workshop tools dispatcher or any MCP server — that returns\n    "Unknown method" errors. They execute natively in this browser.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, title, or structured summary — the summary is an OBJECT {title, teaser, reflection}, never a bare string; pass it as a nested object or via the flat title/teaser/reflection params.
 
 ## Large File Retrieval — storage.read + browser_fetch
 
@@ -5929,7 +5981,11 @@ function renderHistoryList() {
             const titleSpan = document.createElement('span');
             titleSpan.className = 'chat-history-item-title';
             titleSpan.textContent = chat.title || 'New Chat';
-            titleSpan.title = chat.summary ? `${chat.title}\n\n${chat.summary}` : chat.title;
+            // summary may be an object {title, teaser, reflection} (arena schema) or a legacy string
+            const summaryText = (typeof chat.summary === 'object' && chat.summary)
+                ? (chat.summary.teaser || chat.summary.title || '')
+                : (chat.summary || '');
+            titleSpan.title = summaryText ? `${chat.title}\n\n${summaryText}` : chat.title;
 
             topRow.appendChild(titleSpan);
             titleDiv.appendChild(topRow);

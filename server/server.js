@@ -1522,6 +1522,9 @@ const routes = {
     if (body.model !== undefined) session.model = body.model;
     if (body.systemPrompt !== undefined) session.systemPrompt = body.systemPrompt;
     if (body.category !== undefined) session.category = body.category;
+    if (body.summary !== undefined && (body.summary === null || typeof body.summary !== 'object' || Array.isArray(body.summary))) {
+      json(res, { error: 'summary must be an object {title, teaser, reflection}' }, 400, req); return;
+    }
     if (body.summary !== undefined) session.summary = body.summary;
     if (body.arenaConfig !== undefined) session.arenaConfig = body.arenaConfig;
     session.updatedAt = new Date().toISOString();
