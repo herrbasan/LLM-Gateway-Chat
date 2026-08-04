@@ -416,10 +416,13 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
                 if (!storageBase) throw new Error('chat_archive_get_session: no MCP server configured — cannot reach storage');
                 const storageUrl = `${storageBase}/storage/${storagePath}`;
 
-                const putRes = await fetch(`${storageBase}/api/storage/write`, {
-                    method: 'POST',
+                // Real MCP storage write contract: PUT /storage/{path} with the
+                // raw body (no JSON wrapper). The old POST /api/storage/write
+                // endpoint never existed — it returned 404, breaking saveToStorage.
+                const putRes = await fetch(`${storageBase}/storage/${storagePath}`, {
+                    method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path: storagePath, content: storagePayload })
+                    body: storagePayload
                 });
                 if (!putRes.ok) {
                     const errText = await putRes.text();
@@ -4574,7 +4577,15 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
         return null; // signal: failed, UI handled, bail
     });
 
-    if (result === null) return null;
+    if (result === null) {
+        // Failed tool — the catch block already rendered the error UI and
+        // synced the error message to the conversation. Return the tool
+        // exchange id (NOT null) so the streamResponse done handler resumes
+        // the stream and feeds the error back to the model. Previously null
+        // left toolExchangeIds empty, so a failed SOLE tool call dead-ended
+        // the conversation with the model never seeing the error.
+        return toolExchangeId;
+    }
 
     exchange.tool.status = 'success';
         // Extract the actual content from MCP result structure

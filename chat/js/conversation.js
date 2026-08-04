@@ -618,21 +618,15 @@ export class Conversation {
                     }
                     // ----------------------------------
 
-                    // Cap tool result content in the API payload. Large results
-                    // (e.g. 55KB session transcripts) are persisted for display
-                    // but don't need to be resent to the provider on every turn —
-                    // they bloat the request and can cause upstream hangs.
-                    const MAX_TOOL_CONTENT_API = 4096;
-                    let toolContent = exchange.tool.content || '';
-                    if (toolContent.length > MAX_TOOL_CONTENT_API) {
-                        toolContent = toolContent.slice(0, MAX_TOOL_CONTENT_API) +
-                            `\n[...truncated — full result (${exchange.tool.content.length} chars) persisted in chat]`;
-                    }
-
+                    // REMOVED: the 4KB MAX_TOOL_CONTENT_API truncation bandaid
+                    // (fix-attempt era, commit a004193). It forced the model to
+                    // page through truncated fragments (measured: 10+ tool calls
+                    // to reconstruct one session). Large content now stays out of
+                    // history via saveToStorage URLs (the proper attachment path).
                     const toolResultObj = {
                         role: 'tool',
                         tool_call_id: callId,
-                        content: toolContent
+                        content: exchange.tool.content || ''
                     };
                     
                     if (exchange.tool.images && exchange.tool.images.length > 0) {
