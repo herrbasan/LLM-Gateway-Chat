@@ -282,6 +282,26 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
         case 'chat_archive_update_metadata': {
             console.log('[Archive Update Metadata] Args:', JSON.stringify(args));
 
+            // Overwrite guard: a summary containing the CURATED marker is the
+            // load-bearing arena curation artifact. Blindly overwriting it
+            // destroyed a curated summary during a session where the model
+            // guessed a session ID (issue #8). Refuse unless force:true.
+            if (args.force !== true && args.session_id) {
+                const existingRes = await fetch(`${BACKEND_URL}/api/chats/${args.session_id}`, { method: 'GET', headers });
+                if (existingRes.ok) {
+                    const existing = await existingRes.json();
+                    const existingSummary = existing?.session?.summary ?? existing?.summary ?? null;
+                    const existingSummaryStr = typeof existingSummary === 'string' ? existingSummary : JSON.stringify(existingSummary || {});
+                    if (existingSummaryStr.includes('CURATED')) {
+                        throw new Error(
+                            `chat_archive_update_metadata: session ${args.session_id} has a CURATED summary — refusing to overwrite without explicit intent. ` +
+                            `If you truly want to replace it, pass force: true. (Hint: if you meant to update the CURRENT session, its ID is ` +
+                            `${currentChatId || '(unknown)'} — use that instead of guessing.)`
+                        );
+                    }
+                }
+            }
+
             // Summary must be stored as an OBJECT {title, teaser, reflection} — the
             // established arena schema. Accept a nested object, a JSON object string,
             // or flat title/teaser/reflection params (merged below). A plain string
@@ -2374,6 +2394,8 @@ function getSystemPromptWithMetadata(excludedToolPrefixes = []) {
     // Archive tool context: let the LLM know it can search past conversations
     if (ENABLE_ARCHIVE_TOOLS) {
         prompt = prompt + `\n\n## EXECUTION CONTEXTS — Tools live in one of these:\n\n  CONTEXT A: MCP Server (workshop, port 3100)\n    storage.*, memory.*, forge.*, documentation.*, vision.*, etc.\n    Reach: filesystem, LLM Gateway, browser sessions, GitHub API.\n\n  CONTEXT B: Forge Worker (inside forge.call)\n    Isolated worker_thread. Has ONLY: ctx.payload, ctx.gateway,\n    ctx.storagePath. CANNOT reach: chat app storage, other MCP tools,\n    browser APIs.\n\n  CONTEXT C: Chat App (this browser)\n    chat_archive.*, chat_preview_*, attachment_save, browser_fetch.\n    Reach: chat app data, browser session.\n    NOT accessible from MCP server tools or Forge workers.\n    Call these tools DIRECTLY by name. Never invoke them through the\n    workshop tools dispatcher or any MCP server — that returns\n    "Unknown method" errors. They execute natively in this browser.\n\n  A forge tool calling another MCP tool by HTTP will always 404.\n  A forge tool calling a chat app tool will always fail. There is no relay.\n  Plan your data flow at the top level.\n\nYou have access to the conversation archive. Use chat_archive_search for thematic/conceptual queries (use search_type: "keyword" for specific technical terms, "semantic" for ideas, "hybrid" for both). Use chat_archive_get_session to retrieve full conversations by ID. Use chat_archive_list_chats to browse normal chats. Use chat_archive_list_arena to browse arena sessions. Use chat_archive_find_similar to discover related sessions given a known session ID. Use chat_archive_find_references to trace conversation lineage (which sessions reference each other). Use chat_archive_update_metadata to update category, title, or structured summary — the summary is an OBJECT {title, teaser, reflection}, never a bare string; pass it as a nested object or via the flat title/teaser/reflection params.
+
+CURRENT SESSION ID: ${currentChatId || '(none — start a chat first)'}. This is the session you are talking to the user in right now. When you need to update the metadata of THIS conversation (e.g. tag it with a summary or category at the end of a session), use this exact ID — never guess an ID from archive listings. Guessing hit an unrelated curated session and destroyed its summary (issue #8); updates to sessions whose summary contains CURATED are rejected unless force:true is passed.
 
 ## Large File Retrieval — storage.read + browser_fetch
 
