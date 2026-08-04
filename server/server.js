@@ -231,7 +231,7 @@ setInterval(async () => {
     // 1. Recover embedding health if down
     if (!embedAvailable) {
         try {
-            const reqBody = { input: ['health check'], dimensions: EMBEDDING_DIMS };
+            const reqBody = { input: ['health check'], model: EMBED_MODEL, dimensions: EMBEDDING_DIMS };
             const res = await fetch(EMBED_URL, {
                 method: 'POST', headers: EMBED_HEADERS,
                 body: JSON.stringify(reqBody),
@@ -597,7 +597,7 @@ function _parseRetryAfterMs(res) {
 
 async function embedBatch(texts) {
     if (!embedAvailable) throw new EmbedError('unavailable', 'Embedding unavailable');
-    const reqBody = { input: texts, dimensions: EMBEDDING_DIMS };
+    const reqBody = { input: texts, model: EMBED_MODEL, dimensions: EMBEDDING_DIMS };
 
     let res;
     try {
