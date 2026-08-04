@@ -36,7 +36,6 @@ const LOG_RETENTION  = process.env.CHAT_LOG_RETENTION  || cfg.logRetentionDays  
 const USERS_DB_PATH  = process.env.CHAT_USERS_DB       || cfg.usersDbPath       || 'server/data/users_db/data.jsonl';
 const SESSION_TTL    = (cfg.sessionTtlMinutes || 1440) * 60 * 1000;
 const EMBED_URL      = process.env.CHAT_EMBED_URL      || cfg.embedUrl          || 'http://192.168.0.100:3400/v1/embeddings';
-const EMBED_MODEL    = process.env.CHAT_EMBED_MODEL    || cfg.embedModel        || null;
 const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   || 2560;
 const EMBED_MAX_TOKENS = parseInt(process.env.CHAT_EMBED_MAX_TOKENS || cfg.embedMaxTokens) || 30000;
 const EMBED_TOK_RATIO  = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
@@ -599,7 +598,6 @@ function _parseRetryAfterMs(res) {
 async function embedBatch(texts) {
     if (!embedAvailable) throw new EmbedError('unavailable', 'Embedding unavailable');
     const reqBody = { input: texts, dimensions: EMBEDDING_DIMS };
-    if (EMBED_MODEL) reqBody.model = EMBED_MODEL;
 
     let res;
     try {
