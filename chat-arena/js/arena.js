@@ -2943,8 +2943,9 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             const data = await arenaStorage.loadSession(id);
             if (!data) return;
 
+            const pNames = (data.participants || []).map(p => typeof p === 'object' ? (p.name || p.model || 'Unknown') : p);
             let md = `# ${data.topic || 'Arena Conversation'}\n\n`;
-            md += `*Participants: ${data.participants?.join(' vs ') || 'Unknown'}*\n\n`;
+            md += `*Participants: ${pNames.join(' vs ') || 'Unknown'}*\n\n`;
             md += `*Exported: ${new Date().toLocaleString()}*\n\n`;
             md += `---\n\n`;
 
@@ -2978,12 +2979,8 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this._showError('No active arena to export');
             return;
         }
-        if (!this.arena.summary) {
-            this._showError('No summary available. Generate a summary first.');
-            return;
-        }
         const summary = this.arena.summary;
-        this._exportMarkdownFromDialog(summary.teaser || '', summary.reflection || '', summary.title || '');
+        this._exportMarkdownFromDialog(summary?.teaser || '', summary?.reflection || '', summary?.title || '');
     }
 
     _exportMarkdownFromDialog(teaser, reflection, title) {
@@ -3022,8 +3019,16 @@ ${reflection || '*No reflection available.*'}
 
 ---
 
-*Exported from Chat Arena*
+## Conversation
+
 `;
+
+        for (const msg of this.arena.messages) {
+            if (msg.speaker === 'moderator') continue;
+            markdown += `**${msg.speaker}:**\n${msg.content}\n\n`;
+        }
+
+        markdown += `---\n\n*Exported from Chat Arena*\n`;
 
         const blob = new Blob([markdown], { type: 'text/markdown' });
         const url = URL.createObjectURL(blob);
