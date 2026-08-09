@@ -4956,8 +4956,11 @@ function updateAssistantContent(el, content, reasoningContent = null) {
                     // Complete message (e.g. from history load)
                     if (window.nui?.util?.markdownToHtml) {
                         nuiMd.innerHTML = window.nui.util.markdownToHtml(parsed.answer);
-                        // Prevent automatic connectedCallback from double-parsing if appended to DOM later
-                        nuiMd._isStreaming = true;
+                        // Prevent automatic connectedCallback from double-parsing if appended to DOM later.
+                        // Use _processed (NOT _isStreaming) — this element is complete, not streaming;
+                        // marking it streaming would make endStream() crash on missing _tempContainer
+                        // and block a later regeneration's beginStream().
+                        nuiMd._processed = true;
                     } else {
                         // Module not ready: rely on declarative markup that upgrades automatically later
                         const safeContent = parsed.answer.replace(/<\/script/gi, '<\\/script');
