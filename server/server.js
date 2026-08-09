@@ -53,10 +53,34 @@ let embedAvailable = true;
 let embedFailCount = 0;
 
 // ============================================
-// Prime Directive (fetched from workshop, cached per-request)
+// Prime Directive (fetched fresh from workshop, platform-filtered)
 // ============================================
+// The canonical Agents_Prime.md in MCP storage is shared by VS Code (loads it
+// verbatim as an instruction file) and the chat app (fetches it through this
+// function). Platform-specific sections in the canonical are wrapped in
+// HTML-comment markers:
+//     <!-- PLATFORM: vscode:start --> ... <!-- PLATFORM: vscode:end -->
+// Blocks whose platform list excludes the target are stripped here, so the
+// chat app never receives IDE-only content (self-sync, AppData paths, git
+// working-copy rules, repo-doc conventions, runSubagent delegation).
+// Marker contract: no nesting, `all` = every platform, comma-separated lists.
 
-async function fetchPrimeDirective() {
+function filterPlatformSections(md, target) {
+    const t = target.toLowerCase();
+    // Drop whole blocks whose platform list excludes the target.
+    md = md.replace(
+        /<!--\s*PLATFORM:\s*([^:]+?):start\s*-->[\s\S]*?<!--\s*PLATFORM:\s*[^:]+?:\s*end\s*-->/gi,
+        (match, list) => {
+            const platforms = list.split(',').map((s) => s.trim().toLowerCase());
+            return platforms.includes(t) || platforms.includes('all') ? match : '';
+        }
+    );
+    // Strip any markers that survived (blocks kept for this target).
+    md = md.replace(/<!--\s*PLATFORM:\s*[^:]+?:(?:start|end)\s*-->\s*/gi, '');
+    return md;
+}
+
+async function fetchPrimeDirective(target = 'chat') {
     try {
         const resp = await fetch('http://192.168.0.100:3100/storage/docs/Workshop/Agents_Prime.md', {
             signal: AbortSignal.timeout(3000)
@@ -68,7 +92,8 @@ async function fetchPrimeDirective() {
             const second = md.indexOf('---', 3);
             if (second !== -1) md = md.slice(second + 3).trimStart();
         }
-        return md;
+        // Strip IDE-only sections for the target platform (default: chat).
+        return filterPlatformSections(md, target);
     } catch (_) { return ''; }
 }
 

@@ -10,15 +10,15 @@ LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend*
 
 ### Deployment
 
-**Development** happens on **Coolkid** (this repo's primary machine). The database here is a stale copy of production data — it's disposable and safe to break. Test all storage/save-path changes here before pushing.
+Development happens **exclusively on BADKID** (this machine) — there is no separate
+dev/prod split and no network-share deployment anymore. This repo is worked on and
+run here directly.
 
-**Production** runs on **BADKID** at `\\BADKID\Stuff\SRV\LLM-Gateway-Chat`. The database there is live — do NOT run migration scripts, cleanup scripts, or experimental write operations against it. After committing and pushing changes, pull on BADKID:
+The database here is **live data** — do NOT run migration scripts, cleanup scripts,
+or experimental write operations against it without explicit user approval.
 
-```powershell
-git -C "\\BADKID\Stuff\SRV\LLM-Gateway-Chat" pull --recurse-submodules
-```
-
-The server auto-restarts when files change.
+The server does **not** auto-restart on file changes — restart it manually after
+backend edits (see `### Start Commands`).
 
 ### Key Characteristics
 
@@ -158,22 +158,6 @@ npm start
 
 # Navigate to http://localhost:8080/chat/
 ```
-
-### Deployment (Production Server)
-
-The production deployment lives on a network share. After committing and pushing
-changes, always pull on the deployment server:
-
-```powershell
-# Add safe directory exception (one-time, already done):
-# git config --global --add safe.directory '//BADKID/Stuff/SRV/LLM-Gateway-Chat'
-
-# Pull latest (including submodules):
-git -C "\\BADKID\Stuff\SRV\LLM-Gateway-Chat" pull --recurse-submodules
-```
-
-The server auto-restarts when files change (nodemon or similar). The share is at
-`\\BADKID\Stuff\SRV\LLM-Gateway-Chat` and is a git clone of this repo.
 
 ---
 
