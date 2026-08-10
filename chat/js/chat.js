@@ -88,17 +88,18 @@ const ARCHIVE_TOOLS = [
         type: 'function',
         function: {
             name: 'chat_preview_show',
-            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\n\nRender content in the chat\'s preview pane — a separate surface from the chat scrollback. Use it to show files, proposed edits, diffs, or any work product the user should see alongside the conversation. Calling with an existing id updates that item in place and brings it to front. The user can switch between shown items via a dropdown.\n\nPrefer content under ~32KB; for larger files, show the relevant excerpt. Content over 256KB is rejected. Syntax coloring is applied for html, css, javascript, typescript, and json; other languages render as plain monospace (still correct, just uncolored).',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Call this tool by name — do NOT route it through the workshop tools dispatcher or any MCP server; that returns Unknown method errors. It is a native browser tool.\n\nRender content in the chat\'s preview pane — a separate surface from the chat scrollback. The user can switch between shown items via a dropdown; calling with an existing id updates that item in place and brings it to front.\n\nTWO MODES — pass EXACTLY ONE of content or url, never both, never neither:\n\nMODE A — content (generated work product): pass id, title, and content with the actual text to render. Use when the thing to show only exists in your context — proposed edits, diffs, generated text, excerpts. \'markdown\' renders MD; html/css/javascript/typescript/json get syntax coloring; other languages render as plain monospace.\n\nMODE B — url (existing file on disk): pass url pointing at a file that already exists, typically a relative /storage/... path on your MCP server (the preview resolves it against your MCP origin automatically) or any absolute http(s) url. The preview fetches and displays the file directly — you do NOT regenerate or paste its content. This is the cheap path: after a forge or storage tool writes a file, just hand the url here to show it. id, title, language, and source are optional in this mode and are derived from the url (basename → title, extension → language, url → source) when omitted.\n\nPrefer content under ~32KB; anything over 256KB (generated content or fetched file) is rejected.',
             parameters: {
                 type: 'object',
                 properties: {
-                    id: { type: 'string', description: 'Stable identifier for this preview item. Reusing an id updates the existing item rather than creating a new one. Example: \'file:server.js\' or \'proposed-edit:config.json\'.' },
-                    title: { type: 'string', description: 'Human-readable label shown in the dropdown and header. Example: \'server.js\' or \'Proposed: config.json\'.' },
-                    language: { type: 'string', description: 'Content type. Use \'markdown\' for rendered MD preview. Any other value (javascript, python, json, text, etc.) renders as syntax-highlighted code. Default: text.', 'default': 'text' },
-                    content: { type: 'string', description: 'The full content to render. For markdown, this is the raw MD source. For code, this is the source text.' },
-                    source: { type: 'string', description: 'Optional provenance label. Example: \'storage:foo.js\', \'proposed-edit:foo.js\', \'generated\'. Shown as a subtitle in the header.' }
+                    id: { type: 'string', description: 'Stable identifier for this preview item. Reusing an id updates the existing item. Example: \'file:server.js\'. Required in MODE A (content); derived from the url in MODE B.' },
+                    title: { type: 'string', description: 'Human-readable label shown in the dropdown and header. Required in MODE A (content); derived from the url basename in MODE B.' },
+                    language: { type: 'string', description: 'Content type. \'markdown\' renders MD; other values (javascript, python, json, text, etc.) render as syntax-highlighted code. Default: text. In MODE B (url), inferred from the file extension when omitted.' },
+                    content: { type: 'string', description: 'MODE A (generated) only: the full text to render — raw MD source or code text. Mutually exclusive with url.' },
+                    url: { type: 'string', description: 'MODE B (fetched file) only: a /storage/... path or absolute http(s) url of an existing file to fetch and display. Mutually exclusive with content.' },
+                    source: { type: 'string', description: 'Optional provenance label shown as a subtitle in the header. Defaults to the url in MODE B.' }
                 },
-                required: ['id', 'title', 'content']
+                required: []
             }
         }
     },
@@ -1215,7 +1216,9 @@ function _decoratePreviewToolButton(toolEl, toolName, args) {
     btn.innerHTML = '<button type="button"><nui-icon name="article"></nui-icon></button>';
     btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        preview.show(args);
+        // show() is async now (url mode fetches) — don't let a failed re-fetch
+        // become an unhandled rejection.
+        preview.show(args).catch(err => console.error('[preview] reopen failed:', err));
     });
 
     // Insert before the delete button if present, else append
@@ -1600,6 +1603,10 @@ async function init() {
 
     // Initialize preview pane (needs DOM ready + NUI loaded for enableDrag)
     preview.init();
+
+    // URL-fetch mode needs the MCP server origin to resolve relative /storage/...
+    // paths. Topology belongs to the client — chat.js owns getMcpServerOrigin.
+    preview.setMcpOriginResolver(getMcpServerOrigin);
 
     // When preview content changes, stop any active TTS — the old audio
     // no longer matches what's on screen. The user can click speak again

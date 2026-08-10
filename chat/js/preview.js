@@ -10,6 +10,13 @@
 // The pane is a shared surface across per-chat containers — reset is a
 // correctness requirement, not just hygiene.
 
+import {
+    resolvePreviewUrl,
+    inferLanguageFromUrl,
+    deriveIdFromUrl,
+    deriveTitleFromUrl
+} from './preview-url.js';
+
 // ============================================
 // State (module-level, per-conversation)
 // ============================================
@@ -37,6 +44,22 @@ const MAX_WIDTH_RATIO = 0.8;       // 80% of chat-main width
 const DEFAULT_WIDTH_RATIO = 0.4;   // 40% of chat-main width on first open
 const STORAGE_KEY = 'preview-width';
 const MAX_CONTENT_BYTES = 256 * 1024;  // 256KB hard cap
+const FETCH_TIMEOUT_MS = 15000;        // url-mode fetch cap — never block forever
+
+// Resolver for the MCP server origin, injected by chat.js (getMcpServerOrigin).
+// Used to turn relative /storage/... paths into absolute fetch URLs. Topology
+// belongs to the client — chat.js owns the origin, preview just asks for it.
+let _mcpOriginResolver = null;
+
+/**
+ * Inject the MCP server origin resolver. Called by chat.js during init.
+ * Must be a function returning the origin string (or null when unconfigured).
+ * @param {() => string|null} resolverFn
+ */
+function setMcpOriginResolver(resolverFn) {
+    if (typeof resolverFn !== 'function') throw new Error('preview.setMcpOriginResolver: function required');
+    _mcpOriginResolver = resolverFn;
+}
 
 // ============================================
 // Initialization
@@ -102,41 +125,69 @@ function init() {
  * Show or update a preview item. Called by the chat_preview_show local tool.
  * Brings the item to front (selects it). Opens the pane if hidden.
  *
+ * TWO MODES — pass EXACTLY ONE of content or url:
+ *   content mode: render generated text (id, title, content required)
+ *   url mode:     fetch an existing file and display it (url only required;
+ *                 id/title/language/source derived from the url when omitted)
+ *
  * @param {Object} args - Tool arguments
  * @param {string} args.id - Stable identifier (reuse to update in place)
  * @param {string} args.title - Human-readable label for dropdown
- * @param {string} args.content - The content to render
+ * @param {string} [args.content] - Content mode: the text to render
+ * @param {string} [args.url] - Url mode: /storage/... path or absolute http(s) url to fetch
  * @param {string} [args.language='text'] - 'markdown' for rendered MD, else code language
  * @param {string} [args.source] - Optional provenance label
- * @returns {Object} MCP-style result { content: [{ type: 'text', text }] }
+ * @returns {Promise<Object>} MCP-style result { content: [{ type: 'text', text }] }
  */
-function show(args) {
+async function show(args) {
     // Success conditions — fail fast on invalid input
     if (!args || typeof args !== 'object') throw new Error('preview.show: args object required');
-    if (typeof args.id !== 'string' || args.id.length === 0) throw new Error('preview.show: id required');
-    if (typeof args.title !== 'string' || args.title.length === 0) throw new Error('preview.show: title required');
-    if (typeof args.content !== 'string' || args.content.length === 0) throw new Error('preview.show: content required');
-    if (args.content.length > MAX_CONTENT_BYTES) {
-        throw new Error(`preview.show: content exceeds ${MAX_CONTENT_BYTES} byte cap (${args.content.length} bytes). Excerpt the file and show the relevant portion.`);
+    const hasContent = typeof args.content === 'string' && args.content.length > 0;
+    const hasUrl = typeof args.url === 'string' && args.url.length > 0;
+    if (hasContent && hasUrl) throw new Error('preview.show: provide EITHER content OR url — never both');
+    if (!hasContent && !hasUrl) throw new Error('preview.show: content or url required');
+
+    let id = args.id;
+    let title = args.title;
+    let language = typeof args.language === 'string' && args.language.length > 0 ? args.language : 'text';
+    let source = typeof args.source === 'string' && args.source.length > 0 ? args.source : null;
+    let content;
+
+    if (hasContent) {
+        // MODE A — generated content (existing behavior)
+        content = args.content;
+        if (typeof id !== 'string' || id.length === 0) throw new Error('preview.show: id required when using content');
+        if (typeof title !== 'string' || title.length === 0) throw new Error('preview.show: title required when using content');
+    } else {
+        // MODE B — fetched file: the model hands just the url, the preview
+        // fetches and displays it. No regeneration of content.
+        const resolvedUrl = resolvePreviewUrl(args.url, _mcpOriginResolver);
+        content = await _fetchUrlText(resolvedUrl);
+        if (typeof id !== 'string' || id.length === 0) id = deriveIdFromUrl(resolvedUrl);
+        if (typeof title !== 'string' || title.length === 0) title = deriveTitleFromUrl(resolvedUrl);
+        if (typeof args.language !== 'string' || args.language.length === 0) language = inferLanguageFromUrl(resolvedUrl);
+        if (!source) source = resolvedUrl;
     }
-    const language = typeof args.language === 'string' ? args.language : 'text';
-    const source = typeof args.source === 'string' ? args.source : null;
+
+    if (content.length > MAX_CONTENT_BYTES) {
+        throw new Error(`preview.show: content exceeds ${MAX_CONTENT_BYTES} byte cap (${content.length} bytes). Excerpt it and pass content, or show a smaller file.`);
+    }
 
     // Upsert into items map
-    const isNew = !items.has(args.id);
-    const prevItem = items.get(args.id);
-    const contentChanged = isNew || prevItem.content !== args.content;
+    const isNew = !items.has(id);
+    const prevItem = items.get(id);
+    const contentChanged = isNew || prevItem.content !== content;
 
-    items.set(args.id, {
-        id: args.id,
-        title: args.title,
+    items.set(id, {
+        id,
+        title,
         language,
-        content: args.content,
+        content,
         source
     });
 
     // Select this item (brings to front)
-    activeId = args.id;
+    activeId = id;
 
     // Open pane if hidden
     openPane();
@@ -155,12 +206,40 @@ function show(args) {
             type: 'text',
             text: JSON.stringify({
                 shown: true,
-                id: args.id,
+                id,
                 selected: true,
-                itemCount: items.size
+                itemCount: items.size,
+                mode: hasContent ? 'content' : 'url',
+                url: hasUrl ? args.url : undefined
             })
         }]
     };
+}
+
+// ============================================
+// Internal: URL fetch mode helpers
+// ============================================
+
+/**
+ * Fetch a url and return its text content. Network is unpredictable — bounded
+ * by FETCH_TIMEOUT_MS so a hanging server never leaves the tool stuck.
+ * Fails loudly on non-2xx and on timeout.
+ */
+async function _fetchUrlText(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error(`preview: fetch failed (${res.status} ${res.statusText}) for ${url}`);
+        return await res.text();
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error(`preview: fetch timed out after ${FETCH_TIMEOUT_MS}ms for ${url}`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 /**
@@ -351,5 +430,6 @@ export const preview = {
     reset,
     getActivePlainText,
     getState,
+    setMcpOriginResolver,
     set onContentChange(fn) { _onContentChange = fn; }
 };
