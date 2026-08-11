@@ -63,7 +63,13 @@ function updateChunkSavingsPill(stats) {
         _chunkSavings.chatId = currentChatId;
         _chunkSavings.charsSaved = 0;
         _chunkSavings.displayed = 0;
+        _chunkSavings.lastAt = 0;
     }
+    // updateUsageDisplay fires from multiple paths per request (progress
+    // events + finalize). The stats object carries `at` (set once per
+    // getMessagesForApi call) — accumulate each request exactly once.
+    if (stats.at && stats.at === _chunkSavings.lastAt) return;
+    if (stats.at) _chunkSavings.lastAt = stats.at;
     const saved = Math.max(0, (stats.bytesIn || 0) - (stats.bytesOut || 0));
     _chunkSavings.charsSaved += saved;
 
