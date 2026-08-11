@@ -370,6 +370,9 @@
                 <nui-checkbox title="Pin this chat to the top of the history list">
                     <input type="checkbox" id="chat-options-pin-toggle"> Pin to Top
                 </nui-checkbox>
+                <nui-checkbox title="Chunk-store: losslessly deduplicate repeated content in the outgoing payload (references instead of copies). History and UI are untouched; only what the model receives is compressed.">
+                    <input type="checkbox" id="chat-options-chunk-toggle"> Compress context (chunk dedup)
+                </nui-checkbox>
             </div>
 
             <div class="sidebar-section">

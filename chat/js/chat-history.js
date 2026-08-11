@@ -49,7 +49,8 @@ export class ChatHistory {
                         title: conv.title,
                         model: conv.model,
                         systemPrompt: conv.systemPrompt,
-                        category: conv.category
+                        category: conv.category,
+                        chunkTransform: !!conv.chunkTransform
                     };
                     if (conv.summary && typeof conv.summary === 'object' && !Array.isArray(conv.summary)) {
                         fields.summary = conv.summary;
@@ -75,7 +76,8 @@ export class ChatHistory {
             category: session.category || '',
             summary: session.summary || '',
             mode: session.mode || 'direct',
-            pinned: session.pinned || false
+            pinned: session.pinned || false,
+            chunkTransform: session.chunkTransform || false
         };
     }
 

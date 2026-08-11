@@ -5,6 +5,7 @@
 import { imageStore } from './image-store.js';
 import { storage } from './storage.js';
 import { backendClient } from './api-client.js';
+import { buildChunkView } from './chunk-view.js';
 
 const _CONFIG = window.CHAT_CONFIG || {};
 const _USE_BACKEND = _CONFIG.enableBackend === true && typeof _CONFIG.backendUrl === 'string';
@@ -857,6 +858,23 @@ export class Conversation {
                 } else if (lastThinkingSignature && msg.tool_calls) {
                     msg.thinking_signature = lastThinkingSignature;
                 }
+            }
+        }
+
+        // Chunk-store transform (per-chat flag, lossless dedup). When enabled
+        // for this conversation, large repeated contents collapse to one-line
+        // references. Canonical history (this.exchanges) is never touched —
+        // the transform only shapes the outgoing payload. Fail loud: any
+        // engine exception falls back to the raw messages and logs.
+        if (this.chunkTransform === true) {
+            try {
+                const { messages: tx, stats } = buildChunkView(messages);
+                if (stats.exactDupes + stats.nearDupes > 0) {
+                    console.log(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${Math.round((1 - stats.bytesOut / stats.bytesIn) * 100)}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes}`);
+                }
+                return tx;
+            } catch (e) {
+                console.error('[chunk-view] transform failed, sending raw:', e);
             }
         }
 

@@ -5493,6 +5493,11 @@ async function switchChat(targetChatId) {
     }
     conversation = conv;
 
+    // Per-chat chunk-transform flag (chunk-store: lossless payload dedup).
+    // Lives on the session doc; consulted by getMessagesForApi at send time.
+    const chatMeta = chatHistory.conversations.find(c => c.id === targetChatId);
+    conv.chunkTransform = !!(chatMeta && chatMeta.chunkTransform);
+
     // 3. Sync session ID from the Conversation object itself.
     // conv.sessionId is always set (derived from storageKey), unlike
     // chatHistory which may be empty when backend is disabled.
@@ -6159,6 +6164,7 @@ async function openChatOptions(chatId) {
     const titleInput = content.getElementById('chat-options-title-input');
     const categoryInput = content.getElementById('chat-options-category-input');
     const pinToggle = content.getElementById('chat-options-pin-toggle');
+    const chunkToggle = content.getElementById('chat-options-chunk-toggle');
     const createdDateSpan = content.getElementById('chat-options-created-date');
     const updatedDateSpan = content.getElementById('chat-options-updated-date');
     const msgCountSpan = content.getElementById('chat-options-msg-count');
@@ -6166,6 +6172,7 @@ async function openChatOptions(chatId) {
     if (titleInput) titleInput.value = chatMeta.title || 'New Chat';
     if (categoryInput) categoryInput.value = chatMeta.category || '';
     if (pinToggle) pinToggle.checked = !!chatMeta.pinned;
+    if (chunkToggle) chunkToggle.checked = !!chatMeta.chunkTransform;
     if (createdDateSpan) createdDateSpan.textContent = new Date(chatMeta.timestamp).toLocaleString();
     if (updatedDateSpan) updatedDateSpan.textContent = new Date(chatMeta.updatedAt).toLocaleString();
 
@@ -6207,6 +6214,7 @@ async function openChatOptions(chatId) {
            const newTitle = titleInput?.value.trim() || '';
            const newCategory = categoryInput?.value.trim() || '';
            const newPinned = pinToggle?.checked || false;
+           const newChunkTransform = chunkToggle?.checked || false;
            
            let changed = false;
            if (newTitle && chatMeta.title !== newTitle) {
@@ -6220,6 +6228,13 @@ async function openChatOptions(chatId) {
            if (chatMeta.pinned !== newPinned) {
                chatMeta.pinned = newPinned;
                changed = true;
+           }
+           if (!!chatMeta.chunkTransform !== newChunkTransform) {
+               chatMeta.chunkTransform = newChunkTransform;
+               changed = true;
+               // Live-update the active conversation if it's this chat
+               const conv = activeConversations.get(chatId);
+               if (conv) conv.chunkTransform = newChunkTransform;
            }
            
            if (changed) {
