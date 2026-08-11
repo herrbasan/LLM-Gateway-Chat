@@ -869,13 +869,16 @@ export class Conversation {
         if (this.chunkTransform === true) {
             try {
                 const { messages: tx, stats } = buildChunkView(messages);
-                if (stats.exactDupes + stats.nearDupes > 0) {
-                    console.log(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${Math.round((1 - stats.bytesOut / stats.bytesIn) * 100)}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes}`);
-                }
+                stats.at = Date.now();
+                this._lastChunkStats = stats;
+                const savedPct = stats.bytesIn ? Math.round((1 - stats.bytesOut / stats.bytesIn) * 100) : 0;
+                console.log(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${savedPct}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes}`);
                 return tx;
             } catch (e) {
                 console.error('[chunk-view] transform failed, sending raw:', e);
             }
+        } else {
+            this._lastChunkStats = null;
         }
 
         return messages;

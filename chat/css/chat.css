@@ -19,6 +19,39 @@ button, input, textarea, select, a {
     --chat-bubble-radius: var(--border-radius2);
 }
 
+/* Chunk savings pill — header-center widget showing tokens the dedup
+   transform kept out of requests. Hidden until the first saving lands. */
+#chunk-savings-pill {
+    display: none;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.28rem 0.85rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-highlight) 14%, var(--color-base));
+    border: thin solid color-mix(in srgb, var(--color-highlight) 45%, transparent);
+    color: var(--color-highlight);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: default;
+    user-select: none;
+    white-space: nowrap;
+}
+#chunk-savings-pill nui-icon {
+    font-size: 1rem;
+}
+#chunk-savings-pill .chunk-savings-unit {
+    font-weight: 400;
+    color: var(--text-color-dim);
+    font-size: 0.78rem;
+}
+#chunk-savings-pill.pulse {
+    animation: chunk-pill-pulse 0.9s ease-out;
+}
+@keyframes chunk-pill-pulse {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-highlight) 55%, transparent); }
+    100% { box-shadow: 0 0 0 14px transparent; }
+}
+
 /* Backend-offline alarm — fixed at top of the content area, impossible to miss.
    Hidden by default; chat.js toggles [data-visible]. Uses the error color so it
    reads as an alarm, not a notification. Non-dismissible while offline. */

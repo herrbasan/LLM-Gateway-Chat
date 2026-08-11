@@ -49,6 +49,59 @@ const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http:
 const BACKEND_API_KEY = CONFIG.backendApiKey || '';
 const ENABLE_ARCHIVE_TOOLS = CONFIG.enableArchiveTools !== false;
 
+// ============================================
+// Chunk savings pill (header widget)
+// ============================================
+// Per-chat accumulator: chars the transform removed from outgoing payloads,
+// shown as estimated tokens (chars/3.5, consistent with our other estimates).
+// In-memory only — testing-phase widget, no persistence.
+const _chunkSavings = { chatId: null, charsSaved: 0, displayed: 0, animFrame: null };
+
+function updateChunkSavingsPill(stats) {
+    if (!stats || !currentChatId) return;
+    if (_chunkSavings.chatId !== currentChatId) {
+        _chunkSavings.chatId = currentChatId;
+        _chunkSavings.charsSaved = 0;
+        _chunkSavings.displayed = 0;
+    }
+    const saved = Math.max(0, (stats.bytesIn || 0) - (stats.bytesOut || 0));
+    _chunkSavings.charsSaved += saved;
+
+    const pill = document.getElementById('chunk-savings-pill');
+    const valueEl = document.getElementById('chunk-savings-value');
+    if (!pill || !valueEl) return;
+    if (_chunkSavings.charsSaved <= 0) return;
+
+    pill.style.display = 'inline-flex';
+    const target = Math.round(_chunkSavings.charsSaved / 3.5);
+
+    // Count-up animation toward the new total
+    if (_chunkSavings.animFrame) cancelAnimationFrame(_chunkSavings.animFrame);
+    const start = _chunkSavings.displayed;
+    const delta = target - start;
+    if (delta <= 0) return;
+    const t0 = performance.now();
+    const DURATION = 900;
+    const step = (t) => {
+        const p = Math.min(1, (t - t0) / DURATION);
+        const eased = 1 - Math.pow(1 - p, 3);
+        _chunkSavings.displayed = Math.round(start + delta * eased);
+        valueEl.textContent = _chunkSavings.displayed.toLocaleString();
+        if (p < 1) {
+            _chunkSavings.animFrame = requestAnimationFrame(step);
+        } else {
+            _chunkSavings.animFrame = null;
+            pill.classList.remove('pulse');
+            void pill.offsetWidth; // restart animation
+            pill.classList.add('pulse');
+        }
+    };
+    _chunkSavings.animFrame = requestAnimationFrame(step);
+
+    const refs = (stats.exactDupes || 0) + (stats.nearDupes || 0);
+    pill.title = `Chunk dedup — ~${target.toLocaleString()} tokens kept out of requests this chat.\nLast request: ${(stats.bytesOut / 1000).toFixed(0)}K sent vs ${(stats.bytesIn / 1000).toFixed(0)}K raw, ${refs} reference${refs === 1 ? '' : 's'}.`;
+}
+
 // Resolve the configured MCP server origin — the single source of truth for
 // how THIS client reaches the workshop (LAN IP locally, dyndns remotely).
 // Never hardcode a storage/MCP host: derive it from the user's configured
@@ -4216,6 +4269,17 @@ function updateUsageDisplay(el, contextData, usageData = null, streamStats = nul
             text += ` | ${streamStats.ttft}ms TTFT`;
         }
 
+        // Chunk-store: show what was actually sent after dedup (if the
+        // per-chat transform is enabled and produced stats this request).
+        const chunkStats = conversation?._lastChunkStats;
+        if (chunkStats) {
+            const savedPct = chunkStats.bytesIn ? Math.round((1 - chunkStats.bytesOut / chunkStats.bytesIn) * 100) : 0;
+            const outK = (chunkStats.bytesOut / 1000).toFixed(0);
+            const inK = (chunkStats.bytesIn / 1000).toFixed(0);
+            text += ` | dedup: ${outK}K/${inK}K chars (-${savedPct}%), ${chunkStats.exactDupes + chunkStats.nearDupes} refs`;
+            updateChunkSavingsPill(chunkStats);
+        }
+
         // Only update if value changed - prevents tooltip flicker
         if (valueSpan.textContent !== text) {
             valueSpan.textContent = text;
@@ -5497,6 +5561,15 @@ async function switchChat(targetChatId) {
     // Lives on the session doc; consulted by getMessagesForApi at send time.
     const chatMeta = chatHistory.conversations.find(c => c.id === targetChatId);
     conv.chunkTransform = !!(chatMeta && chatMeta.chunkTransform);
+
+    // Savings pill follows the chat: reset accumulator + visibility.
+    const pill = document.getElementById('chunk-savings-pill');
+    if (pill) {
+        _chunkSavings.chatId = targetChatId;
+        _chunkSavings.charsSaved = 0;
+        _chunkSavings.displayed = 0;
+        pill.style.display = 'none';
+    }
 
     // 3. Sync session ID from the Conversation object itself.
     // conv.sessionId is always set (derived from storageKey), unlike
