@@ -22,3 +22,6 @@ server/logs/
 server/data/
 .env
 
+docs/chunk-store/corpus/
+docs/chunk-store/results/
+docs/chunk-store/example-history.json
