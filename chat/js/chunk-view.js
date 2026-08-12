@@ -290,7 +290,12 @@ export const CHUNK_CONVENTION_PARAGRAPH =
     'same content with small edits or reordering. In both cases you ALREADY ' +
     'HAVE the full content at the referenced label — treat the reference as ' +
     'that content. A label [chunk_N, diff of chunk_M] contains a unified diff: ' +
-    'apply it mentally to chunk_M for the full content.';
+    'apply it mentally to chunk_M for the full content. ' +
+    'These labels are produced by a deterministic transform, not by you. If ' +
+    'one looks wrong — a reference to a chunk you cannot find, a doubled ' +
+    'label, a reference where content should be — say so explicitly in your ' +
+    'reply instead of working around it. You are the only observer who sees ' +
+    'the transformed view; malformed labels are bugs worth reporting.';
 
 const MIN_CHAIN_CHARS = 2000;   // below this, references aren't worth the label
 const REBASE_JACCARD = 0.25;    // diff mode: below this overlap → new base chunk
