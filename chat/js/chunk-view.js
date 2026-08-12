@@ -1,16 +1,21 @@
 // ============================================================
-// chunk-view.js — the chunk-store transform engine (APP COPY).
+// chunk-view.js — the chunk-store transform engine.
 //
-// Canonical development copy lives in docs/chunk-store/chunk-view.js
-// (simulation/probes). This is the production instance loaded by the
-// chat app. Keep them in sync manually — the file is zero-dependency
-// by design so the port is a plain copy.
+// STANDALONE module: used by the replay simulation (docs/chunk-store/)
+// and designed to port verbatim into chat/js/ (browser ES module).
+// Zero dependencies. No DOM, no Node APIs, no ambient state.
 //
 // Input:  OpenAI-style message list (already built by getMessagesForApi).
 // Output: transformed message list — same envelope, content replaced by
-//         chunk labels/references where dedup applies.
-//   - Dedup: exact hash + shape-aware line-set near-dup (JSON-RPC aware)
-//   - Diff-chains: PARKED behind ENABLE_DIFFS=false (see plan)
+//         chunk-labeled diffs where a chain applies.
+//
+// Rules implemented (from plan-chunk-store.md):
+//   - Chain identity: tool name + content-affecting args (allowlist)
+//   - Rebase check: line-hash Jaccard < 0.25 → new base chunk
+//   - Diff: line-based unified diff, 3 context lines, @@ anchors
+//   - Apply: self-validating (context lines must match), fail loud
+//   - Chain sources: tool messages AND assistant tool_calls args with
+//     large content fields (write payloads live in args, not results)
 //   - Shape invariance: only message.content strings change
 // ============================================================
 
@@ -276,13 +281,15 @@ export function applyDiff(baseText, diffText) {
 export const CHUNK_CONVENTION_PARAGRAPH =
     'This conversation uses content-addressed chunks. Large contents are ' +
     'labeled [chunk_N] — the label may prefix a message body OR appear inside ' +
-    'a tool call\'s arguments. If a later message would repeat a chunk you ' +
-    'have already seen, it is replaced by a one-line reference: ' +
-    '[chunk_M = chunk_N] means byte-identical content; ' +
-    '[chunk_M ≈ chunk_N (same content, minor differences)] means the same ' +
-    'content with small edits or reordering. In both cases you ALREADY HAVE ' +
-    'the full content at the referenced label — treat the reference as that ' +
-    'content. A label [chunk_N, diff of chunk_M] contains a unified diff: ' +
+    'a tool call\'s arguments. Labels persist: when chunk content is written ' +
+    'to a file, the label is stored with it, so a file may legitimately begin ' +
+    'with a [chunk_N] line — that is normal, not a bug, and not a reference. ' +
+    'If a later message would repeat a chunk you have already seen, it is ' +
+    'replaced by a one-line reference: [chunk_M = chunk_N] means byte-identical ' +
+    'content; [chunk_M ≈ chunk_N (same content, minor differences)] means the ' +
+    'same content with small edits or reordering. In both cases you ALREADY ' +
+    'HAVE the full content at the referenced label — treat the reference as ' +
+    'that content. A label [chunk_N, diff of chunk_M] contains a unified diff: ' +
     'apply it mentally to chunk_M for the full content.';
 
 const MIN_CHAIN_CHARS = 2000;   // below this, references aren't worth the label
@@ -359,10 +366,20 @@ export function buildChunkView(messages) {
     let chunkCounter = 0;
     let hasChunks = false;
 
+    // Strip OUR OWN leading labels before fingerprinting — idempotence.
+    // A labeled chunk stored to disk (the model writes the label into file
+    // content) comes back wearing [chunk_N]; without stripping, it reads as
+    // new content and gets a second label stamped on top. Repeatedly.
+    function stripOwnLabels(content) {
+        return content.replace(/^(\[chunk_\d+[^\]\n]*\]\n?)+/, '');
+    }
+
     // Core: dedup first, then (optionally) diff-chain. Returns { text, emitted }.
     function transform(key, content) {
-        // 1) exact dedup
-        const fp = fingerprint(content);
+        const hadLabel = /^\[chunk_\d+/.test(content);
+        const bare = stripOwnLabels(content);
+        // 1) exact dedup (on the BARE content — labels don't affect identity)
+        const fp = fingerprint(bare);
         const hit = seen.get(fp.hash);
         if (hit) {
             chunkCounter++;
@@ -417,9 +434,22 @@ export function buildChunkView(messages) {
             stats.chunks++; hasChunks = true;
             return { text: `[${id0}]\n${content}`, emitted: true };
         }
-        // 4) first sight (dedup mode): register + label so later refs resolve
+        // 4) first sight (dedup mode): register + label so later refs resolve.
+        // If the content ALREADY wears our label (stored earlier, now re-sent),
+        // don't stamp a second one — register the bare content so future
+        // unlabeled copies still dedup against it, and pass it through as-is.
+        if (hadLabel) {
+            const existing = content.match(/^\[chunk_(\d+)/);
+            const keepId = existing ? `chunk_${existing[1]}` : null;
+            if (keepId) {
+                seen.set(fp.hash, { id: keepId, text: bare });
+                lineSets.push({ id: keepId, set });
+                stats.chunks++; hasChunks = true;
+            }
+            return { text: content, emitted: true };
+        }
         const id = `chunk_${++chunkCounter}`;
-        seen.set(fp.hash, { id, text: content });
+        seen.set(fp.hash, { id, text: bare });
         lineSets.push({ id, set });
         stats.chunks++; hasChunks = true;
         return { text: `[${id}]\n${content}`, emitted: true };
