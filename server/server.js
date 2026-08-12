@@ -1501,6 +1501,7 @@ const routes = {
       model: body.model || null,
       systemPrompt: body.systemPrompt || '',
       arenaConfig: body.arenaConfig || null,
+      chunkTransform: body.chunkTransform === true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messageCount: 0,

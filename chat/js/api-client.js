@@ -189,7 +189,8 @@ export class BackendClient {
         return this._request('POST', '/api/chats', {
             title: params.title || 'New Chat',
             mode: params.mode || 'direct',
-            model: params.model || null
+            model: params.model || null,
+            chunkTransform: params.chunkTransform === true
         });
     }
 

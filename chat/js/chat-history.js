@@ -96,7 +96,11 @@ export class ChatHistory {
             model: '',
             systemPrompt: '',
             category: '',
-            summary: ''
+            summary: '',
+            // Chunk dedup default-on for new chats (field-proven since
+            // 2026-08-11). Per-chat toggle in chat options still overrides;
+            // CONFIG.chunkTransformDefault === false restores opt-in.
+            chunkTransform: (window.CHAT_CONFIG || {}).chunkTransformDefault !== false
         };
 
         this.conversations.unshift(conversation);
@@ -104,7 +108,7 @@ export class ChatHistory {
 
         if (USE_BACKEND && backendClient.user) {
             try {
-                const serverSession = await backendClient.createSession({ title: 'New Chat' });
+                const serverSession = await backendClient.createSession({ title: 'New Chat', chunkTransform: conversation.chunkTransform });
                 console.log('[ChatHistory] Backend session created:', serverSession.id, '(local was:', id, ')');
                 conversation.id = serverSession.id;
                 conversation.createdAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.createdAt).getTime());
