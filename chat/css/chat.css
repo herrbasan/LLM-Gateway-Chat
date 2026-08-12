@@ -89,6 +89,46 @@ button, input, textarea, select, a {
     50% { box-shadow: 0 6px 32px rgba(211, 47, 47, 0.95); }
 }
 
+/* Session-expired alarm — same visual language as the offline banner, but
+   amber (warning, not network failure) and with a re-login action. Stays up
+   until re-login; the login dialog itself is dismissable so in-flight content
+   remains readable/copyable underneath. */
+#auth-expired-banner {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9001;
+    align-items: center;
+    gap: 0.6rem;
+    max-width: min(56rem, 92vw);
+    margin-top: 0.5rem;
+    padding: 0.65rem 1rem;
+    background: #b26a00;
+    color: #fff;
+    border-radius: var(--border-radius2, 0.5rem);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    font-size: 0.9rem;
+    line-height: 1.35;
+}
+#auth-expired-banner[data-visible="true"] {
+    display: flex;
+}
+#auth-expired-banner #relogin-btn {
+    margin-left: 0.5rem;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid rgba(255, 255, 255, 0.7);
+    border-radius: var(--border-radius1, 0.3rem);
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    font: inherit;
+}
+#auth-expired-banner #relogin-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
 /* Layout */
 
 nui-main, nui-app[data-layout="app"] nui-content>nui-main {

@@ -64,11 +64,15 @@ export class Conversation {
     // exists there. Content+role is a strong-enough fingerprint for this —
     // identical consecutive messages from the same role are vanishingly rare.
     async drainCrashNet() {
-        if (!_USE_BACKEND || !backendClient.user || !this.sessionId) return 0;
+        if (!_USE_BACKEND || !this.sessionId) return 0;
         const queue = this._crashNetRead();
         if (queue.length === 0) return 0;
 
         // Snapshot what's already on the backend so we don't duplicate it.
+        // Do this BEFORE the user guard: while logged out (401) the fetch fails
+        // and we skip dedupe — sendMessage will 401 too, entries stay queued,
+        // zero data loss. Only drain blind when the backend is definitively
+        // unreachable AND we're logged out (nothing else we can do).
         let existing = new Set();
         try {
             const data = await backendClient.getSession(this.sessionId);
@@ -76,9 +80,14 @@ export class Conversation {
                 existing.add(`${m.role}${m.content || ''}`);
             }
         } catch (err) {
-            // Can't verify backend state (still down) — don't drain blind.
-            return 0;
+            if (backendClient.user) {
+                // Logged in but backend unreachable — don't drain blind.
+                return 0;
+            }
+            // Logged out + unreadable: backend down or session expired. Queue
+            // stays intact; entries will re-send after re-login.
         }
+        if (!backendClient.user) return 0;
 
         let sent = 0;
         const remaining = [];
@@ -137,7 +146,16 @@ export class Conversation {
     }
 
     _syncMessage(role, content, model = null, exchangeId = null, metadata = null, attachments = null) {
-        if (!_USE_BACKEND || !backendClient.user || !this.sessionId) return;
+        if (!_USE_BACKEND || !this.sessionId) return true;
+        if (!backendClient.user) {
+            // Session expired / logged out — the 401 handler nulled backendClient.user,
+            // and without this branch every message from here on would silently vanish.
+            // Crash-net NOW (survives reload); drainCrashNet() flushes after re-login.
+            console.warn('[Conversation] No backend user — crash-netting message:', role, 'sessionId:', this.sessionId);
+            this._crashNetAppend({ role, content, model, metadata: metadata || null, ts: Date.now() });
+            if (exchangeId) this._pendingBackendSync.set(exchangeId, { role, content, model });
+            return false;
+        }
         const body = { role, content, model };
         if (attachments) body.attachments = attachments;
         if (metadata) Object.assign(body, metadata);
@@ -159,11 +177,12 @@ export class Conversation {
                 console.warn('[Conversation] Backend sync failed:', err.message, 'sessionId:', this.sessionId);
                 if (exchangeId) this._pendingBackendSync.set(exchangeId, { role, content, model });
                 // Write-through to the localStorage crash-net so the message
-                // survives a page reload while the backend is down. Drained back
-                // via drainCrashNet() when the backend recovers. This is the
-                // data-loss fix for the backend-down incident (2026-07-29).
+                // survives a page reload. Append UNCONDITIONALLY — the 401 handler
+                // may already have nulled backendClient.user; gating on it here
+                // was the 2026-08-12 data-loss bug.
                 this._crashNetAppend({ role, content, model, metadata: metadata || null, ts: Date.now() });
             });
+        return true;
     }
 
     // ============================================
@@ -868,17 +887,22 @@ export class Conversation {
         // engine exception falls back to the raw messages and logs.
         if (this.chunkTransform === true) {
             try {
-                const { messages: tx, stats } = buildChunkView(messages);
+                const { messages: tx, stats, chunkTable } = buildChunkView(messages, {
+                    retirements: this._retirements || {},
+                    retirementTools: true
+                });
                 stats.at = Date.now();
                 this._lastChunkStats = stats;
+                this._lastChunkTable = chunkTable;
                 const savedPct = stats.bytesIn ? Math.round((1 - stats.bytesOut / stats.bytesIn) * 100) : 0;
-                console.log(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${savedPct}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes}`);
+                console.log(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${savedPct}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes} retired=${stats.retired}`);
                 return tx;
             } catch (e) {
                 console.error('[chunk-view] transform failed, sending raw:', e);
             }
         } else {
             this._lastChunkStats = null;
+            this._lastChunkTable = null;
         }
 
         return messages;
@@ -1003,6 +1027,12 @@ export class Conversation {
                         this.exchanges = this._backendMessagesToExchanges(data.messages);
                         loadedFromBackend = true;
                     }
+                    // Retirement map (chunk-store phase 2): { [contentHash]: { distill, at } }
+                    // lives on the session doc next to chunkTransform. Tombstones are
+                    // applied at assembly; this map is the only durable state.
+                    this._retirements = (data?.session?.retirements && typeof data.session.retirements === 'object')
+                        ? data.session.retirements
+                        : {};
                 } catch (err) {
                     console.warn('[Conversation] Backend load failed:', err.message);
                 }

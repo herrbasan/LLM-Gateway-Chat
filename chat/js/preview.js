@@ -355,6 +355,9 @@ function renderActive() {
  */
 function renderMarkdown(mdContent) {
     const md = document.createElement('nui-markdown');
+    // Previews show rendered work product, not document metadata — strip
+    // frontmatter (nui-markdown default 'show' renders it as a card).
+    md.setAttribute('frontmatter', 'strip');
     const script = document.createElement('script');
     script.type = 'text/markdown';
     script.textContent = mdContent;

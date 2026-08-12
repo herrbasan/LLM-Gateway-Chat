@@ -297,6 +297,28 @@ export const CHUNK_CONVENTION_PARAGRAPH =
     'reply instead of working around it. You are the only observer who sees ' +
     'the transformed view; malformed labels are bugs worth reporting.';
 
+// Retirement extension to the convention paragraph — appended only when the
+// retirement tools are offered (chunkTransform chats). States the contract:
+// distill as future working memory, batch retirements (prompt-cache cost),
+// unretire restores, tombstone errors are reportable.
+export const RETIREMENT_CONVENTION_PARAGRAPH =
+    'You may retire chunks you have fully consumed with ' +
+    'context_retire(chunk_ids, distill). The full text leaves your context; ' +
+    'your distillation stays in its place. Write distillations as your future ' +
+    'working memory: key facts, decisions, open items, and anything you would ' +
+    'need to decide whether to restore the original. Retire in batches rather ' +
+    'than one chunk per turn — each retirement rewrites history and ' +
+    'invalidates prompt caching. context_unretire(chunk_ids) restores the ' +
+    'full text on the next request. If a tombstone\'s distillation looks wrong ' +
+    'or insufficient, say so — you are the only observer of the transformed ' +
+    'view.';
+
+// Tombstone replacing a retired chunk's content in the outgoing payload.
+// Envelope (role, tool_call_id) untouched — shape invariance holds.
+function tombstoneText(distill) {
+    return `[RETIRED chunk — distillation: "${distill}". Original intact in history; call context_unretire to restore it.]`;
+}
+
 const MIN_CHAIN_CHARS = 2000;   // below this, references aren't worth the label
 const REBASE_JACCARD = 0.25;    // diff mode: below this overlap → new base chunk
 const MAX_DIFF_LINES = 8000;    // diff mode: LCS guard
@@ -351,7 +373,13 @@ function fingerprint(content) {
 }
 
 // messages: OpenAI-style array (system/user/assistant/tool).
-// Returns { messages, stats } — transformed copy; input NOT mutated.
+// options.retirements: { [contentHash]: { distill, at } } — hashes matching a
+//   chunk's content fingerprint get replaced by a tombstone carrying the
+//   model's distillation. Applies to tool-result bodies AND tool-call content
+//   args (write payloads). Canonical history is never touched.
+// Returns { messages, stats, chunkTable } — transformed copy; input NOT
+// mutated. chunkTable: Map<chunkId, hash> — the frontend resolves the model's
+// chunk labels to durable content hashes at context_retire execution time.
 //
 // PRIMARY mechanism (always on): dedup. Every large content gets a chunk
 // label on first sight; a later byte-identical or near-identical (line-set
@@ -362,12 +390,15 @@ function fingerprint(content) {
 // edits to the same artifact. Engine proven (round-trip tests incl. real
 // 114K corpus pair), but corpus analysis shows re-fetch/reshuffle dominates
 // over sequential edits — dedup catches the mass, diffs serve a niche.
-export function buildChunkView(messages) {
+export function buildChunkView(messages, options = {}) {
+    const retirements = options.retirements || {};
+    const retirementToolsOffered = options.retirementTools === true;
     const out = [];
     const seen = new Map();      // exactHash -> { id, text }
     const lineSets = [];         // { id, set } for near-dup scan
     const chains = new Map();    // diff mode only
-    const stats = { chunks: 0, exactDupes: 0, nearDupes: 0, diffs: 0, rebases: 0, reorderFallbacks: 0, bytesIn: 0, bytesOut: 0, maxDepth: 0 };
+    const chunkTable = new Map(); // chunkId -> content hash (label→hash resolution)
+    const stats = { chunks: 0, exactDupes: 0, nearDupes: 0, diffs: 0, rebases: 0, reorderFallbacks: 0, retired: 0, bytesIn: 0, bytesOut: 0, maxDepth: 0 };
     let chunkCounter = 0;
     let hasChunks = false;
 
@@ -379,16 +410,30 @@ export function buildChunkView(messages) {
         return content.replace(/^(\[chunk_\d+[^\]\n]*\]\n?)+/, '');
     }
 
+    // Retirement check: if this content's hash is retired, emit the tombstone
+    // instead of any label/ref/full text. Checked on the BARE content (labels
+    // never affect identity). Returns the tombstone string or null.
+    function retiredTombstone(bare) {
+        const r = retirements[fingerprint(bare).hash];
+        if (!r) return null;
+        stats.retired++;
+        return tombstoneText(r.distill);
+    }
+
     // Core: dedup first, then (optionally) diff-chain. Returns { text, emitted }.
     function transform(key, content) {
         const hadLabel = /^\[chunk_\d+/.test(content);
         const bare = stripOwnLabels(content);
-        // 1) exact dedup (on the BARE content — labels don't affect identity)
         const fp = fingerprint(bare);
+        // 0) retirement — tombstone replaces everything (label, ref, body)
+        const tomb = retiredTombstone(bare);
+        if (tomb !== null) return { text: tomb, emitted: true };
+        // 1) exact dedup (on the BARE content — labels don't affect identity)
         const hit = seen.get(fp.hash);
         if (hit) {
             chunkCounter++;
             const id = `chunk_${chunkCounter}`;
+            chunkTable.set(id, fp.hash);
             stats.exactDupes++; stats.chunks++; hasChunks = true;
             return { text: `[${id} = ${hit.id}]`, emitted: true };
         }
@@ -402,6 +447,7 @@ export function buildChunkView(messages) {
             if (jac >= NEARDUP_JACCARD) {
                 chunkCounter++;
                 const id = `chunk_${chunkCounter}`;
+                chunkTable.set(id, fp.hash);
                 stats.nearDupes++; stats.chunks++; hasChunks = true;
                 return { text: `[${id} ≈ ${cand.id} (same content, minor differences)]`, emitted: true };
             }
@@ -417,6 +463,7 @@ export function buildChunkView(messages) {
                     if (diff.length < content.length) {
                         chunkCounter++;
                         const id = `chunk_${chunkCounter}`;
+                        chunkTable.set(id, fp.hash);
                         chain.depth++;
                         stats.maxDepth = Math.max(stats.maxDepth, chain.depth);
                         stats.diffs++; stats.chunks++; hasChunks = true;
@@ -432,6 +479,7 @@ export function buildChunkView(messages) {
                 }
             }
             const id0 = `chunk_${++chunkCounter}`;
+            chunkTable.set(id0, fp.hash);
             chains.set(key, { lastChunkId: id0, lastText: content, depth: 0 });
             // base rides full, labeled so diffs/refs have a target
             seen.set(fp.hash, { id: id0, text: content });
@@ -449,11 +497,13 @@ export function buildChunkView(messages) {
             if (keepId) {
                 seen.set(fp.hash, { id: keepId, text: bare });
                 lineSets.push({ id: keepId, set });
+                chunkTable.set(keepId, fp.hash);
                 stats.chunks++; hasChunks = true;
             }
             return { text: content, emitted: true };
         }
         const id = `chunk_${++chunkCounter}`;
+        chunkTable.set(id, fp.hash);
         seen.set(fp.hash, { id, text: bare });
         lineSets.push({ id, set });
         stats.chunks++; hasChunks = true;
@@ -525,15 +575,19 @@ export function buildChunkView(messages) {
         out.push(msg);
     }
 
-    // Prepend the convention paragraph to the FIRST system message if chunks exist
+    // Prepend the convention paragraph to the FIRST system message if chunks exist.
+    // Retirement instructions append only when the tools are actually offered —
+    // advertising tools that aren't registered invites malformed calls.
     if (hasChunks) {
+        let convention = CHUNK_CONVENTION_PARAGRAPH;
+        if (retirementToolsOffered) convention += '\n\n' + RETIREMENT_CONVENTION_PARAGRAPH;
         const sysIdx = out.findIndex(m => m.role === 'system');
         if (sysIdx >= 0) {
-            out[sysIdx] = { ...out[sysIdx], content: out[sysIdx].content + '\n\n' + CHUNK_CONVENTION_PARAGRAPH };
+            out[sysIdx] = { ...out[sysIdx], content: out[sysIdx].content + '\n\n' + convention };
         } else {
-            out.unshift({ role: 'system', content: CHUNK_CONVENTION_PARAGRAPH });
+            out.unshift({ role: 'system', content: convention });
         }
     }
 
-    return { messages: out, stats };
+    return { messages: out, stats, chunkTable };
 }

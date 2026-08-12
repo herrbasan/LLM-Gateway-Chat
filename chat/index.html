@@ -76,6 +76,19 @@
             </span>
         </div>
 
+        <!-- Session-expired alarm: shown when a 401 nulls backendClient.user.
+             Messages are crash-netted locally and flushed after re-login, but
+             the user must know persistence has stopped and be able to re-open
+             the login dialog after dismissing it. -->
+        <div id="auth-expired-banner" role="alert" aria-live="assertive" data-visible="false">
+            <nui-icon name="warning"></nui-icon>
+            <span class="banner-text">
+                <strong>Session expired — messages are NOT being saved to the server.</strong>
+                They are queued locally and will be stored after you log in again.
+                <button id="relogin-btn" type="button">Log in</button>
+            </span>
+        </div>
+
         <nui-sidebar>
             <div class="sidebar-layout">
                 <div class="sidebar-action-area">
@@ -339,6 +352,9 @@
                 <div id="login-error" style="color: var(--color-error); font-size: 0.85rem; min-height: 1rem; text-align: center;"></div>
                 <nui-button variant="primary" style="margin-top: 0.5rem;">
                     <button type="submit">Log In</button>
+                </nui-button>
+                <nui-button id="login-dismiss" variant="ghost">
+                    <button type="button">Continue without saving (read-only)</button>
                 </nui-button>
             </form>
         </div>

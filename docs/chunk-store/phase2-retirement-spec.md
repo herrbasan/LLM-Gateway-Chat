@@ -1,8 +1,34 @@
 # Phase 2 Spec: Model-Driven Compaction (Retire-with-Distill)
 
-Status: **Ready to implement** — 2026-08-12
+Status: **IMPLEMENTED** — 2026-08-12. Live-traffic validation pending.
 Read first: [plan-chunk-store.md](plan-chunk-store.md) (architecture + principles + evidence)
 Engine: [chunk-view.js](chunk-view.js) (canonical) / [chat/js/chunk-view.js](../../chat/js/chunk-view.js) (app copy — keep in sync)
+
+### Implementation deviations from this spec (as-built)
+
+- **Storage: session doc, not conversation doc.** `retirements` lives on the
+  session doc next to `chunkTransform`, persisted via the existing
+  `PATCH /api/chats/:id` whitelist (validated as an object map). The dedicated
+  `PUT /api/chats/:id/retirements` endpoint was NOT built — GET returns the
+  session doc for free, so no new endpoint was needed.
+- **chunkTable shape**: `Map<chunkId, hash>` (just the hash — messageIndex
+  turned out unnecessary; label→hash resolution is the only consumer).
+- **Retirement convention paragraph**: appended only when the tools are
+  actually offered (`retirementTools: true` engine option), not always.
+- **Retiring a referenced chunk**: tombstone substitutes only at the chunk's
+  own slot; refs elsewhere pointing at it stay as-is (harmless — a ref
+  resolving to a tombstone slot is the intended behavior).
+- **Tool guards as-built**: unknown chunk id throws with valid ids listed;
+  distill < 20 chars rejected; tools throw when chunkTransform is off or no
+  chunks exist yet.
+
+### Validation status
+
+- Engine round-trip (retire → tombstone → unretire → restore): PASS (inline).
+- Flagship corpus with synthetic retirements (only unreferenced chunks):
+  dedup 50% → dedup+retire 63%. The 75% expectation assumed retiring
+  referenced chunks too, which the synthetic pass deliberately skipped.
+- exp6-against-real-tools, kimi-chat portability, live session: PENDING.
 
 ## What this phase adds
 

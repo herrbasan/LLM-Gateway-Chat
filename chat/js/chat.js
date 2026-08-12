@@ -316,6 +316,43 @@ const ARCHIVE_TOOLS = [
     }
 ];
 
+// Retirement tools (chunk-store phase 2) — offered ONLY in chunkTransform chats.
+// The model retires chunks it has fully consumed; its distillation replaces the
+// content in the outgoing payload (tombstone). Canonical history never touched.
+// Kept separate from ARCHIVE_TOOLS because availability is per-chat, not global.
+const RETIREMENT_TOOLS = [
+    {
+        type: 'function',
+        function: {
+            name: 'context_retire',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Retire chunks you have fully consumed. Their full text leaves your context on the next request; your distillation stays in their place as a tombstone.\n\nWrite distillations as your future working memory: key facts, figures, decisions, open items, and anything you would need to decide whether restoring the original is worth it. A vague distillation ("discusses infrastructure") is a failed retirement — if you cannot distill it specifically, you have not consumed it; do not retire it.\n\nRetire in BATCHES, not one chunk per turn: each retirement rewrites mid-history content and invalidates the provider\'s prompt cache from that point. Note chunks as consumed during the turn, then retire them together.\n\nThe original always stays intact in canonical history — context_unretire(chunk_ids) restores full text on the next request.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to retire, e.g. ["chunk_4", "chunk_9"]. Batch multiple ids in one call.' },
+                    distill: { type: 'string', description: 'Your distillation of what to keep from these chunks: key facts, decisions, open items — written for your future self.' }
+                },
+                required: ['chunk_ids', 'distill']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'context_unretire',
+            description: 'Execution: runs DIRECTLY in the chat frontend (browser). Restore previously retired chunks — their full text returns to your context on the next request. Use when a tombstone\'s distillation is insufficient for the current task.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to restore, e.g. ["chunk_4"].' }
+                },
+                required: ['chunk_ids']
+            }
+        }
+    }
+];
+const RETIREMENT_TOOL_NAMES = new Set(RETIREMENT_TOOLS.map(t => t.function.name));
+
 // Local tool execution — calls backend REST API, not MCP servers
 async function executeLocalTool(toolName, args, exchangeId = null) {
     const headers = {
@@ -338,6 +375,52 @@ async function executeLocalTool(toolName, args, exchangeId = null) {
         }
         case 'read_resource': {
             return mcpClient.executeReadResource(args, exchangeId);
+        }
+        case 'context_retire':
+        case 'context_unretire': {
+            // Chunk retirement (phase 2): resolve labels → durable content hashes
+            // via the last assembly's chunkTable, merge into the session's
+            // retirements map, persist. Tombstones appear on the NEXT assembly.
+            const conv = activeConversations.get(currentChatId);
+            if (!conv || conv.chunkTransform !== true) {
+                throw new Error(`${toolName}: chunk transform is not enabled for this chat — retirement tools are unavailable.`);
+            }
+            const table = conv._lastChunkTable;
+            if (!table || table.size === 0) {
+                throw new Error(`${toolName}: no chunks exist in this conversation yet — nothing can be retired.`);
+            }
+            const ids = Array.isArray(args.chunk_ids) ? args.chunk_ids : [];
+            if (ids.length === 0) throw new Error(`${toolName}: chunk_ids must be a non-empty array.`);
+            const unknown = ids.filter(id => !table.has(id));
+            if (unknown.length > 0) {
+                throw new Error(`${toolName}: unknown chunk id(s): ${unknown.join(', ')}. Valid ids in the current view: ${[...table.keys()].join(', ')}`);
+            }
+            const retiring = toolName === 'context_retire';
+            const distill = String(args.distill || '').trim();
+            if (retiring && distill.length < 20) {
+                throw new Error('context_retire: distill is too short to be useful working memory (<20 chars). Write the key facts, decisions, and open items your future self needs.');
+            }
+            const retirements = { ...(conv._retirements || {}) };
+            for (const id of ids) {
+                const hash = table.get(id);
+                if (retiring) retirements[hash] = { distill, at: new Date().toISOString(), label: id };
+                else delete retirements[hash];
+            }
+            const res = await fetch(`${BACKEND_URL}/api/chats/${currentChatId}`, {
+                method: 'PATCH', headers,
+                body: JSON.stringify({ retirements })
+            });
+            if (res.status === 401) throw new Error(`${toolName}: session expired (401). The user needs to log in again.`);
+            if (!res.ok) throw new Error(`${toolName}: backend error ${res.status}`);
+            conv._retirements = retirements;
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify(retiring
+                        ? { ok: true, retired: ids, distill, note: 'Tombstones replace these chunks from the next request onward. Originals remain in canonical history.' }
+                        : { ok: true, unretired: ids, note: 'Full text restored from the next request onward.' })
+                }]
+            };
         }
         case 'chat_archive_update_metadata': {
             console.log('[Archive Update Metadata] Args:', JSON.stringify(args));
@@ -1057,7 +1140,7 @@ function mimeToExt(mime) {
     return map[mime] || 'bin';
 }
 
-const LOCAL_TOOL_NAMES = new Set(ARCHIVE_TOOLS.map(t => t.function.name));
+const LOCAL_TOOL_NAMES = new Set([...ARCHIVE_TOOLS, ...RETIREMENT_TOOLS].map(t => t.function.name));
 LOCAL_TOOL_NAMES.add('read_resource'); // read_resource is handled by the MCP resource client, not a real MCP tool
 
 // State
@@ -1549,8 +1632,24 @@ async function init() {
 
     // ---- Verify Session / Auth ----
     if (CONFIG.enableBackend) {
+        const loginDialog = document.getElementById('login-dialog');
+        const authBanner = document.getElementById('auth-expired-banner');
+
         backendClient.onAuthError(() => {
-            document.getElementById('login-dialog').showModal();
+            // Session expired mid-use: queue messages locally (crash-net in
+            // _syncMessage) and tell the user persistence stopped. The login
+            // dialog is dismissable so in-flight content stays readable/copyable;
+            // the banner stays up and re-opens the dialog on demand.
+            if (authBanner) authBanner.dataset.visible = 'true';
+            loginDialog.showModal();
+        });
+
+        document.getElementById('login-dismiss').addEventListener('click', () => {
+            loginDialog.close();
+            // Banner stays visible — persistence is still down, user can re-open.
+        });
+        document.getElementById('relogin-btn')?.addEventListener('click', () => {
+            loginDialog.showModal();
         });
 
         // Backend-offline alarm. The gateway can keep streaming while the
@@ -1583,7 +1682,8 @@ async function init() {
                 
                 await backendClient.login(username, password);
                 document.getElementById('login-dialog').close();
-                // Reload page to re-initialize cleanly
+                // Crash-netted messages are drained before load() on reload —
+                // nothing is lost. Reload to re-initialize cleanly.
                 window.location.reload();
             } catch (err) {
                 errorDiv.textContent = err.message || 'Login failed';
@@ -1623,13 +1723,11 @@ async function init() {
         await setTheme(prefersDark ? 'dark' : 'light');
     }
 
-    // Ensure chat history is loaded
-    if (CONFIG.enableBackend === true && typeof CONFIG.backendUrl === 'string') {
-        // already fresh from above
-    } else {
-        await chatHistory.ready();
-    }
-    
+    // Restore unsent composer draft (survives the post-login reload).
+    try {
+        const draft = sessionStorage.getItem('chat-draft');
+        if (draft) elements.messageInput?.setMarkdown(draft);
+    } catch { /* ignore — draft restore is best-effort */ }
     // Get or create active conversation
     let activeId = await chatHistory.getActiveId();
     if (!activeId || !chatHistory.has(activeId)) {
@@ -2262,6 +2360,14 @@ function setupEventListeners() {
             sendMessage();
         }
     }, true);
+
+    // Draft preservation: survive the post-login reload (and accidental
+    // reloads in general). Cheap — one sessionStorage write per input event.
+    elements.messageInput?.addEventListener('input', () => {
+        try {
+            sessionStorage.setItem('chat-draft', elements.messageInput.getMarkdown());
+        } catch { /* storage full/blocked — draft loss acceptable, never break typing */ }
+    });
     
     // File attachment
     elements.attachBtn?.addEventListener('click', () => {
@@ -2565,6 +2671,7 @@ async function sendMessage() {
     
     // Clear input and attachments
     editor.setMarkdown('');
+    sessionStorage.removeItem('chat-draft');
     clearAttachments();
     updateVisionToggleVisibility();
     
@@ -3068,6 +3175,14 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
         if (ENABLE_ARCHIVE_TOOLS) {
             if (!requestBody.tools) requestBody.tools = [];
             requestBody.tools.push(...ARCHIVE_TOOLS);
+        }
+
+        // Retirement tools: only in chunkTransform chats (the retirement map
+        // and tombstone assembly only exist there). Per-chat availability, so
+        // kept separate from the always-on archive tools.
+        if (streamConv?.chunkTransform === true) {
+            if (!requestBody.tools) requestBody.tools = [];
+            requestBody.tools.push(...RETIREMENT_TOOLS);
         }
 
         // Add image processing hints for the Gateway (resize/transcode before sending to provider)

@@ -1502,6 +1502,7 @@ const routes = {
       systemPrompt: body.systemPrompt || '',
       arenaConfig: body.arenaConfig || null,
       chunkTransform: body.chunkTransform === true,
+      retirements: (body.retirements && typeof body.retirements === 'object' && !Array.isArray(body.retirements)) ? body.retirements : {},
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messageCount: 0,
@@ -1547,6 +1548,12 @@ const routes = {
     if (body.systemPrompt !== undefined) session.systemPrompt = body.systemPrompt;
     if (body.category !== undefined) session.category = body.category;
     if (body.chunkTransform !== undefined) session.chunkTransform = !!body.chunkTransform;
+    if (body.retirements !== undefined) {
+      if (body.retirements === null || typeof body.retirements !== 'object' || Array.isArray(body.retirements)) {
+        json(res, { error: 'retirements must be an object map { [contentHash]: { distill, at } }' }, 400, req); return;
+      }
+      session.retirements = body.retirements;
+    }
     if (body.summary !== undefined && (body.summary === null || typeof body.summary !== 'object' || Array.isArray(body.summary))) {
       json(res, { error: 'summary must be an object {title, teaser, reflection}' }, 400, req); return;
     }
