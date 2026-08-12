@@ -107,16 +107,39 @@ Tools accepting content already in the conversation take
 content. Schema must state refs resolve to materialized content (exp4).
 Probe exp2: PASS, zero re-emission. Saves OUTPUT tokens (3-5× cost).
 
-## Mechanism 4 — Model-driven retirement (designed)
+## Mechanism 4 — Model-driven compaction (retire-with-distill)
 
-`context_retire(chunk_ids, note)` / `context_unretire(chunk_ids)` —
-frontend-local tools. Tombstone keeps the envelope (shape invariance),
-note is the audit trail. **Batch discipline** (prompt-cache economics:
-mid-history tombstones invalidate cached prefix — retire rarely, in
-batches, never one at a time; note-as-consumed early, execute later).
-**Budget line** = the existing rendered-history estimate (user decision:
-no payload-exact estimator; savings = headroom). Placement at end of
-system block or appended to latest user message — never mid-prefix.
+The model retires chunks it has consumed AND writes the distillation of
+what to keep. `context_retire(chunk_ids, distill)` / `context_unretire` —
+frontend-local tools. The tombstone carries the distillation: the model's
+own working memory, not a justification note. User's key insights
+(2026-08-12): (a) the model has a real sense of what's important in a
+piece of info — trust it; (b) the tombstone is MORE informative than the
+original slot — what was there, what mattered, where the original lives;
+(c) distillation costs output tokens once, saves input tokens on every
+subsequent request — one-time cost, compounding return.
+
+- **Knowledge state stays payload-determined**: the kept-knowledge is
+  explicit, visible text — reviewable and correctable ("your chunk_5
+  distillation missed the tone rule — fix it").
+- **Retrieval pathway carries its reason**: unlike a stub (raw excerpts,
+  hoping the model infers relevance), the distillation tells the model
+  exactly why it might want the original back.
+- **Batch discipline** (prompt-cache economics): mid-history tombstones
+  invalidate cached prefix — retire in batches; distill-as-consumed early,
+  execute later. Budget line = existing rendered-history estimate, placed
+  at end of system block or appended to latest user message.
+- **User control**: tools only exist when the chat flag is on; every
+  distillation renders as a readable tool call; standing rules via system
+  prompt ("never retire what I pasted"); toggle off re-expands everything.
+
+### Production evidence (2026-08-11, real toggle-on session)
+
+173-message GLM-5.2 translation session: ~4M tokens transmitted, dedup
+saved ~50-90K (**~1-2%**) — below the 20% bar. The corpus flagship got 50%
+per-request because its mass is repeats; a real working session is
+dominated by UNIQUE history re-transmission. Conclusion: dedup trims,
+**only retirement bends the session-sum**. exp6 gates it.
 
 ## Probe Evidence (2026-08-11, deepseek-flash-chat unless noted)
 
