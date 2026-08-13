@@ -1221,6 +1221,8 @@ class ArenaUI {
 
         // TTS Elements
         this.ttsEndpoint = document.getElementById('tts-endpoint');
+        this.ttsEngineASelect = document.getElementById('tts-engine-a-select');
+        this.ttsEngineBSelect = document.getElementById('tts-engine-b-select');
         this.ttsVoiceASelect = document.getElementById('tts-voice-a-select');
         this.ttsVoiceBSelect = document.getElementById('tts-voice-b-select');
         this.ttsSpeed = document.getElementById('tts-speed');
@@ -1668,6 +1670,8 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             storage,
             elements: {
                 endpoint: this.ttsEndpoint,
+                engineASelect: this.ttsEngineASelect,
+                engineBSelect: this.ttsEngineBSelect,
                 voiceASelect: this.ttsVoiceASelect,
                 voiceBSelect: this.ttsVoiceBSelect,
                 speed: this.ttsSpeed,

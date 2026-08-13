@@ -1232,6 +1232,7 @@ const elements = {
 
     // TTS Elements
     ttsEndpoint: document.getElementById('tts-endpoint'),
+    ttsEngineSelect: document.getElementById('tts-engine-select'),
     ttsVoiceSelect: document.getElementById('tts-voice-select'),
     ttsSpeed: document.getElementById('tts-speed'),
     ttsStatus: document.getElementById('tts-status')
@@ -1904,6 +1905,7 @@ async function applyDefaultConfig() {
         storage,
         elements: {
             endpoint: elements.ttsEndpoint,
+            engineSelect: elements.ttsEngineSelect,
             voiceSelect: elements.ttsVoiceSelect,
             speed: elements.ttsSpeed,
             status: elements.ttsStatus,
