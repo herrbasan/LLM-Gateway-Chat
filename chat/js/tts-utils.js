@@ -5,6 +5,9 @@
 export function getPlainText(content) {
     if (!content) return '';
     let text = content;
+    // Markdown cleanup is now delegated to nSpeech (extra_body.markdown), so we
+    // no longer strip markdown syntax here. We still remove structural things
+    // that are never meant to be spoken and that the regex clean won't handle.
     // Remove YAML frontmatter (document metadata — never speakable). Only
     // matches a --- fenced block at the very start, same rule as NUI's
     // parseFrontmatter, so mid-document --- rules are untouched.
@@ -12,15 +15,5 @@ export function getPlainText(content) {
     // Remove thinking blocks including content
     text = text.replace(/<think>[\s\S]*?<\/think>/g, '');
     text = text.replace(/<think>[\s\S]*$/g, '');
-    // Remove markdown code blocks (fenced) including content
-    text = text.replace(/```[\s\S]*?```/g, '');
-    // Remove inline code
-    text = text.replace(/`[^`]+`/g, '');
-    // Strip remaining XML tags
-    text = text.replace(/<[^>]+>/g, '');
-    // Strip markdown formatting
-    text = text.replace(/[*_~`#]/g, '');
-    // Collapse whitespace
-    text = text.replace(/\s+/g, ' ').trim();
-    return text;
+    return text.trim();
 }

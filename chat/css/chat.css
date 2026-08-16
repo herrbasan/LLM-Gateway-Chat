@@ -1381,6 +1381,24 @@ nui-app:not(.nui-ready) { display: none; }
 .progress-status { font-size: 0.85em; color: var(--color-highlight); margin-bottom: 0.5rem; font-style: italic; }
 .chat-attachment { cursor: pointer; }
 
+/* TTS markdown cleanup checkboxes */
+.tts-md-cleanup {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-space-half);
+    padding: var(--nui-space-half) 0;
+}
+.tts-md-row {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-space-half);
+}
+.tts-md-row label {
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-color);
+}
+
 .app-title { margin: 0; font-size: 1.2rem; font-weight: 600; color: var(--text-color); line-height: 1; }
 
 .app-switch-link {

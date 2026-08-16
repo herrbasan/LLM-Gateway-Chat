@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-syntax-highlight.css">
 
     <!-- Chat Styles -->
-    <link rel="stylesheet" href="css/chat.css?v=14">
+    <link rel="stylesheet" href="css/chat.css?v=15">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-lightbox.css">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-rich-text.css">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-list.css">
@@ -279,6 +279,24 @@
                                 <input type="number" min="0.1" max="2.0" step="0.1" value="1.0" id="tts-speed-input">
                             </nui-input>
                         </nui-input-group>
+
+                        <nui-input-group class="sidebar-section">
+                            <label>Markdown cleanup</label>
+                            <div class="tts-md-cleanup">
+                                <div class="tts-md-row">
+                                    <nui-checkbox>
+                                        <input type="checkbox" id="tts-md-clean">
+                                    </nui-checkbox>
+                                    <label for="tts-md-clean">Clean markdown</label>
+                                </div>
+                                <div class="tts-md-row">
+                                    <nui-checkbox>
+                                        <input type="checkbox" id="tts-md-llm">
+                                    </nui-checkbox>
+                                    <label for="tts-md-llm">LLM prosody pass</label>
+                                </div>
+                            </div>
+                        </nui-input-group>
                         
                         <div id="tts-status" class="tts-status" style="display: none;">
                             <!-- Status messages -->
@@ -493,7 +511,7 @@
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-lightbox.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-list.js" type="module"></script>
-    <script src="js/chat.js?v=22" type="module"></script>
+    <script src="js/chat.js?v=24" type="module"></script>
     <script>
         // NUI specific interactions for app shell
         document.addEventListener('click', (e) => {
