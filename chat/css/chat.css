@@ -1090,6 +1090,9 @@ nui-app:not(.nui-ready) { display: none; }
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    /* Cancel the .sidebar-layout's 1rem right padding so the list's scrollbar
+       sits flush with the sidebar's right edge (items keep their own inset). */
+    margin-right: calc(-1 * var(--nui-space));
 }
 
 .chat-history-list > nui-list {
