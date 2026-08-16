@@ -1133,6 +1133,13 @@ nui-app:not(.nui-ready) { display: none; }
     order: 3;
 }
 
+/* Remove the thin outline borders nui-list puts on its header and body/scroll
+   container — they look like a frame around the list. */
+.chat-history-list .nui-list-header,
+.chat-history-list .nui-list-body {
+    border: none;
+}
+
 .chat-history-empty {
     padding: 1rem;
     color: var(--color-shade5);
