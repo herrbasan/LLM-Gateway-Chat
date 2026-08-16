@@ -1150,6 +1150,10 @@ nui-app:not(.nui-ready) { display: none; }
     justify-content: space-between;
     align-items: center;
     position: relative;
+    /* Gap between rows + inset from the pane edges. nui-list measures
+       offsetHeight + marginTop/Bottom for itemHeight, so the bottom margin is
+       included in the virtualized spacing automatically. */
+    margin: 0 0.5rem 0.5rem 0.5rem;
     height: 5rem;
     background: var(--color-shade1);
     border: thin solid var(--border-shade2);

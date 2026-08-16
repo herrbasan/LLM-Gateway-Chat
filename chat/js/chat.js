@@ -6208,6 +6208,7 @@ function updateChatSystemPrompt(chatId, promptText) {
 let chatTabList = null;          // nui-list element
 let chatListCategories = null;   // cached category signature for filter rebuild
 let chatListInitialized = false;
+let chatListDataSig = null;      // structural signature of the chat list data
 
 /**
  * Initialize the nui-list once. loadData() sets up the search + category filter
@@ -6385,14 +6386,37 @@ function renderHistoryList() {
 
     refreshCategoryFilters(listData);
 
-    // nui-list's sort() only re-applies when the sort column/direction CHANGED,
-    // but every updateData() -> filter() rebuilds `filtered` from the unsorted
-    // clone. Reset the memo so the active sort re-applies on each data refresh,
-    // otherwise the list silently falls back to clone (non-recent) order.
-    chatTabList.last_sort = undefined;
-    chatTabList.last_direction = undefined;
-    chatTabList.updateData(listData);
-    syncActiveChatSelection();
+    // Structural signature (display fields, deliberately NOT updatedAt) so a plain
+    // active-chat switch — which bumps updatedAt — doesn't rebuild the list and
+    // make the scroll jump. Minor cost: "Recent" order refreshes on structural
+    // changes rather than every chat touch.
+    const sig = listData.map(c => `${c.id}|${c.title}|${c.category}|${c.messageCount}|${c.pinned}`).join('§');
+
+    if (sig !== chatListDataSig) {
+        chatListDataSig = sig;
+
+        // nui-list's sort() only re-applies when the sort column/direction CHANGED,
+        // but every updateData() -> filter() rebuilds `filtered` from the unsorted
+        // clone. Reset the memo so the active sort re-applies on each data refresh.
+        chatTabList.last_sort = undefined;
+        chatTabList.last_direction = undefined;
+        chatTabList.updateData(listData);
+
+        // Seed itemHeight immediately. checkHeight() would otherwise correct it
+        // ~300ms later, briefly rendering items at the 60px default (overlapping).
+        const firstItem = chatTabList.querySelector('.nui-list-item');
+        if (firstItem) {
+            const cs = getComputedStyle(firstItem);
+            chatTabList.itemHeight = firstItem.offsetHeight
+                + (parseInt(cs.marginTop) || 0) + (parseInt(cs.marginBottom) || 0);
+        }
+
+        syncActiveChatSelection(); // scrolls the active chat into view
+    } else {
+        // Data unchanged (e.g. user clicked an already-visible row): refresh the
+        // active highlight without rebuilding, so selection never makes the list jump.
+        chatTabList.update(true);
+    }
 }
 
 // ============================================
