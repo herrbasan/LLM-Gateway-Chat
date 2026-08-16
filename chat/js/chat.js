@@ -1191,7 +1191,7 @@ let currentTtsExchangeId = null;
 const elements = {
     modelSelect: document.getElementById('model-select'),
     temperature: document.getElementById('temperature'),
-    thinkingCheckbox: document.getElementById('thinking-checkbox'),
+    thinkingEffortSelect: document.getElementById('thinking-effort-select'),
     maxTokens: document.getElementById('max-tokens'),
     systemPrompt: document.getElementById('system-prompt'),
     presetSelect: document.getElementById('preset-select'),
@@ -1836,10 +1836,17 @@ async function applyDefaultConfig() {
         }
     }
 
-    // Set default thinking
-    if (elements.thinkingCheckbox) {
-        const savedThinking = await storage.getPref('default-thinking');
-        elements.thinkingCheckbox.checked = savedThinking === true;
+    // Set default thinking effort ('none' = send nothing, gateway applies model default)
+    if (elements.thinkingEffortSelect) {
+        const savedEffort = await storage.getPref('default-effort');
+        const valid = ['none', 'low', 'medium', 'high', 'max'];
+        const effort = valid.includes(savedEffort) ? savedEffort : 'none';
+        if (elements.thinkingEffortSelect.setValue) {
+            elements.thinkingEffortSelect.setValue(effort);
+        } else {
+            const sel = elements.thinkingEffortSelect.querySelector('select');
+            if (sel) sel.value = effort;
+        }
     }
 
     // Set default max tokens
@@ -2306,8 +2313,9 @@ function setupEventListeners() {
         storage.setPref('default-temperature', parseFloat(e.target.value) || DEFAULT_TEMPERATURE).catch(() => {});
     });
 
-    elements.thinkingCheckbox?.addEventListener('change', (e) => {
-        storage.setPref('default-thinking', !!e.target.checked).catch(() => {});
+    elements.thinkingEffortSelect?.addEventListener('nui-change', (e) => {
+        const effort = e.detail?.values?.[0] ?? e.detail?.value ?? 'none';
+        storage.setPref('default-effort', effort).catch(() => {});
     });
     
     elements.maxTokens?.querySelector('input')?.addEventListener('change', (e) => {
@@ -3077,7 +3085,14 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     // No transient injection needed here.
 
     const temperature = parseFloat(elements.temperature?.value) || DEFAULT_TEMPERATURE;
-    const reasoningEffort = elements.thinkingCheckbox?.checked ? 'medium' : null;
+    // Canonical effort enum — the gateway maps to the model's declared levels
+    // (deepseek medium→high, glm none→low, ...) and handles thinking on/off.
+    // 'none' sends NOTHING so the gateway's per-model config default applies
+    // (cost-saving 'low' on most models).
+    const effortSel = elements.thinkingEffortSelect?.getValue
+        ? elements.thinkingEffortSelect.getValue()
+        : elements.thinkingEffortSelect?.querySelector('select')?.value;
+    const reasoningEffort = ['low', 'medium', 'high', 'max'].includes(effortSel) ? effortSel : null;
     const maxTokensStr = elements.maxTokens?.querySelector('input')?.value || elements.maxTokens?.value;
     const maxTokens = maxTokensStr ? parseInt(maxTokensStr) : null;
 
@@ -3127,12 +3142,7 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
             model: streamModel,
             messages,
             temperature,
-            stream: true,
-            extra_body: {
-                chat_template_kwargs: {
-                    enable_thinking: elements.thinkingCheckbox?.checked === true
-                }
-            }
+            stream: true
         };
         
         if (reasoningEffort) {
