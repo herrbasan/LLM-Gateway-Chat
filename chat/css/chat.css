@@ -1086,9 +1086,48 @@ body { margin: 0; padding: 0; overflow: hidden; height: 100vh; }
 nui-app:not(.nui-ready) { display: none; }
 
 .chat-history-list {
-    display: flex;
-    flex-direction: column;
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.chat-history-list > nui-list {
+    position: absolute;
+    inset: 0;
+}
+
+/* nui-list's header is a 2-col grid (auto | minmax(15rem,20rem)) built for wide
+   containers. In the narrow sidebar the Sort/Filter column overflows and the
+   Search box gets pushed off-screen. Stack the header rows instead. Scoped to
+   the chat tab list only. */
+.chat-history-list .nui-list-header {
+    grid-template-columns: 1fr;
     gap: 0.5rem;
+}
+
+.chat-history-list .nui-list-sort {
+    flex-wrap: nowrap;
+}
+
+/* Visual order: Filter, Sort, direction. nui-list's DOM order is sort,
+   direction, filter, so reorder via flex `order`. */
+.chat-history-list .nui-list-sort > nui-select:not(.nui-list-filter-select) {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
+    order: 2;
+}
+
+.chat-history-list .nui-list-filter-select {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
+    order: 1;
+}
+
+.chat-history-list .nui-list-sort-direction {
+    order: 3;
 }
 
 .chat-history-empty {
@@ -1119,7 +1158,6 @@ nui-app:not(.nui-ready) { display: none; }
     cursor: pointer;
     font-size: 0.875rem;
     transition: all 0.2s;
-    margin-bottom: 0.5rem;
     color: var(--text-color-dim);
     overflow: hidden;
 }
@@ -1168,7 +1206,9 @@ nui-app:not(.nui-ready) { display: none; }
     flex: 1;
     min-width: 0; /* allows squishing */
     padding-left: 1rem;
-    padding-right: 0.5rem;
+    /* Reserve room for the hover/active actions (edit) overlay so long titles
+       and their ellipsis are never hidden behind its opaque gradient. */
+    padding-right: 3.5rem;
     pointer-events: none;
 }
 

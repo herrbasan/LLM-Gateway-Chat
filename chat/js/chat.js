@@ -5770,8 +5770,7 @@ async function switchChat(targetChatId) {
     // Clear new-content indicator since the user is viewing this chat now
     if (chatsWithNewContent.has(targetChatId)) {
         chatsWithNewContent.delete(targetChatId);
-        const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${targetChatId}"]`);
-        if (item) item.classList.remove('new-content');
+        chatTabList?.update(true);
     }
 
     // Start embed polling for the newly active chat
@@ -6204,153 +6203,218 @@ function updateChatSystemPrompt(chatId, promptText) {
 }
 
 // ============================================
+// nui-list Chat Tabs (sidebar)
+// ============================================
+let chatTabList = null;          // nui-list element
+let chatListCategories = null;   // cached category signature for filter rebuild
+let chatListInitialized = false;
+
+/**
+ * Initialize the nui-list once. loadData() sets up the search + category filter
+ * controls and the selection event that switches chats.
+ */
+function initChatList() {
+    if (chatListInitialized) return;
+    const listEl = document.getElementById('chat-tab-list');
+    if (!listEl || typeof listEl.loadData !== 'function') return;
+    chatListInitialized = true;
+    chatTabList = listEl;
+
+    listEl.loadData({
+        data: [],
+        render: renderChatTabItem,
+        search: [{ prop: 'title' }, { prop: 'searchText' }],
+        sort: [
+            { label: 'Recent', prop: 'updatedAt', numeric: true },
+            { label: 'Title (A-Z)', prop: 'title' },
+            { label: 'Messages', prop: 'messageCount', numeric: true }
+        ],
+        sort_default: 0,
+        sort_direction_default: 'down',
+        single: true,
+        events: (e) => {
+            if (e.type === 'selection') {
+                const chat = e.items?.[0]?.data;
+                if (chat && chat.id !== currentChatId) {
+                    switchChat(chat.id);
+                }
+            }
+        }
+    });
+}
+
+/**
+ * Build a single chat tab row. Mirrors the previous look: title (2-line clamp),
+ * meta (date + msg count), pin icon, active highlight, edit action, and the
+ * streaming / new-content indicators.
+ */
+function renderChatTabItem(chat) {
+    const isActive = chat.id === currentChatId;
+    const item = document.createElement('div');
+    item.className = 'chat-history-item' + (isActive ? ' active' : '');
+    item.dataset.chatId = chat.id;
+
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'chat-history-item-title-container';
+
+    const topRow = document.createElement('div');
+    topRow.className = 'chat-history-item-top-row';
+
+    if (chat.pinned) {
+        const pinIcon = document.createElement('nui-icon');
+        pinIcon.setAttribute('name', 'star_rate');
+        pinIcon.className = 'chat-history-item-pin';
+        topRow.appendChild(pinIcon);
+    }
+
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'chat-history-item-title';
+    titleSpan.textContent = chat.title || 'New Chat';
+    // summary may be an object {title, teaser, reflection} (arena schema) or a legacy string
+    const summaryText = (typeof chat.summary === 'object' && chat.summary)
+        ? (chat.summary.teaser || chat.summary.title || '')
+        : (chat.summary || '');
+    titleSpan.title = summaryText ? `${chat.title}\n\n${summaryText}` : chat.title;
+
+    topRow.appendChild(titleSpan);
+    titleDiv.appendChild(topRow);
+
+    const metaDiv = document.createElement('div');
+    metaDiv.className = 'chat-history-item-meta';
+
+    const dateSpan = document.createElement('span');
+    const dateObj = new Date(chat.updatedAt || chat.createdAt || Date.now());
+    dateSpan.textContent = dateObj.toLocaleDateString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+
+    const countSpan = document.createElement('span');
+    countSpan.textContent = `${chat.messageCount || 0} msgs`;
+
+    metaDiv.appendChild(dateSpan);
+    metaDiv.appendChild(countSpan);
+    titleDiv.appendChild(metaDiv);
+
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'chat-history-item-actions';
+
+    // Edit button only renders for the active conversation — opening it on an
+    // inactive one is ambiguous. Load the conversation first, then edit.
+    if (isActive) {
+        const optionsBtn = document.createElement('nui-button');
+        optionsBtn.className = 'chat-history-item-action';
+        optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+        optionsBtn.title = 'Chat Options';
+        optionsBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openChatOptions(chat.id);
+        });
+        actionsDiv.appendChild(optionsBtn);
+    }
+
+    item.appendChild(titleDiv);
+    item.appendChild(actionsDiv);
+
+    // Indicators derived from state (nui-list recycles elements, so these are
+    // re-applied on every render rather than toggled on a persistent DOM node).
+    if (client.hasActiveStream(chat.id)) item.classList.add('streaming');
+    if (chatsWithNewContent.has(chat.id)) item.classList.add('new-content');
+
+    return item;
+}
+
+/**
+ * Rebuild the category filter options only when the set of categories changes.
+ */
+function refreshCategoryFilters(listData) {
+    const cats = [...new Set(listData.map(c => c.category))];
+    const sig = cats.slice().sort().join('\u0000');
+    if (sig === chatListCategories) return;
+    chatListCategories = sig;
+    chatTabList.updateOptions({
+        filters: [{
+            prop: 'category',
+            label: 'Category',
+            options: cats.map(c => ({ value: c, label: c }))
+        }]
+    });
+}
+
+/**
+ * Keep nui-list's selection aligned with the active chat and scroll it into view.
+ */
+function syncActiveChatSelection() {
+    if (!chatTabList?.filtered) return;
+    const idx = chatTabList.filtered.findIndex(it => it.data && it.data.id === currentChatId);
+    chatTabList.setSelection(idx >= 0 ? idx : []);
+}
+
+function renderHistoryList() {
+    initChatList();
+
+    const allChats = chatHistory.getAll();
+    const emptyEl = document.getElementById('chat-history-empty');
+
+    if (allChats.length === 0) {
+        if (emptyEl) emptyEl.hidden = false;
+        if (chatTabList) chatTabList.style.display = 'none';
+        return;
+    }
+    if (emptyEl) emptyEl.hidden = true;
+    if (chatTabList) chatTabList.style.display = '';
+
+    if (!chatTabList) {
+        // nui-list not available — degrade to a plain flat list.
+        const host = elements.chatHistoryList;
+        if (!host) return;
+        host.innerHTML = '';
+        for (const chat of allChats) host.appendChild(renderChatTabItem(chat));
+        return;
+    }
+
+    // Normalize category + precompute a searchable teaser on throwaway copies
+    // (never mutate the underlying conversation docs).
+    const listData = allChats.map(chat => {
+        const summaryText = (typeof chat.summary === 'object' && chat.summary)
+            ? (chat.summary.teaser || chat.summary.title || '')
+            : (chat.summary || '');
+        return {
+            ...chat,
+            category: chat.category ? chat.category.trim() : 'Uncategorized',
+            searchText: summaryText
+        };
+    });
+
+    refreshCategoryFilters(listData);
+
+    // nui-list's sort() only re-applies when the sort column/direction CHANGED,
+    // but every updateData() -> filter() rebuilds `filtered` from the unsorted
+    // clone. Reset the memo so the active sort re-applies on each data refresh,
+    // otherwise the list silently falls back to clone (non-recent) order.
+    chatTabList.last_sort = undefined;
+    chatTabList.last_direction = undefined;
+    chatTabList.updateData(listData);
+    syncActiveChatSelection();
+}
+
+// ============================================
 // Sidebar Streaming Indicators
 // ============================================
 
 /**
- * Shows a pulsing indicator on a chat in the sidebar when it's streaming in the background.
+ * Shows a pulsing indicator on a chat in the sidebar when it's streaming in the
+ * background. Streaming state is derived from client.hasActiveStream(), so this
+ * just triggers a re-render of the visible rows.
  */
 function markChatAsStreaming(chatId, isStreaming) {
-    const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${chatId}"]`);
-    if (item) {
-        item.classList.toggle('streaming', isStreaming);
-    }
+    chatTabList?.update(true);
 }
 
 /**
  * Shows a "new content" indicator on a background chat that received a response.
+ * The chatId is added to chatsWithNewContent by the caller; this re-renders so
+ * the indicator appears on the (possibly recycled) row.
  */
 function markChatActivity(chatId) {
-    const item = elements.chatHistoryList?.querySelector(`[data-chat-id="${chatId}"]`);
-    if (item) {
-        item.classList.add('new-content');
-    }
-}
-
-function renderHistoryList() {
-    if (!elements.chatHistoryList) return;
-
-    const allChats = chatHistory.getAll();
-
-    elements.chatHistoryList.innerHTML = '';
-
-    if (allChats.length === 0) {
-        const emptyMsg = document.createElement('div');
-        emptyMsg.className = 'chat-history-empty';
-        emptyMsg.textContent = 'No previous chats.';
-        elements.chatHistoryList.appendChild(emptyMsg);
-        return;
-    }
-
-    const groupedChats = {};
-    for (const chat of allChats) {
-        const cat = chat.category ? chat.category.trim() : 'Uncategorized';
-        if (!groupedChats[cat]) groupedChats[cat] = [];
-        groupedChats[cat].push(chat);
-    }
-
-    const categories = Object.keys(groupedChats).sort((a, b) => {
-        if (a === 'Uncategorized') return -1;
-        if (b === 'Uncategorized') return 1;
-        return a.localeCompare(b);
-    });
-
-    categories.forEach(cat => {
-        const categoryGroup = document.createElement('div');
-        categoryGroup.className = 'chat-history-category';
-        
-        // Add a subtle header for the category (unless it's the only one and it's Uncategorized)
-        if (categories.length > 1 || cat !== 'Uncategorized') {
-            const header = document.createElement('div');
-            header.className = 'chat-history-category-header';
-            header.textContent = cat;
-            categoryGroup.appendChild(header);
-        }
-
-        groupedChats[cat].forEach(chat => {
-            const isActive = chat.id === currentChatId;
-            const item = document.createElement('div');
-            item.className = 'chat-history-item' + (isActive ? ' active' : '');
-            item.dataset.chatId = chat.id;
-
-            const titleDiv = document.createElement('div');
-            titleDiv.className = 'chat-history-item-title-container';
-
-            const topRow = document.createElement('div');
-            topRow.className = 'chat-history-item-top-row';
-
-            if (chat.pinned) {
-                const pinIcon = document.createElement('nui-icon');
-                pinIcon.setAttribute('name', 'star_rate');
-                pinIcon.className = 'chat-history-item-pin';
-                topRow.appendChild(pinIcon);
-            }
-
-            const titleSpan = document.createElement('span');
-            titleSpan.className = 'chat-history-item-title';
-            titleSpan.textContent = chat.title || 'New Chat';
-            // summary may be an object {title, teaser, reflection} (arena schema) or a legacy string
-            const summaryText = (typeof chat.summary === 'object' && chat.summary)
-                ? (chat.summary.teaser || chat.summary.title || '')
-                : (chat.summary || '');
-            titleSpan.title = summaryText ? `${chat.title}\n\n${summaryText}` : chat.title;
-
-            topRow.appendChild(titleSpan);
-            titleDiv.appendChild(topRow);
-
-            const metaDiv = document.createElement('div');
-            metaDiv.className = 'chat-history-item-meta';
-
-            const dateSpan = document.createElement('span');
-            const dateObj = new Date(chat.updatedAt || chat.createdAt || Date.now());
-            dateSpan.textContent = dateObj.toLocaleDateString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
-
-            const countSpan = document.createElement('span');
-            countSpan.textContent = `${chat.messageCount || 0} msgs`;
-
-            metaDiv.appendChild(dateSpan);
-            metaDiv.appendChild(countSpan);
-            titleDiv.appendChild(metaDiv);
-
-            const actionsDiv = document.createElement('div');
-            actionsDiv.className = 'chat-history-item-actions';
-
-            // Edit button only renders for the active conversation — opening it on an
-            // inactive one is ambiguous (would the edits apply to the active chat or
-            // the clicked one?). Load the conversation first, then edit.
-            if (isActive) {
-                const optionsBtn = document.createElement('nui-button');
-                optionsBtn.className = 'chat-history-item-action';
-                optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
-                optionsBtn.title = 'Chat Options';
-                optionsBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    openChatOptions(chat.id);
-                });
-                actionsDiv.appendChild(optionsBtn);
-            }
-
-            item.appendChild(titleDiv);
-            item.appendChild(actionsDiv);
-            
-            item.addEventListener('click', (e) => {
-                if (e.ctrlKey || e.metaKey) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    navigator.clipboard.writeText(chat.id).then(() => {
-                        nui.components.toast?.success?.(`Copied ID: ${chat.id}`);
-                    }).catch(err => {
-                        console.error('Failed to copy text: ', err);
-                    });
-                    return;
-                }
-                switchChat(chat.id);
-            });
-            categoryGroup.appendChild(item);
-        });
-
-        elements.chatHistoryList.appendChild(categoryGroup);
-    });
+    chatTabList?.update(true);
 }
 
 async function openChatOptions(chatId) {

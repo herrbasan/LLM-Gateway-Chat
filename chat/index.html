@@ -11,13 +11,14 @@
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-syntax-highlight.css">
 
     <!-- Chat Styles -->
-    <link rel="stylesheet" href="css/chat.css?v=7">
+    <link rel="stylesheet" href="css/chat.css?v=11">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-lightbox.css">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-rich-text.css">
+    <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-list.css">
     
 </head>
 <body>
-        <nui-app sidebar-width="20rem" nui-vars-sidebar_force-breakpoint="75rem" nui-vars-sidebar-right_force-breakpoint="none">
+        <nui-app sidebar-width="23rem" nui-vars-sidebar_force-breakpoint="75rem" nui-vars-sidebar-right_force-breakpoint="none">
         <nui-app-header>
             <div slot="left">
                 <nui-button data-action="toggle-sidebar">
@@ -101,7 +102,8 @@
                 </div>
 
                 <div class="chat-history-list" id="chat-history-list">
-                    <!-- Chat history items injected here -->
+                    <div class="chat-history-empty" id="chat-history-empty" hidden>No previous chats.</div>
+                    <nui-list id="chat-tab-list"></nui-list>
                 </div>
             </div>
         </nui-sidebar>
@@ -490,7 +492,8 @@
     <script src="../lib/nui_wc2/NUI/nui.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-lightbox.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
-    <script src="js/chat.js?v=18" type="module"></script>
+    <script src="../lib/nui_wc2/NUI/lib/modules/nui-list.js" type="module"></script>
+    <script src="js/chat.js?v=21" type="module"></script>
     <script>
         // NUI specific interactions for app shell
         document.addEventListener('click', (e) => {
