@@ -1191,11 +1191,10 @@ nui-app:not(.nui-ready) { display: none; }
 
 .chat-history-list .chat-history-item.active {
     border-left: solid 0.3rem var(--color-highlight);
-    /* Subtle accent tint for the selected row (matches --color-highlight).
-       Alpha rgba rather than color-mix because the theme colors use
-       light-dark(), which doesn't mix reliably. Higher specificity than
-       nui-list's .selected so our tint wins over its solid highlight. */
-    background: rgba(76, 132, 229, 0.18);
+    /* Very dark gray — matches the far (right) end of the edit section's
+       gradient (--color-base). Higher specificity than nui-list's .selected so
+       it wins over its solid highlight. */
+    background: var(--color-base);
     color: var(--text-color);
     font-weight: 500;
 }
