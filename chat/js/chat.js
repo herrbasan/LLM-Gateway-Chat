@@ -6284,6 +6284,15 @@ async function restoreChatListSort(listEl) {
     const saved = chatListSortCache;
     if (!saved) return;
 
+    // Reset nui-list's sort memo BEFORE re-selecting the column. Dispatching the
+    // native change runs nui-list's handler → filter(), which rebuilds `filtered`
+    // from the unsorted clone. If the restored column equals the one updateData
+    // already sorted by (the common case), sort() would no-op on the matching memo
+    // and the list would fall back to the clone's mod-date order. Clearing the memo
+    // makes the change-triggered filter() actually re-apply the sort.
+    listEl.last_sort = undefined;
+    listEl.last_direction = undefined;
+
     // Set the sort column through nui-list's own native change handler, then
     // match the direction by clicking its toggle. Going through nui-list's
     // handlers keeps currentSort/currentOrder/filtered consistent.
