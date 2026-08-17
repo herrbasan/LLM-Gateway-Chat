@@ -6247,9 +6247,29 @@ async function initChatList() {
             } else if (e.type === 'sort') {
                 chatListSortCache = { index: e.index, direction: e.direction };
                 storage.setPref('chat-list-sort', chatListSortCache).catch(() => {});
+                forceChatListResort(chatTabList);
             }
         }
     });
+}
+
+/**
+ * nui-list's sort() only re-applies when its column/direction memo CHANGES,
+ * but filter() always rebuilds `filtered` from the unsorted clone. So a column
+ * change whose memo already matches leaves the list in clone (unsorted) order.
+ * Reset the memo and rebuild so the active sort actually reorders. Deferred so
+ * it runs after nui-list's own change handler, and scroll is preserved.
+ */
+function forceChatListResort(listEl) {
+    if (!listEl) return;
+    setTimeout(() => {
+        const vp = listEl.querySelector('.nui-list-viewport');
+        const scrollTop = vp ? vp.scrollTop : 0;
+        listEl.last_sort = undefined;
+        listEl.last_direction = undefined;
+        listEl.updateData(listEl.data);
+        if (vp) vp.scrollTop = scrollTop;
+    }, 0);
 }
 
 /**
