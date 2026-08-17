@@ -1182,15 +1182,20 @@ nui-app:not(.nui-ready) { display: none; }
 
 /* nui-list applies its own `.selected` click highlight on top of our `.active`.
    We drive the selected state purely from currentChatId -> `.active`, so
-   neutralize the competing `.selected` styling — it also covers the edit action. */
-.chat-history-list .nui-list-item.selected {
+   neutralize the competing `.selected` styling — but NOT on the active row
+   (which also carries `.selected` after a click, and must keep its background). */
+.chat-history-list .nui-list-item.selected:not(.active) {
     background: transparent;
     color: inherit;
 }
 
-.chat-history-item.active {
+.chat-history-list .chat-history-item.active {
     border-left: solid 0.3rem var(--color-highlight);
-    background: var(--color-base);
+    /* Subtle accent tint for the selected row (matches --color-highlight).
+       Alpha rgba rather than color-mix because the theme colors use
+       light-dark(), which doesn't mix reliably. Higher specificity than
+       nui-list's .selected so our tint wins over its solid highlight. */
+    background: rgba(76, 132, 229, 0.18);
     color: var(--text-color);
     font-weight: 500;
 }
