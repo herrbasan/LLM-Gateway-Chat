@@ -1180,6 +1180,14 @@ nui-app:not(.nui-ready) { display: none; }
     background: var(--color-shade2);
 }
 
+/* nui-list applies its own `.selected` click highlight on top of our `.active`.
+   We drive the selected state purely from currentChatId -> `.active`, so
+   neutralize the competing `.selected` styling — it also covers the edit action. */
+.chat-history-list .nui-list-item.selected {
+    background: transparent;
+    color: inherit;
+}
+
 .chat-history-item.active {
     border-left: solid 0.3rem var(--color-highlight);
     background: var(--color-base);

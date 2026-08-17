@@ -6213,12 +6213,13 @@ let chatTabList = null;          // nui-list element
 let chatListCategories = null;   // cached category signature for filter rebuild
 let chatListInitialized = false;
 let chatListDataSig = null;      // structural signature of the chat list data
+let chatListSortCache = null;    // cached {index, direction} sort pref
 
 /**
  * Initialize the nui-list once. loadData() sets up the search + category filter
  * controls and the selection event that switches chats.
  */
-function initChatList() {
+async function initChatList() {
     if (chatListInitialized) return;
     const listEl = document.getElementById('chat-tab-list');
     if (!listEl || typeof listEl.loadData !== 'function') return;
@@ -6243,9 +6244,36 @@ function initChatList() {
                 if (chat && chat.id !== currentChatId) {
                     switchChat(chat.id);
                 }
+            } else if (e.type === 'sort') {
+                chatListSortCache = { index: e.index, direction: e.direction };
+                storage.setPref('chat-list-sort', chatListSortCache).catch(() => {});
             }
         }
     });
+}
+
+/**
+ * Restore the persisted sort (index + direction) onto the freshly built header.
+ * Must run AFTER updateData/initHeader, which reset currentSort to the default.
+ */
+async function restoreChatListSort(listEl) {
+    if (!chatListSortCache) chatListSortCache = await storage.getPref('chat-list-sort');
+    const saved = chatListSortCache;
+    if (!saved) return;
+
+    // Set the sort column through nui-list's own native change handler, then
+    // match the direction by clicking its toggle. Going through nui-list's
+    // handlers keeps currentSort/currentOrder/filtered consistent.
+    const native = listEl.querySelector('.nui-list-sort > nui-select select');
+    if (saved.index != null && native && native.options[saved.index]) {
+        native.value = saved.index;
+        native.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    if (saved.direction && listEl.currentOrder !== saved.direction) {
+        const dirBtn = listEl.querySelector('.nui-list-sort-direction');
+        if (dirBtn) dirBtn.click();
+    }
 }
 
 /**
@@ -6352,8 +6380,8 @@ function syncActiveChatSelection() {
     chatTabList.setSelection(idx >= 0 ? idx : []);
 }
 
-function renderHistoryList() {
-    initChatList();
+async function renderHistoryList() {
+    await initChatList();
 
     const allChats = chatHistory.getAll();
     const emptyEl = document.getElementById('chat-history-empty');
@@ -6405,6 +6433,10 @@ function renderHistoryList() {
         chatTabList.last_sort = undefined;
         chatTabList.last_direction = undefined;
         chatTabList.updateData(listData);
+
+        // refreshCategoryFilters -> updateOptions -> initHeader resets
+        // currentSort to the default, so re-apply the persisted sort here.
+        await restoreChatListSort(chatTabList);
 
         // Seed itemHeight immediately. checkHeight() would otherwise correct it
         // ~300ms later, briefly rendering items at the 60px default (overlapping).
