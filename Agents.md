@@ -457,6 +457,50 @@ There are no other vendored dependencies to update.
 
 ---
 
+## Visual Verification via minimax Subagent
+
+For UI/layout changes, get an **independent visual review** from a subagent running the
+`minimax-m3-chat (customendpoint)` model, in addition to your own DOM-geometry checks.
+
+### Why
+
+The primary agent's DOM measurements confirm *geometry* (positions, widths, overflow).
+minimax confirms *appearance* (rendering, clipping, overlap, colors, alignment) from the
+actual pixels. The two together catch what either alone misses.
+
+### Workflow (established and validated in this project)
+
+1. **Reach the target UI state in the integrated browser** (Playwright page), e.g. open the
+   dropdown/popup you want reviewed. The page at `http://localhost:8080/chat/` is the
+   shared Playwright page.
+2. **Save a screenshot to disk** under `_scratch/` (gitignored) so the subagent can read it:
+   ```js
+   const el = await page.$('.target-selector');
+   await el.screenshot({ path: 'D:/SRV/LLM-Gateway-Chat/_scratch/name.png' });
+   ```
+3. **Launch the subagent** via `runSubagent` with `model: "minimax-m3-chat (customendpoint)"`.
+   Give it: the absolute PNG path(s), the expected behavior, and a precise checklist
+   (e.g. "does the dropdown span the full width? is text clipped? does it overlap brokenly?
+   list the exact option labels you see").
+4. **Cross-check against DOM**: minimax's pixel reading is approximate (e.g. it may estimate
+   a margin as 25px when the DOM says 16px). Trust the DOM for exact numbers; use minimax
+   for visual sanity (clipping, overlap, alignment, rendering) and for catching things the
+   DOM check didn't target.
+
+### Gotchas (learned)
+
+- minimax reads screenshots **from disk** — it cannot see the live page, so always save the
+  PNG first.
+- It can produce **false positives** (e.g. misread a clipped title, or claim a scrollbar
+  overlaps when the DOM shows clearance). Always confirm visual claims with DOM geometry
+  before acting on them.
+- Screenshot framing matters: crop to the relevant element (`.chat-history-list`, etc.) so
+  the review focuses on the changed region.
+- Use it for **independent confirmation**, not as the only check — it can't verify sort
+  order, data, or logic, only appearance.
+
+---
+
 ## LLM Gateway Backend Integration
 
 **Do NOT build complex frontend workarounds for backend limitations.**
