@@ -6449,8 +6449,11 @@ async function renderHistoryList() {
 
         syncActiveChatSelection(); // scrolls the active chat into view
     } else {
-        // Data unchanged (e.g. user clicked an already-visible row): refresh the
-        // active highlight without rebuilding, so selection never makes the list jump.
+        // Data unchanged (e.g. user clicked an already-visible row): only the
+        // active chat changed. nui-list's update() reuses element refs without
+        // re-running the render fn, so null them to force a re-render that
+        // re-applies .active to the current chat (no scroll/reset — no jump).
+        chatTabList.filtered.forEach(it => { it.el = null; });
         chatTabList.update(true);
     }
 }
