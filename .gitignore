@@ -1,6 +1,9 @@
 ﻿# Archives
 /_Archive/
 
+# Scratch (screenshots / test artifacts)
+/_scratch/
+
 # Dependencies
 node_modules/
 package-lock.json
