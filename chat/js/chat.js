@@ -6231,10 +6231,13 @@ async function initChatList() {
         render: renderChatTabItem,
         search: [{ prop: 'title' }, { prop: 'searchText' }],
         sort: [
-            { label: 'Recent', prop: 'updatedAt', numeric: true },
-            { label: 'Title (A-Z)', prop: 'title' },
+            { label: 'Date', prop: 'createdAt', numeric: true },
+            { label: 'Title', prop: 'title' },
             { label: 'Messages', prop: 'messageCount', numeric: true }
         ],
+        // Dropdowns span the full header width (the header is the containing
+        // block) minus this right margin — set via nui-select.setPopup().
+        popup: { right: 'var(--nui-space)' },
         sort_default: 0,
         sort_direction_default: 'down',
         single: true,
@@ -6336,7 +6339,7 @@ function renderChatTabItem(chat) {
     metaDiv.className = 'chat-history-item-meta';
 
     const dateSpan = document.createElement('span');
-    const dateObj = new Date(chat.updatedAt || chat.createdAt || Date.now());
+    const dateObj = new Date(chat.createdAt || chat.updatedAt || Date.now());
     dateSpan.textContent = dateObj.toLocaleDateString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 
     const countSpan = document.createElement('span');

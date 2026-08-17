@@ -1105,11 +1105,19 @@ nui-app:not(.nui-ready) { display: none; }
    Search box gets pushed off-screen. Stack the header rows instead. Scoped to
    the chat tab list only. */
 .chat-history-list .nui-list-header {
+    position: relative;
     grid-template-columns: 1fr;
     gap: 0.5rem;
     padding: 0;
     padding-right: 1rem;
     margin-bottom: 1rem;
+}
+
+/* Make the header the popup's containing block (instead of each nui-select) so
+   the dropdowns can span the full header width. The right margin on the popup
+   is set programmatically via nui-select.setPopup({ right }) from chat.js. */
+.chat-history-list .nui-list-header > .nui-list-sort > nui-select {
+    position: static;
 }
 
 .chat-history-list .nui-list-sort {
