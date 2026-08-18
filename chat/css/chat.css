@@ -1719,60 +1719,52 @@ nui-app:not(.nui-ready) { display: none; }
     padding-bottom: var(--nui-space-quarter);
 }
 
-.tts-player-scrub {
+nui-slider.tts-player-scrub {
     flex: 1;
     min-width: 0;
-    height: 1.25rem;
-    display: flex;
-    align-items: center;
-    cursor: pointer;
-    touch-action: none;
-    outline: none;
-}
-
-.tts-player-scrub:focus-visible .tts-player-scrub-track {
-    outline: thin solid var(--color-highlight);
-    outline-offset: 0.2rem;
-}
-
-.tts-player-scrub-track {
+    display: block;
     position: relative;
-    width: 100%;
-    height: 0.25rem;
-    border-radius: var(--border-radius1);
-    background: var(--color-shade3);
-    overflow: hidden;
+    /* Slimmer hit area than the default 2rem track */
+    --_hit: 1.25rem;
 }
 
-.tts-player-scrub-buffer,
-.tts-player-scrub-fill {
+nui-slider.tts-player-scrub .nui-slider-track {
+    height: var(--_hit);
+}
+
+/* Plain gray track (override NUI default rgba tint) */
+nui-slider.tts-player-scrub .nui-slider-track::before {
+    height: 0.35rem;
+    background: var(--color-shade3);
+    box-shadow: none;
+}
+
+/* No thumb dot — the fill edge is the playhead */
+nui-slider.tts-player-scrub .nui-slider-thumb {
+    display: none;
+}
+
+/* Playhead fill matches track thickness */
+nui-slider.tts-player-scrub .nui-slider-fill {
+    height: 0.35rem;
+}
+
+/* Buffered / still-generating audio — overlay lane behind the fill */
+nui-slider.tts-player-scrub .tts-player-scrub-buffer {
     position: absolute;
     left: 0;
-    top: 0;
-    height: 100%;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 0.35rem;
     width: 0%;
-    border-radius: inherit;
-    pointer-events: none;
-}
-
-.tts-player-scrub-buffer {
-    /* Buffered / still-generating audio — visible growth while paused */
+    border-radius: 99px;
     background: color-mix(in srgb, var(--color-highlight) 35%, var(--color-shade3));
+    pointer-events: none;
+    z-index: 0;
 }
 
-.tts-player-scrub-fill {
-    background: var(--color-highlight);
-    transition: width 0.05s linear;
-    z-index: 1;
-}
-
-/* While paused, buffer lane keeps animating width via JS; soften playhead */
-.tts-player.is-paused .tts-player-scrub-buffer {
+.tts-player.is-paused nui-slider.tts-player-scrub .tts-player-scrub-buffer {
     background: color-mix(in srgb, var(--color-highlight) 45%, var(--color-shade3));
-}
-
-.tts-player.is-seeking .tts-player-scrub-fill {
-    transition: none;
 }
 
 .tts-player.is-loading .tts-player-icon-play {
