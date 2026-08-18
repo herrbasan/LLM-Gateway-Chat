@@ -1236,7 +1236,7 @@ const elements = {
     ttsVoiceSelect: document.getElementById('tts-voice-select'),
     ttsSpeed: document.getElementById('tts-speed'),
     ttsMdClean: document.getElementById('tts-md-clean')?.closest('nui-checkbox'),
-    ttsMdLlm: document.getElementById('tts-md-llm')?.closest('nui-checkbox'),
+    ttsStitch: document.getElementById('tts-stitch')?.closest('nui-checkbox'),
     ttsStatus: document.getElementById('tts-status')
 };
 
@@ -1919,7 +1919,7 @@ async function applyDefaultConfig() {
             speed: elements.ttsSpeed,
             status: elements.ttsStatus,
             markdownClean: elements.ttsMdClean,
-            markdownLlms: elements.ttsMdLlm,
+            stitch: elements.ttsStitch,
         },
         serverDefaults: { endpoint: TTS_ENDPOINT, voice: TTS_VOICE, speed: TTS_SPEED },
     });
