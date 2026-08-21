@@ -5262,7 +5262,16 @@ function hideCompactionIndicator(el) {
 function showError(el, message) {
     const contentDiv = el.querySelector('.message-content');
     if (contentDiv) {
-        contentDiv.innerHTML += `<div class="error-message">Error: ${escapeHtml(message)}</div>`;
+        const exchangeId = el.dataset.exchangeId || null;
+        const retryBtn = exchangeId
+            ? `<nui-button size="small" class="retry-response"><button type="button">Retry</button></nui-button>`
+            : '';
+        contentDiv.innerHTML += `<div class="error-message">Error: ${escapeHtml(message)}${retryBtn ? ' ' + retryBtn : ''}</div>`;
+
+        if (exchangeId) {
+            const btn = contentDiv.querySelector('.error-message .retry-response');
+            btn?.addEventListener('click', () => regenerate(exchangeId));
+        }
     }
     
     // Remove waiting placeholder — the bubble now shows an error state

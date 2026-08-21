@@ -134,8 +134,22 @@ export class GatewayClient extends EventEmitter {
       });
 
       if (!response.ok) {
-        let errStr = await response.text();
-        yield { type: 'error', error: `HTTP ${response.status}: ${errStr}` };
+        const errText = await response.text();
+        let errMessage = `HTTP ${response.status}`;
+        let code = null;
+        let errorType = null;
+        let retryAfter = null;
+        try {
+          const parsed = JSON.parse(errText);
+          const e = parsed?.error;
+          if (e?.message) errMessage = e.message;
+          if (e?.code) code = e.code;
+          if (e?.type) errorType = e.type;
+          if (e?.retryAfter != null) retryAfter = e.retryAfter;
+        } catch {
+          if (errText) errMessage = `${errMessage}: ${errText}`;
+        }
+        yield { type: 'error', error: errMessage, status: response.status, code, errorType, retryAfter };
         return;
       }
 
@@ -209,7 +223,8 @@ export class GatewayClient extends EventEmitter {
                   type: 'error',
                   error: e.message || JSON.stringify(e),
                   code: e.code || null,
-                  model: e.model || null
+                  model: e.model || null,
+                  retryAfter: e.retryAfter ?? null
                 };
                 continue;
               }
