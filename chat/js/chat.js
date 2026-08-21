@@ -2857,14 +2857,13 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
             </div>
         </div>
     `;
-    container?.appendChild(visionStatusEl);
-    
-    // Reposition: insert right after the user message that triggered this analysis,
-    // not at the container's end (where it can land after the assistant response).
-    const userMsgEl = container?.querySelector(`.chat-message.user[data-exchange-id="${userExchangeId}"]`);
-    if (userMsgEl?.nextSibling && userMsgEl.nextSibling !== visionStatusEl) {
-        container.insertBefore(visionStatusEl, userMsgEl.nextSibling);
-    }
+    // Append via the virtual-scroll-aware helper. The user message is the last
+    // rendered element right now (the assistant isn't created until streamResponse
+    // runs after this returns), so appending places the status right after the
+    // user message. The old container.insertBefore approach threw under virtual
+    // scroll: messages live in a stage wrapper that is not a direct child of the
+    // container, so userMsgEl.nextSibling was not a child of `container`.
+    if (container) _vsAppendMessage(container, visionStatusEl);
     scrollToBottom();
     
     let lastSessionId = null;
@@ -2904,8 +2903,11 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
                         .filter(c => c.type === 'text')
                         .map(c => c.text)
                         .join(' ');
-                    // Try to extract session_id from text
-                    const sidMatch = textContent.match(/session_id['"]?\s*[:=]\s*['"]?([^'"\s,}]+)/i);
+                    // The vision agent returns "Session created: <id>. ..." — the
+                    // id is a bare token, not a key:value pair. Fall back to the
+                    // JSON key:value form for any other response shape.
+                    const sidMatch = textContent.match(/Session created:\s*([^\s.]+)/i)
+                        || textContent.match(/session_id['"]?\s*[:=]\s*['"]?([^'"\s,}]+)/i);
                     if (sidMatch) sessionId = sidMatch[1];
                 }
             }
@@ -2953,15 +2955,12 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
         }
     }
     
-    // Update status display to done
-    if (results.length > 0) {
-        visionStatusEl.querySelector('.tool-status').setAttribute('variant', 'success');
-        visionStatusEl.querySelector('.tool-status').innerHTML = 'Success';
-        const notifEl = visionStatusEl.querySelector('.tool-notifications');
-        if (notifEl) {
-            notifEl.style.display = 'none';
-        }
+    // The status bubble is transient — the analysis is injected into the user
+    // message content, not shown as a persistent tool bubble. Remove it so it
+    // doesn't linger below the conversation flow.
+    _vsRemoveElement(container, visionStatusEl);
 
+    if (results.length > 0) {
         // Return analysis so caller can append it to the user message directly.
         // No tool exchange — avoids dummy assistant messages that break
         // DeepSeek thinking_signature propagation.
@@ -2971,9 +2970,6 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
             sessionId: lastSessionId,
             images: images.length
         };
-    } else {
-        visionStatusEl.querySelector('.tool-status').setAttribute('variant', 'danger');
-        visionStatusEl.querySelector('.tool-status').innerHTML = 'No Results';
     }
 }
 
@@ -3992,6 +3988,40 @@ function _vsAppendMessage(container, el) {
     // WI-2: wake the loop — the new element may grow (streaming) or settle
     // (web components finishing render).
     _vsWake(container);
+}
+
+// Remove a transient element (e.g. the vision status bubble) from the flow,
+// cleaning up the virtual-scroll slot when active so subsequent messages don't
+// leave a gap where the element was.
+function _vsRemoveElement(container, el) {
+    if (!container || !el) return;
+    const state = _vsState.get(container);
+    if (!state) {
+        el.remove();
+        return;
+    }
+    const idx = state.slots.findIndex(s => s.el === el);
+    if (idx === -1) {
+        el.remove();
+        return;
+    }
+    const [slot] = state.slots.splice(idx, 1);
+    if (state.attached.has(slot.el)) {
+        state.stage.removeChild(slot.el);
+        state.attached.delete(slot.el);
+    }
+    // Re-cascade offsets from the top so no gap is left where the slot was.
+    let offset = 0;
+    for (let i = 0; i < state.slots.length; i++) {
+        const s = state.slots[i];
+        s.offset = offset;
+        s.el._vsIndex = i;
+        if (state.attached.has(s.el)) s.el.style.top = offset + 'px';
+        offset += s.height;
+    }
+    state.totalHeight = offset;
+    state.stage.style.height = offset + 'px';
+    _vsUpdateVisible(container);
 }
 
 // Remove every rendered element of an exchange without a full re-render —
