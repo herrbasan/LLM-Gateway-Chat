@@ -2701,10 +2701,12 @@ async function sendMessage() {
 
             if (visionResult && visionResult.analysis) {
                 // Append analysis directly to user message — becomes natural
-                // conversation history, no tool_calls backfill, no thinking_signature issues
+                // conversation history, no tool_calls backfill, no thinking_signature issues.
+                // Works for image-only messages too (empty content → marker becomes the content).
                 const ex = sendConv.getExchange(currentExchangeId);
-                if (ex?.user?.content) {
-                    ex.user.content += `\n\n[Auto-vision: ${visionResult.sessionId}]\n${visionResult.analysis}`;
+                if (ex?.user) {
+                    ex.user.content = (ex.user.content ? ex.user.content + '\n\n' : '')
+                        + `[Auto-vision: ${visionResult.sessionId}]\n${visionResult.analysis}`;
                     visionSucceeded = true;
                 }
             }
@@ -2743,31 +2745,36 @@ async function sendMessage() {
 // - Analysis text is injected as a preamble into the assistant's response
 // - The LLM never needs to call vision_analyze - it sees the analysis directly
 // - Vision tools are filtered out of the LLM's tools array when auto-vision is active
-// 
-// analyzeImagesWithVision() kept for potential manual use
 
-function getVisionToolName(baseName) {
-    // Check if tool exists with exact name first
-    if (mcpClient.toolRegistry.has(baseName)) {
-        return baseName;
-    }
-    
-    // Try to find tool by suffix (handles server-prefixed names like orchestrator__vision_create_session)
+// The workshop MCP server (compact mode) exposes a single generic "tools"
+// dispatcher tool. Vision operations (vision.session_create / vision.analyze)
+// are METHODS of that tool, not separate tools. Return the registry key of the
+// dispatcher when it advertises vision methods, else null.
+function getVisionToolName() {
     for (const [llmName, record] of mcpClient.toolRegistry.entries()) {
-        if (record.originalName === baseName) {
-            return llmName;
+        if (record.originalName === 'tools') {
+            const desc = (record.definition?.description || '').toLowerCase();
+            if (desc.includes('vision.session_create') && desc.includes('vision.analyze')) {
+                return llmName;
+            }
         }
     }
-    
-    // Fall back to base name - will fail gracefully with "Unknown tool" error
-    return baseName;
+    return null;
 }
 
 function areVisionToolsAvailable() {
-    const createSessionTool = getVisionToolName('vision_create_session');
-    const analyzeTool = getVisionToolName('vision_analyze');
-    return mcpClient.toolRegistry.has(createSessionTool) && 
-           mcpClient.toolRegistry.has(analyzeTool);
+    return getVisionToolName() !== null;
+}
+
+// Invoke a vision.* method through the compact "tools" dispatcher. The method
+// name (e.g. vision.session_create) goes in the "method" field; its arguments
+// go in the "payload" field — matching the workshop unified-API contract.
+async function callVisionMethod(method, payload) {
+    const toolsName = getVisionToolName();
+    if (!toolsName) {
+        throw new Error('Vision tools not available. Please connect to an MCP server with vision capabilities.');
+    }
+    return mcpClient.executeTool(toolsName, { method, payload });
 }
 
 function areMemoryToolsAvailable() {
@@ -2817,62 +2824,6 @@ function buildMcpResourceContext() {
     return lines.join('\n');
 }
 
-async function analyzeImagesWithVision(images) {
-    const results = [];
-    
-    // Verify vision tools are available
-    if (!areVisionToolsAvailable()) {
-        throw new Error('Vision tools not available. Please connect to an MCP server with vision capabilities.');
-    }
-    
-    const createSessionToolName = getVisionToolName('vision_create_session');
-    const analyzeToolName = getVisionToolName('vision_analyze');
-    
-    for (const img of images) {
-        // Extract base64 data from dataUrl
-        const base64Match = img.dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
-        if (!base64Match) {
-            throw new Error(`Invalid image data format for ${img.name}`);
-        }
-        
-        const mimeType = img.dataUrl.match(/^data:([^;]+);/)?.[1] || 'image/jpeg';
-        const base64Data = base64Match[1];
-        
-        // Create vision session
-        const sessionResult = await mcpClient.executeTool(createSessionToolName, {
-            image_data: base64Data,
-            image_mime_type: mimeType
-        });
-        
-        if (!sessionResult || !sessionResult.session_id) {
-            throw new Error('Failed to create vision session');
-        }
-        
-        // Analyze the image
-        const analysisResult = await mcpClient.executeTool(analyzeToolName, {
-            session_id: sessionResult.session_id,
-            query: 'Describe this image in detail. Include all visible objects, text, people, and context.'
-        });
-        
-        // Extract text from result
-        let analysisText = '';
-        if (analysisResult?.content && Array.isArray(analysisResult.content)) {
-            analysisText = analysisResult.content
-                .filter(c => c.type === 'text')
-                .map(c => c.text)
-                .join('\n');
-        } else if (typeof analysisResult === 'string') {
-            analysisText = analysisResult;
-        } else {
-            analysisText = JSON.stringify(analysisResult);
-        }
-        
-        results.push(analysisText);
-    }
-    
-    return results;
-}
-
 // ============================================
 // Auto Vision Session Creation
 // ============================================
@@ -2886,8 +2837,6 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
         return;
     }
     
-    const createSessionToolName = getVisionToolName('vision_create_session');
-    const analyzeToolName = getVisionToolName('vision_analyze');
     const results = [];
     
     // Use the correct chat conversation and container for multi-chat robustness
@@ -2940,7 +2889,7 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
             }
             
             // STEP 1: Create vision session
-            const sessionResult = await mcpClient.executeTool(createSessionToolName, {
+            const sessionResult = await callVisionMethod('vision.session_create', {
                 image_data: base64Data,
                 image_mime_type: mimeType
             });
@@ -2974,7 +2923,7 @@ async function autoCreateVisionSessions(userExchangeId, images, chatId = null) {
             }
             
             // STEP 2: Analyze the image using the session
-            const analysisResult = await mcpClient.executeTool(analyzeToolName, {
+            const analysisResult = await callVisionMethod('vision.analyze', {
                 session_id: sessionId,
                 query: 'Describe this image in detail. Include all visible objects, text, people, and context.'
             });
@@ -3073,15 +3022,11 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
     const streamModel = chatHistory.get(chatId)?.model || currentModel;
     if (exchange) exchange.model = streamModel;
 
-    // Determine if we should exclude vision tools from system prompt
-    // Use the per-chat streamModel, not the global currentModel
+    // Per-chat vision capability — drives the vision-tool filter below
     const streamModelConfig = models.find(m => m.id === streamModel);
     const modelSupportsVision = streamModelConfig?.capabilities?.vision === true;
-    const shouldExcludeVisionTools = modelSupportsVision && !useVisionAnalysis;
-    const excludedToolPrefixes = shouldExcludeVisionTools ? ['vision_'] : [];
-    
-    
-    const systemPrompt = getSystemPromptWithMetadata(excludedToolPrefixes);
+
+    const systemPrompt = getSystemPromptWithMetadata();
     // Store system prompt for debugging (included in JSON export)
     streamConv.setSystemPrompt(exchangeId, systemPrompt);
 
@@ -3175,8 +3120,10 @@ async function streamResponse(exchangeId, streamChatId, origUserExchangeId = nul
                 const filteredTools = allMcpTools.filter(tool => {
                     const toolName = tool.function?.name?.toLowerCase() || '';
                     // Block all vision tools — in direct mode the model has images directly;
-                    // in auto-vision mode the frontend already did the analysis
-                    return !toolName.includes('vision_');
+                    // in auto-vision mode the frontend already did the analysis.
+                    // Matches both naming styles: vision.analyze (MCP dot) and
+                    // vision_analyze (underscore), plus server-prefixed variants.
+                    return !toolName.includes('vision.') && !toolName.includes('vision_');
                 });
 
                 if (filteredTools.length > 0) {
@@ -4599,7 +4546,10 @@ async function handleToolExecution(originalExchangeId, parsedObj, forcedChatId, 
     // Guard: Reject vision tool calls if MCP Vision is disabled
     // Use the chat's actual model, not the global dropdown — the user
     // may have switched models since the conversation was started.
-    const isVisionTool = parsedObj.name.toLowerCase().includes('vision_');
+    const isVisionTool = (() => {
+        const n = parsedObj.name.toLowerCase();
+        return n.includes('vision.') || n.includes('vision_');
+    })();
     const chatModel = chatHistory.get(toolChatId)?.model || currentModel;
     const chatModelConfig = models.find(m => m.id === chatModel);
     const modelSupportsVision = chatModelConfig?.capabilities?.vision === true;
