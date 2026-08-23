@@ -1,619 +1,90 @@
-# LLM Gateway Chat - Agent Instructions
+# LLM Gateway Chat — Agent Instructions (bff-rework)
 
-## Core Maxims & Memory
+> **You are on the BFF-refactor dev branch.** This file governs the worktree `D:\DEV\LLM-Gateway-Chat` (branch `bff-rework`, port 8082). Live runs from `D:\SRV\LLM-Gateway-Chat` on `master`, port 8080, and must keep working throughout. Do not port this file to master.
 
-Covered by the prime directive (`prime-directive.instructions.md`) — development maxims, fail-fast/fail-loud, memory protocol, and collaboration style. This file covers only project-specific details.
+## Read First
+
+1. The prime directive — core maxims, fail-fast, memory protocol. Applies fully.
+2. [docs/plan-backend-routed-refactor.md](docs/plan-backend-routed-refactor.md) — the governing spec (GitHub issue #12).
+3. [docs/architecture-conversation-runner.md](docs/architecture-conversation-runner.md) — the target architecture (design authority). The conversation is a server-side session; the browser is an attach/detach view.
+4. `docs/codebase-survey-bff.md` — the channel × callsite map of the current client-centric code. Keep it updated as phases land; do not duplicate its call-shape tables into this file (snapshots drift, pointers don't).
+
+## Branch Rules
+
+- Work only in this worktree, on `bff-rework`.
+- Dev data (`server/data/`) is a throwaway snapshot. Refresh from live while idle-ish: `robocopy D:\SRV\LLM-Gateway-Chat\server\data D:\DEV\LLM-Gateway-Chat\server\data /E`. Never point the dev server at live's data dir.
+- Hotfix flow: fix in `D:\SRV` (master) → commit → `git merge master` here.
+- Ship: merge `bff-rework` → master; in `D:\SRV`: `git pull` + restart.
+- Server does not auto-restart — restart manually after backend edits. A `Chat Backend running at …` log line means the process started, not that the command returned. Start servers in background; poll `/api/config` or `/health` for readiness (never an SSE endpoint — it hangs the request).
 
 ## Project Overview
 
-LLM Gateway Chat is a **vanilla JavaScript SPA** with its own **Node.js backend** (default port 8080, configurable in `server/config.json`). It connects to an LLM Gateway for chat streaming and embedding, and stores all data in Rust-based embedded databases.
+Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM Gateway for chat streaming and embeddings; persistence in embedded Rust DBs (nDB documents, nVDB vectors).
 
-### Deployment
-
-Development happens **exclusively on BADKID** (this machine) — there is no separate
-dev/prod split and no network-share deployment anymore. This repo is worked on and
-run here directly.
-
-The database here is **live data** — do NOT run migration scripts, cleanup scripts,
-or experimental write operations against it without explicit user approval.
-
-The server does **not** auto-restart on file changes — restart it manually after
-backend edits (see `### Start Commands`).
-
-### Key Characteristics
-
-- **No Build Process**: Directly serve static HTML/JS/CSS files via the backend
-- **Zero Runtime Dependencies**: All vendor libraries are locally vendored
-- **SSE Transport**: SSE (Server-Sent Events) over REST to gateway (WebSocket transport retired)
-- **Frontend-Driven Architecture**: MCP tool execution happens entirely in the browser
-- **AI-First Maintainability**: Code is optimized for LLM parsing, not human readability dogmas
-- **Own Backend**: Node.js server (port from `server/config.json`, default 8080) serves static files + REST API + search
-
----
+**The refactor:** today the browser orchestrates gateway, MCP, TTS, and persistence directly — eight browser→upstream channels (spec §1). Target: the ConversationRunner architecture — conversations are server-side sessions, the browser is a disposable attach/detach view, persistence is a side effect of the runner's traffic. Until phases land, the code is the client-centric architecture below.
 
 ## Technology Stack
 
 | Layer | Technology |
 |-------|------------|
-| **Language** | Vanilla JavaScript (ES2022+), HTML5, CSS3 |
-| **UI Library** | NUI Web Components (proprietary, via Git submodule) |
-| **Backend** | Node.js native HTTP (no framework), port from `server/config.json` (default 8080) |
-| **Structured DB** | nDB (Rust-based JSON Lines document store) |
-| **Vector DB** | nVDB (Rust-based vector DB, exact search) |
-| **Embedding** | Gateway `/v1/embeddings` (Qwen3-Embedding-4B via OpenRouter, 2560d) |
-| **Communication** | SSE (Server-Sent Events) to gateway + REST to backend |
-| **Logging** | nLogger (JSON Lines structured logger) |
-| **Markdown** | NUI's `nui-markdown` component (regex-based `markdownToHtml` parser with inline `nui-code` syntax highlighting for web languages) |
-
----
+| Language | Vanilla JS (ES2022+), HTML5, CSS3 — no TypeScript, no build |
+| UI | NUI Web Components (git submodule `lib/nui_wc2/`) |
+| Backend | Node.js raw `http` + hand-rolled router (`server/server.js`) — zero framework deps |
+| Structured DB | nDB (Rust JSON-Lines store, submodule `lib/ndb/`) |
+| Dead deps | `express` + `@seald-io/nedb` in package.json are never imported — remove in a cleanup pass |
+| Vector DB | nVDB (Rust, submodule `lib/nvdb/`) |
+| Embedding | Gateway `/v1/embeddings` (Qwen3-Embedding-4B, 2560d) |
+| Transport | SSE to gateway + same-origin REST/SSE to backend |
+| Logging | nLogger (JSON Lines) |
 
 ## Project Structure
 
 ```
-├── chat/                       # Main application
-│   ├── index.html             # Entry point
-│   ├── css/
-│   │   └── chat.css           # Application styles
-│   └── js/
-│       ├── chat.js            # Main controller (UI, event handling, archive tools)
-│       ├── client-sdk.js      # GatewayClient (SSE/REST SDK)
-│       ├── api-client.js      # BackendClient (REST to Node backend)
-│       ├── storage.js         # localStorage/IndexedDB fallback
-│       ├── conversation.js    # Conversation state management
-│       ├── chat-history.js    # Multi-conversation history + backend sync
-│       ├── mcp-client.js      # MCP tool client (SSE connections)
-│       ├── file-store.js      # File storage (sends base64 to server, returns URLs)
-│       ├── image-store.js     # Re-exports fileStore as imageStore (backwards compat)
-│       ├── markdown.js        # Markdown rendering with syntax highlight
-│       ├── tts-utils.js       # Text-to-speech utilities
-│       └── config.js          # User configuration (gateway URL, backend toggle)
-├── chat-arena/                # Arena mode (LLM-to-LLM autonomous conversations)
-│   ├── index.html
-│   └── js/
-│       ├── arena.js           # Arena orchestrator + UI
-│       ├── config.js          # Arena defaults
-│       └── storage.js         # Arena backend-only storage
-├── lib/                       # Shared libraries
-│   ├── nui_wc2/               # NUI Web Components (Git submodule)
-│   ├── ndb/napi/              # nDB Node bindings
-│   ├── nvdb/napi/             # nVDB Node bindings
-│   ├── nlogger/               # nLogger (ESM)
-│   ├── nlogger-cjs.js         # nLogger CJS bridge
-│   └── tts/                   # TTS controller + player (NSpeechController, TtsPlayerHost)
-├── server/                    # Node.js backend
-│   ├── server.js              # HTTP server (REST API, static files, search, embeddings, auth)
-│   ├── embed.js               # Shared embedding utilities (chunking, fetch, vector ops)
-│   ├── backfill-embed.js      # Offline bulk embedding backfill
-│   ├── migrate-import-nedb.js       # Import legacy NeDB backups → nDB (step 1 of 2, historical)
-│   ├── migrate-pack-conversations.js # Per-message docs → conversation docs (step 2 of 2, historical)
-│   ├── migrate-ndb-to-folder.js     # Flat .jsonl → folder-as-database (future)
-│   ├── migrate-ndb-buckets.js       # File migration utilities
-│   ├── config.json            # Server configuration (port, users, embedding, paths)
-│   ├── server.bat             # Windows convenience launcher
-│   ├── logs/                  # JSON Lines log files (gitignored)
-│   └── data/                  # nDB + nVDB database files (gitignored)
-├── docs/                      # Documentation
-│   ├── api_rest.md            # Gateway REST API reference
-│   ├── api_rest.md            # Gateway REST API reference
-│   ├── bugs.md                # Known bugs and their status
-│   ├── features_backlog.md    # Feature backlog (completed + pending)
-│   ├── plan-preview-pane.md   # Chat preview pane feature plan
-│   └── _Archive/              # Historical dev plans, handovers, migration docs
-└── package.json               # Minimal metadata
+├── chat/            # Main SPA (index.html, css/, js/)
+├── chat-arena/      # Arena mode (LLM-to-LLM autonomous conversations)
+├── lib/             # Submodules: nui_wc2, ndb, nvdb, nlogger; tts/
+├── server/          # Backend: server.js, embed.js, config.json, migrations (historical)
+│   ├── data/        # nDB + nVDB files (gitignored, per-user subdirs)
+│   └── logs/        # JSON Lines logs (gitignored)
+└── docs/            # Governing spec + codebase survey
 ```
 
----
-
-## Running the Application
-
-### Prerequisites
-
-1. A running **LLM Gateway backend** instance (default: `http://192.168.0.100:3400`)
-2. Node.js v24+
-3. At least one user configured (via `server/config.json` `users[]` or `SUPERADMIN_USERNAME`/`SUPERADMIN_PASSWORD` env vars)
-
-### Configuration
-
-**Server config** (`server/config.json`) — controls the backend, users, embedding, and data paths:
-```json
-{
-    "port": 8080,
-    "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
-    "embedDims": 2560,
-    "embedMaxTokens": 25000,
-    "embedBatchTokenLimit": 29000,
-    "sessionTtlMinutes": 1440,
-    "users": [
-        {
-            "id": "admin-seed-user",
-            "username": "chat_user",
-            "password": "chat2026",
-            "displayName": "Chat User",
-            "dbPath": "server/data/chat_user",
-            "rights": { "login": true, "read": true, "write": true, "admin": true }
-        }
-    ]
-}
-```
-
-**Frontend config** — `chat/js/config.js` is **dynamically generated by the server** from environment variables (`.env` file). Available env vars:
-```bash
-LLM_GATEWAY_URL=http://192.168.0.100:3400
-UI_DEFAULT_MODEL=
-UI_DEFAULT_TEMP=0.7
-UI_DEFAULT_TOKENS=
-UI_OPERATION_MODE=sse
-TTS_ENDPOINT=
-TTS_VOICE=
-TTS_SPEED=1.0
-```
-
-### Start Commands
-
-```bash
-# Start the backend (serves static files + API)
-node server/server.js
-# or
-npm start
-
-# Navigate to http://localhost:8080/chat/
-```
-
----
-
-## Architecture Overview
-
-### Communication Flow
-
-```
-┌─────────────┐  SSE (default) or   ┌─────────────┐      HTTP      ┌─────────────┐
-│   Chat UI   │ ◄──────────────────► │  LLM Gateway │ ◄───────────► │   LLM API   │
-│  (Browser)  │  (JSON-RPC 2.0 WS)  │  (Backend)   │               │  (Provider) │
-└──────┬──────┘                      └──────┬──────┘               └─────────────┘
-       │                                    │
-       │ REST (configurable port)           │ /v1/embeddings
-       │ + SSE (embed events)               ▼
-       ▼                            ┌─────────────┐
-┌─────────────┐                    │ Rust DBs    │
-│ Chat Backend│◄──── nDB/nVDB ───►│ (portable)  │
-│ (Node.js)   │                    └─────────────┘
-└─────────────┘
-       │
-       │ SSE (EventSource)
-       ▼
-┌─────────────┐
-│ MCP Servers │  (Frontend-driven tool execution)
-└─────────────┘
-```
-
-### Module Responsibilities
-
-| Module | Purpose |
-|--------|---------|
-| `chat.js` | UI controller, event handlers, message rendering, streaming logic, archive tools, login, presets, admin UI, embed status monitoring via SSE |
-| `client-sdk.js` | `GatewayClient` class - SSE transport over REST, async-iterator streaming, stream registry, per-chat abort |
-| `api-client.js` | `BackendClient` class - REST calls to Node backend (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`, `/api/user/settings`) |
-| `conversation.js` | `Conversation` class - message history, versioning, API message formatting, backend sync, `thinking_signature` propagation |
-| `chat-history.js` | `ChatHistory` class - multi-conversation management, backend CRUD, localStorage fallback |
-| `mcp-client.js` | `MCPClient` class - SSE connections to MCP servers, tool registry, execution |
-| `file-store.js` | File storage — sends base64 to server `/api/buckets/images/`, returns lightweight URLs |
-| `image-store.js` | Re-exports `fileStore` as `imageStore` for backward compatibility |
-| `markdown.js` | `renderMarkdown()` — thin wrapper that emits `<nui-markdown>` elements; all parsing delegated to NUI's `markdownToHtml()` |
-| `tts-utils.js` | Text-to-speech utilities (endpoint management, voice list, playback) |
-| `storage.js` | localStorage/IndexedDB fallback for preferences (MCP config, presets) |
-
----
-
-## Key Implementation Details
-
-### NUI Web Components Usage
-
-**CRITICAL**: Always use NUI components, never native HTML elements for UI controls.
-
-**Correct:**
-```html
-<nui-input id="temperature">
-    <input type="number" min="0" max="2" step="0.1">
-</nui-input>
-
-<nui-select id="model-select" searchable>
-    <select>...</select>
-</nui-select>
-```
-
-**Avoid:**
-```html
-<input type="number" id="temperature" class="custom-input">
-<select id="model-select">...</select>
-```
-
-### Theme Variables
-
-Use NUI's CSS custom properties:
-
-```css
-.my-element {
-    background: var(--color-base);
-    color: var(--text-color);
-    border: thin solid var(--border-shade1);
-    padding: var(--nui-space);
-}
-```
-
-Key variables:
-- `--color-base`, `--color-shade1-9` - Surface colors
-- `--text-color`, `--text-color-dim` - Text colors
-- `--color-highlight` / `--nui-accent` - Accent color
-- `--border-shade1-4` - Border colors
-- `--nui-space`, `--nui-space-half` - Spacing
-- `--border-radius1`, `--border-radius2` - Border radius
-
-### Storage Strategy
-
-| Data Type | Storage | Key |
-|-----------|---------|-----|
-| Sessions | nDB | `_type: 'session'`, `id: chat_xxx` |
-| Conversation messages | nDB | `_type: 'conversation'`, `id: chat_xxx`, inline `messages` array, each with `embedStatus` (`pending`/`embedded`/`failed`) |
-| Embedding vectors | nVDB | `chatId` + `msgIdx` payload, keyed by message ID |
-| User settings | nDB | `_type: 'user_settings'`, `id: {userId}` — temperature, language, presets, etc. |
-| User auth | nDB (`users_db`) | `_type: 'user'` — username, passwordHash, dbPath, rights, userToken |
-| Conversation history (fallback) | localStorage | `chat-conversation-${chatId}` |
-| Chat list metadata (fallback) | localStorage | `chat-history-index` |
-| System prompt presets | localStorage | `chat-system-presets` (via `storage.getPref`) |
-| MCP server config | localStorage | `mcp-servers`, `mcp-enabledTools` |
-| Image files | nDB Buckets | `/api/buckets/images/{sessionId}/{filename}`, garbage-collected on chat delete |
-
-**Data model**: One conversation document per session. Messages are an inline array indexed by `idx`. nVDB stores vectors keyed by message ID with `{ chatId, msgIdx }` payload for back-reference. Each message carries an `embedStatus` field (`pending` → `embedded` → `failed`) updated by the server and pushed to the frontend in real-time via SSE.
-
-### Embedding & Monitoring
-
-- **Async Fire-and-Forget**: `embedMessageAsync` runs after each `POST /api/chats/:id/messages`, embedding user and assistant messages (tool messages skipped).
-- **Self-Healing**: On startup, the server reconciles nDB messages against nVDB — missing vectors are re-embedded, orphaned `pending`/missing `embedStatus` fields are backfilled.
-- **Real-Time SSE Notifications**: `GET /api/embed-events?chatId=xxx` streams `embed-status` events as each message transitions from `pending` → `embedded`/`failed`. Chat uses `msgIdx` matching; Arena uses `messageId` (direct DOM attribute).
-- **Visual Indicators**: Small colored dots in message headers — 🟡 yellow pulse (pending), 🟢 green (embedded), 🔴 red (failed), ⚪ gray (unknown). Shown on both user and assistant bubbles for monitoring.
-- **Retry & Backoff**: Failed embeddings retry 3× with exponential backoff, then enter a persistent queue with escalating delays (5s → 30s → 2min → 10min → 30min).
-
-### Image Storage & Garbage Collection Architecture
-- **Zero JSON Bloat:** MCP tool responses returning large base64 images are intercepted by the frontend. The base64 is uploaded via `/api/buckets/images/...`, returning a lightweight URL string replacing the massive base64 blob in the JSON response sent to the Gateway.
-- **Native nDB Bucket Storage:** Images are securely stored in the native Rust `nDB` engine using `db.bucket('images')`. This eliminates orphaned physical sidecar files and ensures the database folder `_files/` directory is highly portable and cleanly backed up alongside the documents.
-- **Lifecycle Integration:** When a chat is deleted via the UI (`DELETE /api/chats/:id`), the backend extracts every image URL (both user-uploaded and MCP-generated), checks if any other active chats reference them, and calls `db.releaseFile(ref)`. Orphans are safely moved to the `.trash` directory natively by the Rust engine.
-
-### MCP Tool Execution (Frontend-Driven)
-
-Tool execution happens **entirely in the browser** using the OpenAI-compatible `tool_calls` protocol:
-
-1. Frontend sends chat request with `tools` array and system prompt
-2. Gateway streams `delta.tool_calls` events (OpenAI-compatible format: `[{id, type: 'function', function: {name, arguments}}]`)
-3. On `finish_reason: 'tool_calls'`, frontend aggregates all tool call deltas, executes each:
-   - **Local archive tools** (`chat_archive_*`) → direct REST calls to backend (`/api/search`, `/api/chats/:id`, `/api/arena`, `/api/references`)
-   - **MCP tools** → via `mcpClient.executeTool()` over SSE connections
-4. Results sent as `role: 'tool'` messages with `tool_call_id` matching the assistant's `tool_calls[].id`
-
-**Backend is NOT involved in tool execution** — it only provides the archive REST API. Tool detection is fully native (no text parsing, no regex).
-
----
-
-## Coding Guidelines
-
-### AI-First Maintainability
-
-This codebase is designed to be maintained by LLMs, not humans:
-
-1. **Explicit, flat logic** over deep abstraction hierarchies
-2. **Dense colocation** - related code stays together
-3. **Minimal comments** - only structural markers, not verbose explanations
-4. **Deterministic clarity** - code paths should be obvious from reading
-
-### Code Style
-
-- **Indentation**: 4 spaces (not tabs, for alignment with existing code)
-- **Quotes**: Single quotes for strings
-- **Semicolons**: Required
-- **Naming**: camelCase for variables/functions, PascalCase for classes
-- **Modules**: ES6 modules with explicit imports/exports
-
-### File Organization Patterns
-
-```javascript
-// ============================================
-// Module Name - Brief Description
-// ============================================
-
-import { Dependency } from './dependency.js';
-
-// Constants
-const CONFIG = window.CHAT_CONFIG || {};
-
-// State (module-level)
-let currentState = null;
-
-// ============================================
-// Main Class/Controller
-// ============================================
-
-export class MyClass {
-    constructor() {
-        // Initialize
-    }
-    
-    // Public methods
-    publicMethod() {}
-    
-    // Private helpers (prefix with _)
-    _privateHelper() {}
-}
-
-// ============================================
-// Helper Functions
-// ============================================
-
-function helperFunction() {}
-
-// ============================================
-// Initialization
-// ============================================
-
-export const singleton = new MyClass();
-```
-
----
-
-## API Reference
-
-### GatewayClient (client-sdk.js)
-
-```javascript
-const client = new GatewayClient({
-    baseUrl: 'http://localhost:3400'
-});
-
-// REST methods
-const models = await client.getModels();
-const health = await client.getHealth();
-
-// SSE streaming via async iterator
-for await (const event of client.streamChatIterable({
-    model: 'gemini-flash',
-    messages: [{role: 'user', content: 'Hello'}]
-})) {
-    // event.type: 'delta' | 'progress' | 'done' | 'error' | 'aborted'
-    // event.content (for delta)
-    // event.data (for progress)
-}
-```
-
-### Conversation (conversation.js)
-
-```javascript
-const conversation = new Conversation('storage-key');
-
-// Add exchange
-const exchangeId = await conversation.addExchange(content, attachments);
-
-// Update streaming response
-conversation.updateAssistantResponse(exchangeId, deltaContent);
-
-// Complete exchange
-conversation.setAssistantComplete(exchangeId, usage, context);
-
-// Get formatted messages for API (async — resolves image URLs)
-const messages = await conversation.getMessagesForApi(systemPrompt);
-
-// Version control (regenerate)
-conversation.regenerateResponse(exchangeId);
-conversation.switchVersion(exchangeId, 'next' | 'prev');
-```
-
-### MCPClient (mcp-client.js)
-
-```javascript
-import { mcpClient } from './mcp-client.js';
-
-// Add/connect server
-mcpClient.addServer(url, name);
-await mcpClient.connectToServer(server);
-
-// Get tools for LLM
-const tools = mcpClient.getFormattedToolsForLLM();
-const toolPrompt = mcpClient.generateToolPrompt();
-
-// Execute tool
-const result = await mcpClient.executeTool(toolName, parameters, onProgress);
-```
-
----
-
-## Common Tasks
-
-### Adding a New UI Feature
-
-1. Update HTML in `chat/index.html` using NUI components
-2. Add event listeners in `chat/js/chat.js` `setupEventListeners()`
-3. Add rendering logic in appropriate render function
-4. Update styles in `chat/css/chat.css` using NUI theme variables
-
-### Adding a New Configuration Option
-
-1. Add default to the server's dynamic config generation (`server/server.js` L1738-1753)
-2. Optionally add an env var override (`.env` file)
-3. Read value in `chat/js/chat.js` from `CONFIG` object
-4. Apply in `applyDefaultConfig()` or directly where used
-
-### Modifying MCP Tool Behavior
-
-1. Tool detection: `chat/js/chat.js` - `streamResponse()` function
-2. Tool execution: `chat/js/mcp-client.js` - `executeTool()` method
-3. Message formatting: `chat/js/conversation.js` - `getMessagesForApi()`
-
-### Updating the NUI Submodule
-
-All UI components, markdown rendering, and syntax highlighting live in the NUI library (Git submodule at `lib/nui_wc2/`). When NUI is updated upstream:
-
-```bash
-git submodule update --remote lib/nui_wc2
-```
-
-There are no other vendored dependencies to update.
-
----
-
-## Visual Verification via minimax Subagent
-
-For UI/layout changes, get an **independent visual review** from a subagent running the
-`minimax-m3-chat (customendpoint)` model, in addition to your own DOM-geometry checks.
-
-### Why
-
-The primary agent's DOM measurements confirm *geometry* (positions, widths, overflow).
-minimax confirms *appearance* (rendering, clipping, overlap, colors, alignment) from the
-actual pixels. The two together catch what either alone misses.
-
-### Workflow (established and validated in this project)
-
-1. **Reach the target UI state in the integrated browser** (Playwright page), e.g. open the
-   dropdown/popup you want reviewed. The page at `http://localhost:8080/chat/` is the
-   shared Playwright page.
-2. **Save a screenshot to disk** under `_scratch/` (gitignored) so the subagent can read it:
-   ```js
-   const el = await page.$('.target-selector');
-   await el.screenshot({ path: 'D:/SRV/LLM-Gateway-Chat/_scratch/name.png' });
-   ```
-3. **Launch the subagent** via `runSubagent` with `model: "minimax-m3-chat (customendpoint)"`.
-   Give it: the absolute PNG path(s), the expected behavior, and a precise checklist
-   (e.g. "does the dropdown span the full width? is text clipped? does it overlap brokenly?
-   list the exact option labels you see").
-4. **Cross-check against DOM**: minimax's pixel reading is approximate (e.g. it may estimate
-   a margin as 25px when the DOM says 16px). Trust the DOM for exact numbers; use minimax
-   for visual sanity (clipping, overlap, alignment, rendering) and for catching things the
-   DOM check didn't target.
-
-### Gotchas (learned)
-
-- minimax reads screenshots **from disk** — it cannot see the live page, so always save the
-  PNG first.
-- It can produce **false positives** (e.g. misread a clipped title, or claim a scrollbar
-  overlaps when the DOM shows clearance). Always confirm visual claims with DOM geometry
-  before acting on them.
-- Screenshot framing matters: crop to the relevant element (`.chat-history-list`, etc.) so
-  the review focuses on the changed region.
-- Use it for **independent confirmation**, not as the only check — it can't verify sort
-  order, data, or logic, only appearance.
-
----
-
-## LLM Gateway Backend Integration
-
-**Do NOT build complex frontend workarounds for backend limitations.**
-
-If a feature requires backend changes, point them out explicitly:
-
-- New API endpoints
-- Additional REST methods
-- Modified response formats
-- New capabilities in model definitions
-
-The LLM Gateway is our proprietary project - we can and should modify it when needed.
-
----
-
-## Security Considerations
-
-1. **Cookie-only auth**: No API keys or secrets in frontend code. HttpOnly cookies prevent XSS token theft.
-2. **Password hashing**: `crypto.scryptSync` with random salt per user, stored in isolated `users_db`.
-3. **XSS Protection**: NUI's `markdownToHtml()` HTML-escapes `&`, `<`, `>` before applying formatting regexes. **Note:** attribute-value injection (`"`) and URL scheme validation gaps are being hardened — see `docs/plan-preview-pane.md` prerequisite section for details.
-4. **Same-origin by default**: Server serves both frontend and API — no CORS needed in production.
-5. **Image validation**: Only `image/*` MIME types accepted.
-6. **Database isolation**: Each user gets a physically separate nDB + nVDB at their `dbPath`.
-
----
-
-## Timeout & Progress Rules
-
-These rules prevent indefinite hangs during task execution. The agent must never silently block for >15s.
-
-### 1. Every command gets a timeout and expected output
-
-Before any bash/node command that could block (servers, model loading, HTTP calls), state:
-
-```
-Running: <command>
-Expect: <result> within <N>s
-```
-
-If the command exceeds its timeout, report what happened and what to do next.
-
-### 2. Never start server processes in the foreground
-
-Servers that bind ports and run indefinitely must be started in background mode. Use:
-
-```powershell
-# PowerShell: background start, then poll health
-Start-Process -NoNewWindow node -ArgumentList "server/server.js"
-```
-
-After starting, poll the health endpoint with a separate short-lived command to confirm it's ready.
-
-### 3. Progress reporting for operations >10s
-
-If any operation takes longer than 10 seconds, report progress at least once:
-
-- Model loading: "Waiting for model to load, ~30s estimated"
-- Batch processing: "Processing batch 3/11, ETA 45s"
-- Embedding: "Embedding 50 texts, ~5s remaining"
-- HTTP call hanging: "Request to Fatten timed out after 30s. Retrying."
-
-### 4. Self-contained E2E tests over server interactions
-
-When validating end-to-end functionality, prefer single-script tests that run start-to-finish without requiring a long-running server:
-
-```javascript
-// Inline test: init nVDB → embed test data → search → verify → exit
-node -e "(async () => { /* test logic */ })()"
-```
-
-### 5. No ambiguous "let me try" without a fallback
-
-Every approach gets one attempt. If it fails, state the failure, diagnose the root cause, and propose a fix — don't retry the same approach silently.
-
-### 6. Read AI-generated output patterns carefully
-
-Output that looks like a server log line (e.g., "Chat Backend running at http://localhost:3500") means the process started but hasn't returned. Recognize this pattern immediately and don't wait for it to "finish."
-
----
-
-## Testing Checklist
-
-Before submitting changes:
-
-- [ ] Application loads without console errors
-- [ ] Gateway connection establishes successfully
-- [ ] Models load and populate select dropdown
-- [ ] Messages send and receive correctly
-- [ ] Streaming responses display properly
-- [ ] Image attachments work (paste and file upload)
-- [ ] Conversation history persists across reloads
-- [ ] Multiple chat sessions work correctly
-- [ ] MCP servers connect and tools execute (if applicable)
-- [ ] Mobile layout is usable (basic responsive check)
-
----
-
-## Documentation References
-
-- `docs/api_rest.md` - REST API specification
-- `docs/api_rest.md` - REST API specification
-- `docs/_Archive/MCP_TOOL_INTEGRATION.md` - Frontend MCP architecture (archived)
-- `docs/plan-preview-pane.md` - Chat preview pane feature plan (current)
-- `nui_wc2/docs/playground-component-quickstart.md` - NUI component usage
-- `nui_wc2/Agents.md` - NUI library agent instructions
-
----
-
-## External Dependencies
-
-This project has **zero external runtime dependencies**. All UI components, markdown rendering, and syntax highlighting are provided by the NUI library (Git submodule at `lib/nui_wc2/`). There is no `node_modules` for the frontend, no vendored third-party JS libraries, and no build step.
-
-The NUI submodule is updated via:
-```bash
-git submodule update --remote lib/nui_wc2
-```
+## Module Map (browser side)
+
+| Module | Role |
+|--------|------|
+| `chat/js/chat.js` | UI controller: events, rendering, streaming, archive tools, login, presets, admin, embed-status SSE |
+| `chat/js/client-sdk.js` | `GatewayClient` — SSE-over-REST to gateway, async-iterator streaming, per-chat abort |
+| `chat/js/api-client.js` | `BackendClient` — same-origin REST (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`) |
+| `chat/js/conversation.js` | Message history, versioning, API formatting, `thinking_signature` propagation |
+| `chat/js/chat-history.js` | Multi-conversation management, backend CRUD, localStorage fallback |
+| `chat/js/mcp-client.js` | MCP SSE connections, tool registry, in-browser tool execution (P1 target) |
+| `chat/js/file-store.js` | Attachment upload → `/api/buckets/images/…`, returns lightweight URLs |
+| `chat/js/preview.js`, `preview-url.js`, `chunk-view.js` | Preview pane + chunk inspection |
+| `chat-arena/js/arena.js` | Arena orchestrator — multiple direct `GatewayClient` instances (P1 target) |
+
+## Invariants That Survive the Refactor
+
+- **NUI components only** for UI controls (`nui-input`, `nui-select`, …) — never raw HTML controls. Style via theme variables (`--color-base`, `--text-color`, `--nui-accent`, `--nui-space`, …), not custom CSS on components.
+- **Code style:** 4-space indent, single quotes, semicolons, ES6 modules. Flat explicit logic; dense colocation; minimal comments (structural markers only).
+- **Data model:** one conversation document per session (`_type: 'conversation'`, inline `messages` array with per-message `embedStatus`). Vectors in nVDB keyed by message ID with `{ chatId, msgIdx }` payload. Users in `users_db` (scrypt-hashed, per-user `dbPath` isolation) — reconciled with nPort identity at P3.
+- **Embedding pipeline** (server-side, stays): fire-and-forget after message POST, startup reconciliation nDB↔nVDB, SSE `embed-status` events, retry with escalating backoff.
+- **Image lifecycle:** base64 intercepted client-side → bucket upload → lightweight URL in message JSON. On chat delete, refs are garbage-collected via `db.releaseFile` (orphans → `.trash`).
+- **Tool execution is currently browser-side** (OpenAI `tool_calls` protocol, aggregated in `chat.js`, executed via `mcp-client.js`; archive tools go to backend REST). Phase PB moves execution into the server-side runner.
+
+## Security
+
+- Cookie-only auth (HttpOnly), same-origin by default, no secrets in frontend.
+- `nui-markdown` escapes `& < >` before formatting, but attribute-value/URL-scheme hardening is a known gap owned by **nui_wc2** — don't build markdown sanitization here.
+- nPort cutover (P2) binds services to localhost; public surface becomes 443 only.
+
+## Visual Verification (UI changes)
+
+Reach the target UI state in the integrated browser (`http://localhost:8082/chat/`), save a cropped element screenshot under `_scratch/`, then launch a subagent on model `minimax-m3-chat (customendpoint)` with the PNG path + a precise checklist. Trust DOM geometry for numbers; use the subagent for appearance (clipping, overlap, alignment). It can produce false positives — confirm with the DOM before acting.
+
+## References
+
+- Spec: [docs/plan-backend-routed-refactor.md](docs/plan-backend-routed-refactor.md) · Tracking: GitHub issue #12
+- Gateway API docs live in the **LLM-Gateway** repo (`docs/api_rest.md` there) — the copy in this repo was removed as drift-prone.
+- NUI: `lib/nui_wc2/Agents.md`, `lib/nui_wc2/LLM-CHEATSHEET.md`
+- nDB / nVDB: `lib/ndb/AGENTS.md`, `lib/ndb/docs/`

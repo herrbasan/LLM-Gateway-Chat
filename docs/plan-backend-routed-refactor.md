@@ -1,8 +1,7 @@
 # Spec: Backend-Routed Refactor (BFF) + Multi-User Scoping
 
 **Date:** 2026-08-23 (specced during an nPort session; execution happens in THIS repo)
-**Status:** BLOCKED ON SURVEY — the spec was written WITHOUT a deep codebase read.
-Run P−1 (codebase survey) first; its findings amend this spec before P0 starts.
+**Status:** ARCHITECTURE PIVOT (2026-08-23) — the proxy-retrofit is replaced by the **ConversationRunner** architecture; [architecture-conversation-runner.md](architecture-conversation-runner.md) is the design authority. Survey: [codebase-survey-bff.md](codebase-survey-bff.md) (channel × callsite authority; §1/§2 corrected with its findings). Retrofit P0 design kept as input: [plan-p0-stream-ownership.md](plan-p0-stream-ownership.md). Phases re-scoped in §4.
 **Branch:** `bff-rework` (worktree `D:\DEV\LLM-Gateway-Chat`, dev port 8082)
 **Live:** `D:\SRV\LLM-Gateway-Chat` on `master`, port 8080 — must keep working throughout
 **Tracking:** LLM-Gateway-Chat issue #12
@@ -27,10 +26,12 @@ memory #700):
 
 1. GatewayClient SSE POST `/v1/chat/completions`
 2. GatewayClient REST GET `/v1/models` + `/health`
-3. GatewayClient WebSocket `/v1/realtime`
-4. TTS GET `/voices` + GET `/tts?params` (chat.js and arena.js; audio via `new Audio(url)`)
+3. ~~GatewayClient WebSocket `/v1/realtime`~~ — retired, no code remains (verified)
+4. nSpeech V3 SDK surface — POST `/v1/audio/speech` (SSE audio stream), `/v1/text/clean`, voice/admin GETs, EventSource `/v1/admin/events`. The "GET `/tts` + `new Audio(url)`" shape from the 2026-07-11 analysis is stale (survey §1 ch.4).
 5. MCP SSE via fetch reader + POST to MCP postEndpoint
 6. Arena creates multiple GatewayClient instances with direct gatewayUrl
+7. Browser→MCP-storage plain-HTTP PUT `/storage/…` (`saveToStorage`, chat.js:556) — missed by the July analysis
+8. `browser_fetch` arbitrary-URL fetch (chat.js:803) — missed by the July analysis
 
 **Consequence:** every service port must be exposed for the chat to work. The
 current open-ports state is not a misconfiguration — it is forced by the design.
@@ -48,10 +49,12 @@ the edge — the reason for client-centrism is gone.
   wins over `server/config.json`, which wins over built-in defaults.
   - `PORT = CHAT_PORT || cfg.port || 3500`. Live uses config.json's 8080; the worktree `.env` sets 8082.
   - `USERS_DB_PATH = CHAT_USERS_DB || cfg.usersDbPath || 'server/data/users_db/data.jsonl'` — RELATIVE path, so each checkout owns its data. Neither `.env` overrides it.
-  - `SESSION_TTL = cfg.sessionTtlMinutes (default 1440) * 60s` — **the chat has its own user/session system (`users_db`), separate from nPort auth.** P3 must reconcile these: nPort becomes the identity authority; chat profiles key by nPort `sub`.
-- `server/data/` is gitignored. The dev instance starts with NO data — copy a snapshot from live for testing (see §7). Never let the dev instance point at the live data dir: NeDB flat files, two writers = corruption.
-- Deps: express 5, @seald-io/nedb. Submodules in `lib/`: ndb, nlogger, nui_wc2, nvdb.
-- Already BFF-friendly: BackendClient uses relative paths (`baseUrl=''`); the server has an SSE relay pattern (embed-events) to copy.
+  - `SESSION_TTL = (cfg.sessionTtlMinutes || 1440) * 60 * 1000` ms (server.js:36) — **the chat has its own user/session system (`users_db`), separate from nPort auth.** P3 must reconcile these: nPort becomes the identity authority; chat profiles key by nPort `sub`.
+- `server/data/` is gitignored. The dev instance starts with NO data — copy a snapshot from live for testing (see §7). Never let the dev instance point at the live data dir.
+- Deps: express 5 and @seald-io/nedb are in `package.json` but **never imported** — dead deps; the server is raw `http.createServer` + hand-rolled router (server.js:2045, 2127). Submodules in `lib/`: ndb, nlogger, nui_wc2, nvdb.
+- Latent bug, fix during the pass: `FILES_DIR` is used-but-undeclared (server.js:927 etc.) → legacy `/api/chat-files` GET/DELETE, `/api/files`, `/files/*` throw ReferenceError. Tracked as issue #14.
+- BFF-friendly, with two traps: BackendClient's same-origin is a **config artifact** (code default `http://localhost:3500`, api-client.js:289; the generated config.js sets `backendUrl:''`), and chat's GatewayClient reads **`localStorage['gateway-url']` only** — the generated `config.js.gatewayUrl` is never read, and the default `''` 404s out-of-box (chat.js:40). P0 must deliver the proxy URL through a mechanism the client actually reads.
+- The server has an SSE pattern to copy in embed-events (server.js:852–882) — framing/keepalive/cleanup only; it is one-directional push. P0's bidirectional relay plumbing is new code.
 
 ### nPort (edge auth — separate repo, `D:\DEV\nPort`)
 
@@ -67,18 +70,22 @@ the edge — the reason for client-centrism is gone.
 ## 3. Target architecture
 
 ```
-browser ──► nPort :443 (one door, session token) ──► chat backend ──► gateway / MCP / nSpeech
-                                                         │
-                                                         └─► persists messages as traffic flows
+browser (view) ──► nPort :443 (one door, session token) ──► chat backend ──► gateway / MCP / nSpeech
+                                                                  │
+                                                     ConversationRunner (one per active
+                                                     conversation) — the ONLY author of
+                                                     conversation state; persistence is a
+                                                     side effect of its traffic
 ```
 
 **Design north star (user's words):** "Auth is the pass into that world. Everything
 happens in the local network. The client is just a window into what is happening,
 gated by the auth." Usable from the LAN and on the go through the same door.
 
-- Browser = view. Server = center of operations.
-- Persistence = side effect of traffic, not a client chore.
+- Browser = attach/detach view over a snapshot+event stream. Server = center of operations (the tmux model: the conversation runs whether or not anyone watches).
+- Persistence = side effect of the runner's traffic, not a client chore.
 - The backend attaches the verified `sub` to every internal call. The browser never asserts identity.
+- Full design: [architecture-conversation-runner.md](architecture-conversation-runner.md).
 
 ## 4. Phases (strict order)
 
@@ -114,21 +121,14 @@ prime directive's delegation rule. Primary model reviews and amends this spec.
 "hard parts" list ranked by coupling. Then update this spec: correct §2 facts,
 re-scope phases, mark status READY FOR EXECUTION.
 
-### P0 — Chat backend owns conversation stream + persistence
+### PA–PD — Runner build-out (strangler; full detail in the architecture doc §9)
 
-1. Server proxies `POST /v1/chat/completions` (SSE) to the gateway; the browser's GatewayClient switches to same-origin.
-2. Server persists the user message on receipt and the assistant message on stream completion, keyed by conversation + user.
-3. Reuse the embed-events SSE relay pattern.
+- **PA — runner core:** `server/runner.js`, conversation event stream, `send`/`abort` routes, gateway call, shared append+embed helper, ported api-view + chunk-view. Tools disabled. **Acceptance:** kill the tab mid-stream on :8082 → reopen → generation still running or already persisted; two browsers attached → both live.
+- **PB — tool port:** server MCP pool, internal archive/storage/fetch tools, tool events, server-side recursion. Acceptance: a tool-chain conversation completes with the browser closed between calls.
+- **PC — view parity:** the new view grows to the parity checklist while the old client keeps working (same nDB store — sequential use only).
+- **PD — cutover:** old client retired/read-only, dead browser code removed (client-sdk, mcp-client, conversation state machine), arena re-based as a runner variant, TTS + `/v1/models` proxied.
 
-**Acceptance:** on the dev instance (:8082), killing the browser tab mid-stream loses nothing — the server holds the conversation; a refresh re-attaches.
-
-### P1 — Route remaining channels through the backend
-
-MCP tool calls, TTS, `/v1/models` + `/health`.
-Gotchas (from memory #700):
-- TTS audio uses GET with query params via `new Audio(url)` — proxy must support GET query passthrough, not only POST.
-- MCP client uses a fetch-based SSE reader (not EventSource) — relay must preserve streaming in both directions.
-- Arena's `config.js` is STATIC — must become dynamically generated like chat's.
+The old proxy-retrofit P0/P1 plan is superseded — kept in [plan-p0-stream-ownership.md](plan-p0-stream-ownership.md) for its citation map and stream mechanics.
 
 ### P2 — nPort cutover (the unsafe state ends here; lands in herrbasan/nPort)
 
@@ -161,13 +161,16 @@ Verify `/health` and `/v1/models` through the public domain before declaring don
 - BFF rework and multi-user scoping are ONE plan — server-attached identity is what makes P3 enforceable.
 - Identity/data separation (nPort Agents.md §5): nPort owns WHO, services own WHAT keyed by usr_id.
 - Live service keeps running from `D:\SRV` on master; refactor merges when proven.
+- **Single author:** the runner is the only writer of conversation state; clients never persist messages. (2026-08-23 pivot)
+- **Tool execution moves server-side.** The survey's "browser-bound tools" (H1) was a retrofit artifact — server-side reach is a superset (no CORS); preview becomes pure view.
+- **Strangler migration, not big-bang:** the nDB conversation format is the seam; the old client works until the new view reaches parity.
 
 ## 6. Open questions
 
 - Memory privacy exception: the user's twin/biography/psychology memories likely need a private scope overriding the family-readable default.
-- Gateway WebSocket realtime path (`/v1/realtime`) through the backend.
-- Arena: merge into chat or keep as separate client?
 - Chat `users_db` migration: adopt nPort identity for login, keep per-user profile data keyed by `sub`? Decide at P3 kickoff.
+- ~~Gateway WebSocket realtime path (`/v1/realtime`)~~ — dead: the gateway retired it, no code remains (survey-verified).
+- ~~Arena: merge into chat or keep as separate client?~~ — answered by the runner architecture: arena is a runner variant (same backend, spectator view).
 
 ## 7. Environment & operations
 
@@ -188,7 +191,10 @@ Verify `/health` and `/v1/models` through the public domain before declaring don
 
 ## 8. References
 
-- memory #700 — six-channel browser→upstream analysis (2026-07-11)
+- **Architecture (design authority):** [docs/architecture-conversation-runner.md](architecture-conversation-runner.md) — the ConversationRunner design
+- **Survey (P−1 output):** [docs/codebase-survey-bff.md](codebase-survey-bff.md) — channel × callsite table, server inventory, coupling ranking, spec corrections
+- **Retrofit P0 plan (superseded, design input):** [docs/plan-p0-stream-ownership.md](plan-p0-stream-ownership.md)
+- memory #700 — six-channel browser→upstream analysis (2026-07-11; superseded by the survey's 8-channel map)
 - memory #1662 — family multi-user model (2026-08-23)
 - memory #1664 — session record of this spec's creation (2026-08-23)
 - memory #1665 — interaction preference: confirm ambiguous directives
