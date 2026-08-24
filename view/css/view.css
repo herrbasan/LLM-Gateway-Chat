@@ -90,6 +90,12 @@ body {
 .msg { max-width: 82%; margin: 8px 0; }
 .msg.user { margin-left: auto; }
 .msg-meta { font-size: 11px; opacity: .5; margin-bottom: 3px; }
+.msg-delete {
+    float: right; display: none; cursor: pointer; background: none; border: none;
+    color: #a55; font-size: 14px; line-height: 1; padding: 0 3px; opacity: .7;
+}
+.msg:hover .msg-delete { display: inline-block; }
+.msg-delete:hover { opacity: 1; color: #e66; }
 .msg-body { padding: 9px 12px; border-radius: 10px; background: var(--color-surface, #1e1e1e); border: 1px solid var(--color-border, #2c2c2c); overflow-wrap: anywhere; }
 .msg.user .msg-body { background: color-mix(in srgb, var(--nui-accent, #4a7) 14%, var(--color-surface, #1e1e1e)); }
 .msg.tool .msg-body { font: 12px/1.4 monospace; background: var(--color-surface, #1d1c17); }

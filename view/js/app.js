@@ -156,6 +156,7 @@ async function openChat(id) {
     es.addEventListener('tool.end', (e) => R.toolEnd(JSON.parse(e.data)));
     es.addEventListener('msg.assistant', (e) => R.finalizeAssistant(JSON.parse(e.data)));
     es.addEventListener('msg.user', (e) => R.upsertMessage(JSON.parse(e.data)));
+    es.addEventListener('msg.deleted', (e) => R.removeMessage(JSON.parse(e.data).messageId));
     es.addEventListener('run.end', (e) => {
         const d = JSON.parse(e.data);
         setRunning(false);
@@ -266,6 +267,13 @@ function wire() {
     $('#login-btn').onclick = doLogin;
     $('#login-pass').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
     $('#v-refresh').onclick = () => { loadChats(); loadModels(); };
+    R.setDeleteHandler(async (messageId) => {
+        if (!chatId || !messageId) return;
+        if (!confirm('Delete this message?')) return;
+        const r = await api('DELETE', `/api/chats/${chatId}/messages/${messageId}`);
+        if (r.status === 200) R.removeMessage(messageId);
+        else if (r.data?.error) R.errorLine(r.data.error);
+    });
 }
 
 wire();

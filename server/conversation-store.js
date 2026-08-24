@@ -329,6 +329,49 @@ async function replaceConversationMessages(ctx, { conversationId, messages } = {
     return { messageCount: newMessages.length };
 }
 
+// Delete one message by id (single-author write). Removes the message, deletes
+// its embedding vector, re-indexes everything after it (idx is positional and
+// contractual), persists, and returns the removed message so the caller can
+// broadcast. Orphan tool_calls/tool results are healed by the API view on the
+// next assembly — no special-casing here.
+async function deleteConversationMessage(ctx, { conversationId, messageId } = {}) {
+    guardCtx('deleteConversationMessage', ctx);
+    if (!conversationId) throw new Error('deleteConversationMessage: conversationId required');
+    if (!messageId) throw new Error('deleteConversationMessage: messageId required');
+    const { db } = ctx.dbInstance;
+    const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
+
+    const session = findSessionOrThrow(db, conversationId);
+    const conv = findConversationOrThrow(db, conversationId);
+
+    const pos = conv.messages.findIndex(m => m.id === messageId);
+    if (pos === -1) throw new Error(`deleteConversationMessage: message not found: ${messageId}`);
+
+    const removed = conv.messages.splice(pos, 1)[0];
+    for (let i = 0; i < conv.messages.length; i++) conv.messages[i].idx = i;
+
+    conv.messageCount = conv.messages.length;
+    conv.updatedAt = new Date().toISOString();
+    db.set(conv._id, 'messages', conv.messages);
+    db.set(conv._id, 'messageCount', conv.messageCount);
+    db.set(conv._id, 'updatedAt', conv.updatedAt);
+
+    session.messageCount = conv.messageCount;
+    session.updatedAt = conv.updatedAt;
+    db.set(session._id, 'messageCount', session.messageCount);
+    db.set(session._id, 'updatedAt', session.updatedAt);
+
+    // Drop the embedding vector if one exists (keeps nVDB in step with nDB).
+    if (ctx.dbInstance.embeddingsCol && removed.id) {
+        try { ctx.dbInstance.embeddingsCol.delete(removed.id); ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) + 1; } catch (e) {
+            log.warn('Embed vector delete failed', { sessionId: conversationId, messageId, error: e.message }, 'Message');
+        }
+    }
+
+    log.info('Message deleted', { sessionId: conversationId, messageId, role: removed.role, remaining: conv.messages.length }, 'Message');
+    return { removed, messageCount: conv.messages.length };
+}
+
 module.exports = {
     deriveFileRef,
     bucketUrl,
@@ -342,5 +385,6 @@ module.exports = {
     insertConversationMessageAt,
     appendMessageVariant,
     setMessageVariant,
-    replaceConversationMessages
+    replaceConversationMessages,
+    deleteConversationMessage
 };

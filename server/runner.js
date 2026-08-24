@@ -558,6 +558,18 @@ class Runner {
         return { message };
     }
 
+    // Single message delete (PC): the runner is the single author, so a view
+    // deletes through it and every attached view hears msg.deleted.
+    async deleteMessage(messageId) {
+        const { removed } = await convStore.deleteConversationMessage(this.ctx(), {
+            conversationId: this.conversationId, messageId
+        });
+        this.refresh(); // conv/session objects are stale after the write
+        this.broadcast('msg.deleted', { messageId, role: removed.role });
+        this.touch();
+        return { deleted: true, messageId };
+    }
+
     userProfile() {
         const doc = this.dbInstance.db.find('id', this.user.id).find(d => d._type === 'user_settings');
         return {

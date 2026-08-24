@@ -59,6 +59,12 @@ function buildMessage(m) {
     embed.title = m.embedStatus || '—';
     embed.textContent = m.embedStatus === 'embedded' ? ' ●' : m.embedStatus === 'failed' ? ' ✕' : ' ◌';
     meta.appendChild(embed);
+    const del = document.createElement('button');
+    del.className = 'msg-delete';
+    del.title = 'Delete message';
+    del.textContent = '×';
+    del.onclick = (ev) => { ev.stopPropagation(); if (onDelete) onDelete(m.id); };
+    meta.appendChild(del);
     d.appendChild(meta);
 
     const body = document.createElement('div');
@@ -133,6 +139,16 @@ function renderAssistantBody(body, m) {
 }
 
 // ---- public API (called by app.js) ----
+
+let onDelete = null;
+export function setDeleteHandler(fn) { onDelete = fn; }
+
+export function removeMessage(messageId) {
+    if (bubbles.has(messageId)) {
+        bubbles.get(messageId).remove();
+        bubbles.delete(messageId);
+    }
+}
 
 export function clear() {
     const el = $msgs();

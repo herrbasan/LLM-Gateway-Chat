@@ -1712,6 +1712,20 @@ const routes = {
       json(res, { error: e.message }, 404, req);
     }
   },
+
+  // Delete one message (single-author write through the runner)
+  'DELETE /api/chats/:id/messages/:messageId': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    try {
+      const r = runner.getRunner(user, dbInstance, params.id);
+      json(res, await r.deleteMessage(params.messageId), 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
   
   // Delete session
   'DELETE /api/chats/:id': async (req, res, params) => {
