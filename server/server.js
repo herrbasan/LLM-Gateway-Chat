@@ -8,6 +8,7 @@ const { EventEmitter } = require('events');
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
+const convStore = require('./conversation-store');
 
 // Load minimal .env natively
 try {
@@ -1445,30 +1446,7 @@ const routes = {
       const conv = convs[0];
       const msgs = JSON.parse(JSON.stringify(conv.messages || [])); // clone to avoid mutating db memory
       for (const m of msgs) {
-        if (m.attachments) {
-          for (const att of m.attachments) {
-            // Prefer compact nURI; derive from URL if older docs only stored the path.
-            let ref = att._file || null;
-            if (!ref) {
-              const u = att.url || att.dataUrl || att.blobUrl || '';
-              if (typeof u === 'string' && /^\w+:[^/]+\.\w+$/.test(u)) {
-                ref = u; // already compact
-              } else if (typeof u === 'string' && u.includes('/api/buckets/')) {
-                const mUrl = u.match(/\/api\/buckets\/([^/?#]+)\/([^/?#]+)/);
-                if (mUrl) ref = `${mUrl[1]}:${mUrl[2]}`;
-              }
-            }
-            if (ref) {
-              att._file = ref;
-              const [bucket, file] = ref.split(':');
-              att.url = `/api/buckets/${bucket}/${file}`;
-              att.blobUrl = att.url;
-              if (att.dataUrl && !att.dataUrl.startsWith('data:')) {
-                att.dataUrl = att.url; // legacy compat
-              }
-            }
-          }
-        }
+        if (m.attachments) m.attachments = convStore.densifyAttachments(m.attachments);
       }
       json(res, { session, messages: msgs }, 200, req);
       return;
@@ -1564,7 +1542,7 @@ const routes = {
     json(res, session, 200, req);
   },
   
-  // Add message (appends to conversation doc)
+  // Add message (appends to conversation doc) — thin HTTP wrapper over convStore
   'POST /api/chats/:id/messages': async (req, res, params) => {
     const authResult = requireAuth(req, res);
     if (!authResult) return;
@@ -1580,114 +1558,14 @@ const routes = {
       return;
     }
     
-    // Find or create conversation document
-    let convs = db.find('id', params.id).filter(d => d._type === 'conversation');
-    let conv;
-    if (convs.length > 0) {
-      conv = convs[0];
-    } else {
-      conv = {
-        _type: 'conversation',
-        id: params.id,
-        userId: user.id,
-        title: session.title || 'New Chat',
-        mode: session.mode || 'direct',
-        model: session.model || null,
-        isPublic: false,
-        createdAt: session.createdAt,
-        updatedAt: new Date().toISOString(),
-        messageCount: 0,
-        messages: []
-      };
-      db.insert(conv);
-    }
-    
-    const idx = conv.messages.length;
-    const msgId = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
-
-    // Ensure every attachment carries compact _file nURI for nDB GC.
-    // Older clients only sent dataUrl/url paths — derive _file from those.
-    const rawAtts = Array.isArray(body.attachments) ? body.attachments : [];
-    const attachments = rawAtts.map((att) => {
-      if (!att || typeof att !== 'object') return att;
-      const out = { ...att };
-      if (!out._file) {
-        const u = out.url || out.dataUrl || out.blobUrl || '';
-        if (typeof u === 'string' && /^\w+:[^/]+\.\w+$/.test(u)) {
-          out._file = u;
-        } else if (typeof u === 'string' && u.includes('/api/buckets/')) {
-          const mUrl = u.match(/\/api\/buckets\/([^/?#]+)\/([^/?#]+)/);
-          if (mUrl) out._file = `${mUrl[1]}:${mUrl[2]}`;
-        }
-      }
-      if (out._file && !out.url) {
-        const [bucket, file] = out._file.split(':');
-        out.url = `/api/buckets/${bucket}/${file}`;
-      }
-      return out;
-    });
-    
-    const message = {
-      idx,
-      id: msgId,
-      role: body.role || 'user',
-      speaker: body.speaker || null,
-      model: body.model || null,
-      content: body.content || '',
-      rawContent: body.content || '',
-      attachments,
-      createdAt: new Date().toISOString(),
-      embedStatus: 'pending',
-      embedAttempts: 0,
-      embedError: null
-    };
-    
-    if (body.toolName) message.toolName = body.toolName;
-    if (body.toolArgs) message.toolArgs = body.toolArgs;
-    if (body.toolStatus) message.toolStatus = body.toolStatus;
-      if (body.toolImages) message.toolImages = body.toolImages;
-      if (body.reasoning_content) message.reasoning_content = body.reasoning_content;
-      if (body.thinking_signature) message.thinking_signature = body.thinking_signature;
-      if (body.streamStats) message.streamStats = body.streamStats;
-      if (body.usage) message.usage = body.usage;
-      if (body.context) message.context = body.context;
-      
-      conv.messages.push(message);
-      conv.messageCount = conv.messages.length;
-      conv.updatedAt = new Date().toISOString();
-      
-      // Atomic delta patching for massive conversation object
-      db.arrayPush(conv._id, 'messages', message);
-      db.set(conv._id, 'messageCount', conv.messageCount);
-      db.set(conv._id, 'updatedAt', conv.updatedAt);
-
-      session.messageCount = conv.messageCount;
-      session.updatedAt = conv.updatedAt;
-
-      // Automatically assign chat title if it's the first user message
-      if (body.role === 'user' && session.title === 'New Chat') {
-        const titleExcerpt = (body.content || '').split('\n')[0].substring(0, 40);
-        session.title = titleExcerpt || 'New Chat';
-        db.set(session._id, 'title', session.title);
-      }
-      
-      db.set(session._id, 'messageCount', session.messageCount);
-      db.set(session._id, 'updatedAt', session.updatedAt);
-
-      L().info('Message added', { sessionId: params.id, role: body.role, idx, contentLen: (body.content || '').length }, 'Message');
-    
-    // Async embed (fire-and-forget). MUST swallow the rejection: embedMessageAsync
-    // re-throws `lastError` after re-queueing a transient failure, and an
-    // unhandled rejection here is an uncaught exception that kills the process.
-    // The other two call sites (drain loop, reconciliation) already handle it.
-    embedMessageAsync(dbInstance, message, session, conv._id, idx).catch(err => {
-      L().warn('Fire-and-forget embed rejected (already re-queued)', { sessionId: params.id, idx, kind: err?.kind, error: err?.message }, 'Embed');
-    });
-    
+    const { message } = await convStore.appendConversationMessage(
+      { user, dbInstance, embedMessageAsync, log: L() },
+      { ...body, conversationId: params.id }
+    );
     json(res, message, 201, req);
   },
   
-  // Replace entire messages array (for delete/edit/truncate persistence)
+  // Replace entire messages array (delete/edit/truncate) — thin HTTP wrapper over convStore
   'PUT /api/chats/:id/messages': async (req, res, params) => {
     const authResult = requireAuth(req, res);
     if (!authResult) return;
@@ -1705,26 +1583,12 @@ const routes = {
       json(res, { error: 'Conversation not found' }, 404, req);
       return;
     }
-    const conv = convs[0];
 
-    // Re-index messages sequentially and replace the array atomically
-    const newMessages = body.messages.map((m, idx) => ({ ...m, idx }));
-    conv.messages = newMessages;
-    conv.messageCount = newMessages.length;
-    conv.updatedAt = new Date().toISOString();
-    db.update(conv._id, conv);
-
-    // Sync session metadata
-    const session = db.find('id', params.id).find(s => s._type === 'session');
-    if (session) {
-      session.messageCount = newMessages.length;
-      session.updatedAt = conv.updatedAt;
-      db.set(session._id, 'messageCount', session.messageCount);
-      db.set(session._id, 'updatedAt', session.updatedAt);
-    }
-
-    L().info('Messages replaced', { sessionId: params.id, count: newMessages.length }, 'Message');
-    json(res, { success: true, messageCount: newMessages.length }, 200, req);
+    const { messageCount } = await convStore.replaceConversationMessages(
+      { user, dbInstance, embedMessageAsync, log: L() },
+      { conversationId: params.id, messages: body.messages }
+    );
+    json(res, { success: true, messageCount }, 200, req);
   },
   
   // Delete session
