@@ -12,6 +12,42 @@ let es = null;
 let chatId = null;
 let models = [];
 
+// ---------- context / usage display ----------
+
+function fmtTokens(n) {
+    if (!Number.isFinite(n)) return '?';
+    if (n >= 1000000) return Math.round(n / 100000) / 10 + 'M';
+    if (n >= 1000) return Math.round(n / 100) / 10 + 'K';
+    return String(n);
+}
+
+function windowSize() {
+    const model = models.find(m => m.id === $('#v-model').value);
+    return model?.capabilities?.contextWindow || null;
+}
+
+function showContext(context) {
+    const el = $('#v-context');
+    if (!el) return;
+    if (!context || context.used_tokens === undefined) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    const est = context.isEstimate ? '~' : '';
+    let text = `${est}${fmtTokens(context.used_tokens)}`;
+    const win = context.window_size || windowSize();
+    if (win) {
+        const pct = Math.min(100, Math.max(0, (context.used_tokens / win) * 100));
+        text += ` / ${fmtTokens(win)} Tokens`;
+        el.dataset.pct = String(pct);
+        el.style.setProperty('--ctx-pct', pct + '%');
+    } else {
+        text += ' Tokens';
+        el.dataset.pct = '0';
+    }
+    el.textContent = text;
+    const dbg = Object.entries(context).filter(([k]) => k !== 'isEstimate').map(([k, v]) => `${k}: ${v}`).join('\n');
+    el.title = dbg || text;
+}
+
 // ---------- auth ----------
 
 async function api(method, path, body) {
@@ -106,6 +142,7 @@ async function openChat(id) {
             R.streamDelta({ content: snap.inFlight.content, reasoningContent: snap.inFlight.reasoning_content });
             setRunning(true);
         }
+        showContext(snap.lastRun?.context || null);
     });
     es.addEventListener('run.start', (e) => {
         const d = JSON.parse(e.data);
@@ -122,6 +159,7 @@ async function openChat(id) {
     es.addEventListener('run.end', (e) => {
         const d = JSON.parse(e.data);
         setRunning(false);
+        showContext(d.context || null);
         if (d.finishReason === 'aborted') R.runLine('aborted');
         if (d.finishReason === 'error') R.runLine('error');
         loadChats(); // refresh counts/titles
