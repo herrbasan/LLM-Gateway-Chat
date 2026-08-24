@@ -9,6 +9,7 @@ const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
 const convStore = require('./conversation-store');
+const runner = require('./runner');
 
 // Load minimal .env natively
 try {
@@ -444,6 +445,18 @@ const embedEvents = new EventEmitter();
 embedEvents.setMaxListeners(100);
 
 const L = () => logger || { info() {}, warn() {}, error() {}, debug() {} };
+
+// ConversationRunner (PA-3) — server-side conversation sessions.
+runner.init({
+    gatewayUrl: process.env.LLM_GATEWAY_URL || cfg.gatewayUrl || 'http://127.0.0.1:3400',
+    gatewayKey: process.env.GATEWAY_API_KEY || null,
+    publicOrigin: process.env.CHAT_PUBLIC_ORIGIN || `http://localhost:${PORT}`,
+    embedMessageAsync,
+    log: L,
+    getInstructions: () => fetchPrimeDirective(),
+    idleMs: 10 * 60 * 1000
+});
+embedEvents.on('status', runner.handleEmbedStatus);
 
 function parseCookies(req) {
     const list = {};
@@ -1589,6 +1602,67 @@ const routes = {
       { conversationId: params.id, messages: body.messages }
     );
     json(res, { success: true, messageCount }, 200, req);
+  },
+  
+  // ---- ConversationRunner (PA-3): server-owned conversation surface ----
+  // Append user message + start (or queue) a run
+  'POST /api/chats/:id/send': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    const body = await readBody(req);
+    try {
+      const r = runner.getRunner(user, dbInstance, params.id);
+      const { message } = await r.send(body);
+      json(res, { message }, 201, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
+  
+  // Attach to the conversation event stream (SSE — response stays open)
+  'GET /api/chats/:id/events': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    try {
+      const r = runner.getRunner(user, dbInstance, params.id);
+      r.attach(req, res); // do NOT json()/end — SSE stays open
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
+  
+  // Abort the active run
+  'POST /api/chats/:id/abort': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    try {
+      const r = runner.getRunner(user, dbInstance, params.id);
+      json(res, { aborted: r.abort() }, 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
+  
+  // Switch the selected variant of an assistant message (§2.4)
+  'POST /api/chats/:id/variant': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    const body = await readBody(req);
+    try {
+      const r = runner.getRunner(user, dbInstance, params.id);
+      const { message } = await r.switchVariant({ messageId: body.messageId, index: body.index, direction: body.direction });
+      json(res, { message }, 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
   },
   
   // Delete session

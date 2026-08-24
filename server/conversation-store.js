@@ -148,7 +148,7 @@ async function appendConversationMessage(ctx, msg) {
     const conv = findOrCreateConversation(db, session, ctx.user);
 
     const idx = conv.messages.length;
-    const msgId = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+    const msgId = msg.id || 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
     const message = normalizeStoredMessage({ ...msg, id: msgId, idx, createdAt: new Date().toISOString() });
 
     conv.messages.push(message);
@@ -220,6 +220,46 @@ async function appendMessageVariant(ctx, { conversationId, messageId, variant } 
     return { message };
 }
 
+// §2.4: flip currentVersion to an EXISTING variant (pointer change), mirror the
+// selected variant onto top-level fields, persist. No embed fire (the variant
+// was embedded at creation).
+async function setMessageVariant(ctx, { conversationId, messageId, index, direction } = {}) {
+    guardCtx('setMessageVariant', ctx);
+    if (!conversationId) throw new Error('setMessageVariant: conversationId required');
+    if (!messageId) throw new Error('setMessageVariant: messageId required');
+    const { db } = ctx.dbInstance;
+    const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
+
+    const conv = findConversationOrThrow(db, conversationId);
+    const message = conv.messages.find(m => m.id === messageId);
+    if (!message) throw new Error(`setMessageVariant: message not found: ${messageId}`);
+    if (!Array.isArray(message.versions) || message.versions.length === 0) {
+        throw new Error(`setMessageVariant: message has no variants: ${messageId}`);
+    }
+    const count = message.versions.length;
+    let next;
+    if (Number.isInteger(index)) {
+        if (index < 0 || index >= count) throw new Error(`setMessageVariant: index out of range: ${index} (0..${count - 1})`);
+        next = index;
+    } else if (direction === 'prev' || direction === 'next') {
+        const cur = Number.isInteger(message.currentVersion) ? message.currentVersion : count - 1;
+        next = direction === 'next' ? (cur + 1) % count : (cur - 1 + count) % count;
+    } else {
+        throw new Error('setMessageVariant: index (int) or direction ("prev"|"next") required');
+    }
+    message.currentVersion = next;
+    const variant = message.versions[next];
+    for (const k of ['content', 'reasoning_content', 'thinking_signature', 'usage', 'context', 'streamStats', 'model', 'timestamp']) {
+        if (variant[k] !== undefined) message[k] = variant[k];
+    }
+    conv.updatedAt = new Date().toISOString();
+    db.set(conv._id, 'messages', conv.messages);
+    db.set(conv._id, 'updatedAt', conv.updatedAt);
+
+    log.info('Variant switched', { sessionId: conversationId, messageId, currentVersion: next }, 'Message');
+    return { message };
+}
+
 // PUT /api/chats/:id/messages path (delete/edit/truncate persistence).
 // NOTE: intentionally NOT full normalizeStoredMessage — the PUT payload is a
 // re-serialization of existing messages and may carry fields outside the known
@@ -263,5 +303,6 @@ module.exports = {
     findOrCreateConversation,
     appendConversationMessage,
     appendMessageVariant,
+    setMessageVariant,
     replaceConversationMessages
 };
