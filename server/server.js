@@ -116,6 +116,7 @@ let logger = null;
 
 // Registry of loaded user databases (dbPath -> { db, vdb, embeddingsCol, ready, needsFlush, pendingQueue })
 const activeDbs = new Map();
+let modelsProxyCache = null; // { at, data } — 60 s cache for GET /api/models
 
 (async () => {
 console.time('nLogger.init');
@@ -1097,6 +1098,30 @@ const routes = {
     json(res, { type: 'node-backend' });
   },
 
+  // Thin same-origin model proxy (architecture §8): the view must not talk to
+  // the gateway directly. Brief cache — model lists change rarely.
+  'GET /api/models': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+
+    if (modelsProxyCache && Date.now() - modelsProxyCache.at < 60 * 1000) {
+      json(res, modelsProxyCache.data, 200, req);
+      return;
+    }
+    try {
+      const gwKey = process.env.GATEWAY_API_KEY || null;
+      const r = await fetch(`${process.env.LLM_GATEWAY_URL || cfg.gatewayUrl || 'http://127.0.0.1:3400'}/v1/models`, {
+        headers: gwKey ? { Authorization: `Bearer ${gwKey}` } : {}
+      });
+      if (!r.ok) { json(res, { error: `gateway ${r.status}` }, 502, req); return; }
+      const data = await r.json();
+      modelsProxyCache = { at: Date.now(), data };
+      json(res, data, 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 502, req);
+    }
+  },
+
   // Frontend telemetry — receive client-side log events and forward to nLogger
   'POST /api/client-log': async (req, res) => {
     const body = await readBody(req);
@@ -1883,6 +1908,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (pathname === '/chat/') {
     pathname = '/chat/index.html';
+  }
+  // Directory URLs resolve to their index (fixes /view/ → EISDIR → 500)
+  if (pathname.endsWith('/') && pathname !== '/') {
+    pathname += 'index.html';
   }
   if (pathname === '/chat-arena') {
     res.writeHead(302, { 'Location': '/chat-arena/' });
