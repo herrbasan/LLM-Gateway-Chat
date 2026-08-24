@@ -70,6 +70,13 @@ user message and all completed messages are already persisted).
 6. Abort (explicit API call) → abort upstream, persist the partial assistant marked
    aborted, broadcast `run.end {aborted}`.
 
+**Stored-form authoring (deep-dive G2):** the runner authors the stored *form*, not just
+bytes: timestamp prefix, attachment offload to `_file` nURIs, tool message shape
+(`toolName/toolArgs/toolStatus/toolImages`), assistant metadata (`reasoning_content`,
+`thinking_signature`, `streamStats`, `usage`, `context`). Today this lives inline in
+`POST /api/chats/:id/messages` (server.js:1568) and `addExchange` (conversation.js:334)
+— extract it into the shared append+embed helper that both the route and the runner call.
+
 **Concurrency:** sends are always accepted — appended, persisted, broadcast
 immediately. A send is just an added prompt; the expected multi-device case is the
 *same user* picking the conversation up on another device, not an author conflict.
@@ -97,11 +104,53 @@ at implementation time).
 
 ### 2.3 Ports into the server (mechanical, all fetch-based already)
 
-- `getMessagesForApi` + message versioning → `server/api-view.js` (from conversation.js).
+- `getMessagesForApi` + message versioning → `server/api-view.js` (from conversation.js,
+  incl. tool-result backfill and the version tree — regenerate/switch-version state
+  moves to the runner).
 - `buildChunkView` → `server/chunk-view.js` (verbatim port; toggle lives in conversation meta).
+  The chunk table lives here — `context_retire`/`unretire` operate on it server-side.
+- **System-prompt assembly** → `server/system-prompt.js` (from chat.js
+  `getSystemPromptWithMetadata`, chat.js:2569): prime-directive blob (the server already
+  fetches it for config generation, server.js:2160), metadata prefix, user prompt,
+  archive-tool context (incl. the current session ID), MCP resource context (answered by
+  the server MCP pool). Output must be byte-equivalent to today's — drift silently
+  changes every model's behavior. (Deep-dive G1.)
 - MCP client → `server/mcp/` (from chat/js/mcp-client.js — fetch-based SSE reader +
   JSON-RPC POST; Node ≥18 fetch works the same). MCP server list moves from browser
   localStorage to per-user server-side settings.
+
+### 2.4 Versioning — durable variants (deep-dive §6)
+
+Today versions are in-memory only: `regenerate` appends an orphaned second assistant
+message to the store while `switchVersion` persists nothing, and reload collapses
+multiple assistant messages into one (concatenated content, single version). Store and
+view diverge by design — do not port this.
+
+Target model: the assistant message doc owns its variants.
+
+```js
+{ role: 'assistant', content, reasoning_content, thinking_signature,
+  usage, context, streamStats, model, timestamp,        // = the current variant
+  versions: [ { content, reasoning_content, thinking_signature,
+                usage, context, streamStats, model, timestamp } ],
+  currentVersion }
+```
+
+- Top-level fields mirror the current variant (consumers that don't care about
+  versions see a normal message).
+- `regenerate` = a run operation: the runner streams a new response, appends it as a
+  variant (full shape — fixes today's `{content, timestamp}`-only inconsistency), sets
+  `currentVersion`, persists, broadcasts.
+- `switchVersion` = a cheap server call flipping `currentVersion`, persisted and
+  broadcast (`msg.variant {messageId, currentVersion}` — a pointer change, not a
+  structural mutation). Selection is conversation state: switch on the desktop, the
+  phone shows the same variant.
+- The API view (`getMessagesForApi`) uses the current variant only.
+- Embed fires per variant creation; the vector payload gains a variant index
+  (`{chatId, msgIdx, variant}`) — implementation detail.
+- Old data: past regenerates left orphaned duplicate assistant messages in existing
+  conversations. Leave them (they render as separate messages); an optional later
+  migration can fold consecutive assistant messages into variants.
 
 ## 3. Event protocol (`GET /api/chats/:id/events`)
 
@@ -144,6 +193,7 @@ The survey's "browser-bound tools" (H1) was a retrofit artifact. Server-side, re
 | `chat_archive_*` | browser → backend REST | internal calls into the same handlers the REST routes wrap |
 | `browser_fetch` | browser fetch (CORS-bound) | Node fetch — LAN + internet. Log every call. (Family trust model; note as the one place CORS used to be an accidental guard.) |
 | `saveToStorage` | browser PUT → MCP storage box | server PUT to the storage box (same LAN) |
+| `context_retire`/`unretire` | browser, reads `_lastChunkTable` | server-side — the chunk table lives with the ported transform (§2.3) |
 | `attachment_save`, base64 image offload | browser round-trip | internal `db.storeFile` — no HTTP hop; issue #5 (bucket 401s) dissolves because the server reads its own buckets |
 | Preview | DOM | The tool returns data; the *view* renders a preview affordance from `tool.end`. Preview becomes pure view. |
 
@@ -158,6 +208,19 @@ rendered with NUI — markdown, thinking blocks, images, tool UI), input + attac
 (nSpeech SDK stays browser-side — audio output is inherently local), settings UI.
 
 It is NOT: a state machine, a persistence layer, a gateway client, an MCP client.
+
+Build the view against five cross-process contracts, not the old client's incidental
+formats (deep-dive §3.7):
+
+1. **Timestamp prefix** — the snapshot exposes `{content, timestamp}` separately; no
+   client-side strip-by-length.
+2. **Keying** — events carry stable `messageId`/`toolCallId`; the DOM keys off those
+   (today: client-generated `ex_*`, tool↔assistant paired by `exchangeId`).
+3. **Versioning** — runner-owned durable variants (§2.4); regenerate/switch-version
+   are server operations, the view renders the current variant.
+4. **System prompt** — the view never assembles it; it edits the user portion only.
+5. **Module boundary** — the render pipeline (markdown/thinking/tool/image/context-usage)
+   is one module whose state source is the event stream; zero orchestration imports.
 
 Parity checklist (expand during Phase C): streaming render, thinking blocks, tool UI,
 image display + viewer, message edit/delete, pin/clone, export/import, system-prompt
@@ -187,9 +250,18 @@ spec's open question: **same backend machinery, own view.**
 ## 8. Remaining channels
 
 `/v1/models` + `/health` for the model dropdown → thin same-origin proxy
-(`GET /api/models`, brief cache). TTS (channel 4, the nSpeech SDK surface) stays
-browser→nSpeech until a later phase proxies it; playback is local regardless.
-Channels 7/8 dissolve into server-side tool execution (§4).
+(`GET /api/models`, brief cache). Channels 7/8 dissolve into server-side tool
+execution (§4).
+
+**TTS (channel 4) splits into three planes.** *Playback* is inherently client-side —
+audio happens where the human is (MediaSource + Audio in the view); playback state is
+ephemeral view state, never synced. *Control plane* (voices, engines,
+`/v1/audio/speech`, `/v1/admin/events`) is stateless — it gets a plain backend proxy,
+needed only by P2 (nSpeech binds to localhost; the browser reaches :443 only).
+*Config* (endpoint, engine, voice, speed) is user profile data — moves to
+`/api/user/settings` so it follows the user across devices (PC). The runner never
+touches audio for chat; server-side TTS production (arena episodes, RAUM pipeline)
+is a separate batch concern, out of scope here.
 
 ## 9. Migration phases (strangler — old client works until cutover)
 
@@ -212,3 +284,7 @@ both get easier: identity attaches at the runner, per-user DBs already isolate.
 - Embed-status channel: keep `/api/embed-events` for the old client until cutover;
   the runner also emits `embed.status` on the conversation stream.
 - MCP server config migration: browser localStorage → per-user server settings.
+- Batching semantics: how multiple queued user messages are presented to the model
+  (separate user turns vs. one merged turn) — pin during PA.
+- Vision/bucket origin: which absolute origin the runner hands the gateway for image
+  URLs (interacts with issue #5 and P2 localhost binding) — deep-dive G4/G6.

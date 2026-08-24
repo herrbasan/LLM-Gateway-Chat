@@ -123,9 +123,9 @@ re-scope phases, mark status READY FOR EXECUTION.
 
 ### PA–PD — Runner build-out (strangler; full detail in the architecture doc §9)
 
-- **PA — runner core:** `server/runner.js`, conversation event stream, `send`/`abort` routes, gateway call, shared append+embed helper, ported api-view + chunk-view. Tools disabled. **Acceptance:** kill the tab mid-stream on :8082 → reopen → generation still running or already persisted; two browsers attached → both live.
+- **PA — runner core:** `server/runner.js`, conversation event stream, `send`/`abort` routes, gateway call, shared append+embed helper (stored-form authoring: timestamp prefix, nURI offload, message metadata), ported api-view + chunk-view, **system-prompt assembly server-side** (deep-dive G1 — byte-equivalent to today's `getSystemPromptWithMetadata`). Tools disabled. **Acceptance:** kill the tab mid-stream on :8082 → reopen → generation still running or already persisted; two browsers attached → both live.
 - **PB — tool port:** server MCP pool, internal archive/storage/fetch tools, tool events, server-side recursion. Acceptance: a tool-chain conversation completes with the browser closed between calls.
-- **PC — view parity:** the new view grows to the parity checklist while the old client keeps working (same nDB store — sequential use only).
+- **PC — view parity:** the new view grows to the parity checklist while the old client keeps working (same nDB store — sequential use only). Build against the five view contracts (architecture §5: timestamp, keying, versioning, system prompt, module boundary) — not the old client's incidental formats.
 - **PD — cutover:** old client retired/read-only, dead browser code removed (client-sdk, mcp-client, conversation state machine), arena re-based as a runner variant, TTS + `/v1/models` proxied.
 
 The old proxy-retrofit P0/P1 plan is superseded — kept in [plan-p0-stream-ownership.md](plan-p0-stream-ownership.md) for its citation map and stream mechanics.
@@ -194,6 +194,7 @@ Verify `/health` and `/v1/models` through the public domain before declaring don
 - **Architecture (design authority):** [docs/architecture-conversation-runner.md](architecture-conversation-runner.md) — the ConversationRunner design
 - **Survey (P−1 output):** [docs/codebase-survey-bff.md](codebase-survey-bff.md) — channel × callsite table, server inventory, coupling ranking, spec corrections
 - **Retrofit P0 plan (superseded, design input):** [docs/plan-p0-stream-ownership.md](plan-p0-stream-ownership.md)
+- **Deep-dive (2026-08-24):** [docs/refactor-deep-dive-report.md](refactor-deep-dive-report.md) — system-prompt gap (G1), stored-form authoring (G2), five view contracts; companion to the survey
 - memory #700 — six-channel browser→upstream analysis (2026-07-11; superseded by the survey's 8-channel map)
 - memory #1662 — family multi-user model (2026-08-23)
 - memory #1664 — session record of this spec's creation (2026-08-23)
