@@ -246,6 +246,10 @@ spec's open question: **same backend machinery, own view.**
   device). Runs never overlap; pending messages queue and batch into the follow-up run.
 - **Orphaned runs** (all views detached): the run completes and persists regardless —
   this is the point. Cost is bounded by the gateway request itself.
+- **nDB find() does not return live references** — objects held across writes go stale.
+  First PA bug: the runner's cached conv produced empty payloads (gateway 400
+  "at least one message is required"). Long-lived holders re-read at use points
+  (`runner.refresh()`); verified by acceptance 2026-08-24.
 
 ## 8. Remaining channels
 
