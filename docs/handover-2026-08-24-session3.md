@@ -37,18 +37,13 @@ Runner core (`server/runner.js`), `api-view.js`, `system-prompt.js`, `mcp-pool.j
 `internal-tools.js`, `conversation-store.js`, delete/edit routes, `/api/models` proxy.
 These are the contract; do not change them while completing the view side.
 
-## Still open (follow-ups, in order)
+## Still open (one item)
 
 1. **Regenerate + assistant-edit** — the runner has no regenerate method (append a variant +
    re-run the turn) and no assistant-edit (only user messages are editable). `regenerate` and
-   assistant `commitEdit` are currently no-ops (`console.warn`). Build the runner methods, then
-   wire `regenerate` and assistant edit.
-2. **Attachments / `embed.status` / vision** — attachment upload is wired into `sendMessage`
-   (`imageStore.save` → bucket refs → `/send`); verify round-trip. `_runnerEmbed` maps
-   `embed.status` → exchange. Vision is now server-side (the client vision pipeline retired).
-3. **Retire dead orchestration** — `streamResponse`, `handleToolExecution`, `executeLocalTool`,
-   the vision pipeline, `conversation.js` persistence methods (`_syncMessage`/`_syncFullState`/
-   `save`), then `client-sdk.js` and browser `mcp-client.js`, channel by channel.
+   assistant `commitEdit` are currently no-ops (`console.warn`). Build the runner methods
+   (server-side, in `server/runner.js` + routes), then wire `regenerate` and assistant edit.
+   Everything else in the PC realign is done and committed.
 
 ## Landed since the first cut (verified E2E on :8082)
 
@@ -59,6 +54,14 @@ These are the contract; do not change them while completing the view side.
   `_runnerRefresh` (re-attach → snapshot re-render). Edit → runner broadcasts `snapshot` → re-render
   + re-run. Variant → `msg.variant` → local content update. The snapshot handler now always
   re-renders (initial attach AND post-mutation).
+- **Retired ~2000 lines of dead orchestration** — `streamResponse`, `handleToolExecution`,
+  `executeLocalTool`, `executeBrowserFetch`, `executeAttachmentSave`, the vision pipeline, the
+  system-prompt builder, and the tool-definition constants. `chat.js` is now ~4972 lines (was ~7000).
+  Kept `getVisionToolName`/`areVisionToolsAvailable` (live via the vision toggle).
+- **Fixed orphaned-assistant bug** — `runner.deleteMessage` now cascade-deletes the whole turn when
+  deleting a user message (was leaving an orphaned assistant → gateway 400 on the next send).
+- **Attachments verified** — base64 → bucket upload → `/send` → snapshot densifies to a bucket URL;
+  image renders with no base64 leak. `embed.status` maps to the exchange via `_runnerEmbed`.
 
 ## Runner event contract (what the view consumes)
 
