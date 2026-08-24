@@ -187,7 +187,12 @@ function buildApiMessages(messages, options = {}) {
                 const cleanAssistantContent = msg.content ? stripExtraTimestamps(msg.content).trim() : '';
                 if (cleanAssistantContent || msg.reasoning_content || msg.tool_calls) {
                     const out = { role: 'assistant', content: cleanAssistantContent || null };
-                    if (msg.reasoning_content) out.reasoning_content = msg.reasoning_content;
+                    // Thinking-mode contract (anthropic-adapter 400: "content[].thinking
+                    // must be passed back"): reasoning_content without its signature is
+                    // POISON in the payload. Only include reasoning when the signature
+                    // exists to satisfy the contract. (Aborted-during-thinking messages
+                    // have reasoning but no signature — E2E queue+abort, 2026-08-24.)
+                    if (msg.reasoning_content && msg.thinking_signature) out.reasoning_content = msg.reasoning_content;
                     if (msg.thinking_signature) out.thinking_signature = msg.thinking_signature;
                     if (msg.tool_calls) {
                         out.tool_calls = msg.tool_calls.map(tc => {

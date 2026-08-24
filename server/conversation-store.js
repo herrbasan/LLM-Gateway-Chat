@@ -222,6 +222,41 @@ async function appendMessageVariant(ctx, { conversationId, messageId, variant } 
     return { message };
 }
 
+// Insert a message at a RESERVED position (the runner reserves idx at run start;
+// queued user messages appended mid-run must not push the in-flight assistant
+// past them — an assistant-final payload is a prefill and breaks the provider's
+// thinking-mode contract). Splices at atIdx, re-indexes, whole-array persist.
+async function insertConversationMessageAt(ctx, { conversationId, message: msg, atIdx } = {}) {
+    guardCtx('insertConversationMessageAt', ctx);
+    if (!conversationId) throw new Error('insertConversationMessageAt: conversationId required');
+    if (!msg) throw new Error('insertConversationMessageAt: message required');
+    const { db } = ctx.dbInstance;
+    const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
+
+    const session = findSessionOrThrow(db, conversationId);
+    const conv = findConversationOrThrow(db, conversationId);
+    const pos = Math.max(0, Math.min(atIdx ?? conv.messages.length, conv.messages.length));
+
+    const message = normalizeStoredMessage({ ...msg, id: msg.id || 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10), idx: pos, createdAt: new Date().toISOString() });
+    conv.messages.splice(pos, 0, message);
+    for (let i = pos + 1; i < conv.messages.length; i++) conv.messages[i].idx = i;
+    conv.messageCount = conv.messages.length;
+    conv.updatedAt = new Date().toISOString();
+    db.set(conv._id, 'messages', conv.messages);
+    db.set(conv._id, 'messageCount', conv.messageCount);
+    db.set(conv._id, 'updatedAt', conv.updatedAt);
+    session.messageCount = conv.messageCount;
+    session.updatedAt = conv.updatedAt;
+    db.set(session._id, 'messageCount', session.messageCount);
+    db.set(session._id, 'updatedAt', session.updatedAt);
+
+    log.info('Message inserted', { sessionId: conversationId, role: message.role, idx: pos }, 'Message');
+    ctx.embedMessageAsync(ctx.dbInstance, message, session, conv._id, pos).catch(err => {
+        log.warn('Fire-and-forget embed rejected (already re-queued)', { sessionId: conversationId, idx: pos, kind: err?.kind, error: err?.message }, 'Embed');
+    });
+    return { message, session, conv };
+}
+
 // §2.4: flip currentVersion to an EXISTING variant (pointer change), mirror the
 // selected variant onto top-level fields, persist. No embed fire (the variant
 // was embedded at creation).
@@ -304,6 +339,7 @@ module.exports = {
     findConversationOrThrow,
     findOrCreateConversation,
     appendConversationMessage,
+    insertConversationMessageAt,
     appendMessageVariant,
     setMessageVariant,
     replaceConversationMessages

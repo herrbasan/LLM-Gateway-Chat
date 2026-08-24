@@ -250,6 +250,14 @@ spec's open question: **same backend machinery, own view.**
   First PA bug: the runner's cached conv produced empty payloads (gateway 400
   "at least one message is required"). Long-lived holders re-read at use points
   (`runner.refresh()`); verified by acceptance 2026-08-24.
+- **Message ordering is contractual (E2E-found, 2026-08-24):** the in-flight assistant
+  message is persisted at its RESERVED position (`insertConversationMessageAt`,
+  atIdx reserved at run start). Queued sends append after it. Without this, an abort
+  during a queued send produces an assistant-FINAL payload — which providers treat as
+  a prefill, and in thinking mode a prefill without thinking blocks 400s
+  ("content[].thinking must be passed back"). Related rule: aborted runs persist
+  content only — reasoning cut mid-stream is a malformed thinking block; and the API
+  view drops reasoning_content that lacks a thinking_signature (unsigned = poison).
 
 ## 8. Remaining channels
 

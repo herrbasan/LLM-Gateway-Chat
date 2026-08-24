@@ -85,10 +85,13 @@ function filterPlatformSections(md, target) {
 
 async function fetchPrimeDirective(target = 'chat') {
     try {
-        const resp = await fetch('http://192.168.0.100:3100/storage/docs/Workshop/Agents_Prime.md', {
+        const resp = await fetch('http://192.168.0.100:3100/storage/documentation/Workshop/Agents_Prime.md', {
             signal: AbortSignal.timeout(3000)
         });
-        if (!resp.ok) return '';
+        if (!resp.ok) {
+            L().warn('Prime directive fetch failed', { status: resp.status }, 'Server');
+            return '';
+        }
         let md = await resp.text();
         // Strip YAML frontmatter (between first two --- lines)
         if (md.startsWith('---')) {
@@ -97,7 +100,10 @@ async function fetchPrimeDirective(target = 'chat') {
         }
         // Strip IDE-only sections for the target platform (default: chat).
         return filterPlatformSections(md, target);
-    } catch (_) { return ''; }
+    } catch (e) {
+        L().warn('Prime directive fetch failed', { error: e?.message }, 'Server');
+        return '';
+    }
 }
 
 // ============================================

@@ -279,6 +279,11 @@ class Runner {
             });
             if (!resp.ok) {
                 const text = await resp.text().catch(() => '');
+                // Debug capture: the exact payload that failed (thinking-contract hunts)
+                try {
+                    require('fs').writeFileSync(require('path').join(__dirname, '..', '_scratch', 'last-error-payload.json'),
+                        JSON.stringify({ status: resp.status, model, generationParams: this.generationParams, toolsCount: tools.length, messages: apiMessages }, null, 2));
+                } catch { /* debug only */ }
                 this.broadcast('error', { code: `gateway-${resp.status}`, message: `Gateway ${resp.status}`, raw: text.slice(0, 2000), exchangeId });
                 outcome = 'error';
             } else {
@@ -395,6 +400,9 @@ class Runner {
             if (delta.thinking_signature) {
                 f.thinkingSignature = delta.thinking_signature;
             }
+            // Some adapters deliver the signature on the final message object, not deltas
+            if (choice.message?.thinking_signature) f.thinkingSignature = choice.message.thinking_signature;
+            if (json.thinking_signature) f.thinkingSignature = json.thinking_signature;
             if (Array.isArray(delta.tool_calls)) {
                 for (const frag of delta.tool_calls) {
                     const ti = frag.index ?? 0;
@@ -436,18 +444,26 @@ class Runner {
         const hasPayload = !!(f.content || f.reasoning_content || f.toolCalls.filter(Boolean).length > 0);
         if (hasPayload && outcome !== 'error') {
             const toolCalls = f.toolCalls.filter(Boolean);
-            const { message } = await convStore.appendConversationMessage(this.ctx(), {
+            // Aborted runs persist CONTENT only. Reasoning cut mid-stream is a
+            // truncated thinking block — persisting it poisons every follow-up
+            // payload (provider thinking-mode contract: "content[].thinking must
+            // be passed back" → 400). E2E queue+abort, 2026-08-24.
+            const isAbort = outcome === 'aborted';
+            const { message } = await convStore.insertConversationMessageAt(this.ctx(), {
                 conversationId: this.conversationId,
-                id: f.messageId,
-                role: 'assistant',
-                content: f.content,
-                model: f.model,
-                reasoning_content: f.reasoning_content || undefined,
-                thinking_signature: f.thinkingSignature || undefined,
-                streamStats,
-                usage: f.usage || undefined,
-                context: f.context || undefined,
-                tool_calls: toolCalls.length ? toolCalls : undefined
+                atIdx: f.idx, // reserved at run start — queued sends must not push the assistant past them
+                message: {
+                    id: f.messageId,
+                    role: 'assistant',
+                    content: f.content,
+                    model: f.model,
+                    reasoning_content: isAbort ? undefined : (f.reasoning_content || undefined),
+                    thinking_signature: isAbort ? undefined : (f.thinkingSignature || undefined),
+                    streamStats,
+                    usage: f.usage || undefined,
+                    context: f.context || undefined,
+                    tool_calls: toolCalls.length ? toolCalls : undefined
+                }
             });
             this.broadcast('msg.assistant', this.viewMessage(message));
         }
