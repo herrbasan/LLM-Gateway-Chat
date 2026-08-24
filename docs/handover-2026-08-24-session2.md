@@ -1,3 +1,31 @@
+# Handover — 2026-08-24 (session 3: DIRECTION CORRECTION)
+
+**Branch `bff-rework` @ `7068731`.** The PC direction changed — read `docs/plan-pc-realign.md`.
+
+## DIRECTION (overrides session 2's "build a new view")
+
+The BFF refactor **connects a different backend to the EXISTING `chat/` UI** — it does NOT build a
+new UI. The `chat/` UI is load-bearing (nui_wc2 components, virtual scroller, per-message header,
+thinking/tool/attachment rendering, config tabs, and all their usage patterns). **Never rewrite,
+simplify, or "clean up" the renderer, even when a pattern's purpose isn't obvious.** Only the data
+plumbing changes: send → `POST /api/chats/:id/send`; render ← attach `GET /api/chats/:id/events`.
+Orchestration (client-sdk.js, browser mcp-client.js, conversation.js state machine) retires channel
+by channel as the runner covers it — this is the "`chat/js/` shrinks to a view" end state.
+
+**`view/` is a DETOUR — a disposable reference/harness for the runner's event/route contracts,
+NOT the product. Do not extend it.** All of session 2's PC increments (the `view/` code) are
+superseded by the realign plan.
+
+## Prior server-side work — KEEP (all E2E-verified, unchanged by the direction correction)
+
+- `b4d66cc` chunk-tombstone label fix + mcp-pool floating-promise crash guard (live-incident class).
+- `f0c5398` PB-b internal tools port.
+- `071527e` message delete, `47f04e9` message edit, `2b16889` context display, `23808c0` view core,
+  `/api/models` proxy, dir-URL→index fix — the **server routes/endpoints** from these are still the
+  contract; only the UI-side `view/` code is discarded.
+
+---
+
 # Handover — 2026-08-24 (session 2: PB-b E2E + PC view)
 
 **Branch `bff-rework` @ `47f04e9`.** Supersedes `handover-2026-08-24.md` for the PB-b/PC sections.
