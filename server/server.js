@@ -124,6 +124,16 @@ console.timeEnd('nLogger.init');
 
 logger.info('Chat Backend starting, loading users_db...', { port: PORT }, 'Server');
 
+// Survival net: an unhandled rejection must NOT kill the server (Node 24
+// default). Log loud with stack — every hit is a bug to fix (e.g. the
+// mcp-pool floating-timeout crash, 2026-08-24; suspected live-incident class).
+process.on('unhandledRejection', (reason) => {
+    logger.error('UNHANDLED REJECTION (server kept alive)', reason instanceof Error ? `${reason.stack || reason.message}` : String(reason), {}, 'Server');
+});
+process.on('uncaughtException', (err) => {
+    logger.error('UNCAUGHT EXCEPTION (server kept alive)', err.stack || err.message, {}, 'Server');
+});
+
 // 1. Initialise users_db global registry
 const usersDbDir = path.dirname(path.resolve(USERS_DB_PATH));
 if (!fs.existsSync(usersDbDir)) fs.mkdirSync(usersDbDir, { recursive: true });

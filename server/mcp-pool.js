@@ -136,11 +136,18 @@ class ServerConn {
             }, TOOL_TIMEOUT_MS);
             this.pending.set(requestId, { resolve, reject, timeoutId });
         });
+        // CRASH GUARD: if the POST fetch below hangs past the timeout, this
+        // rejection fires while rpc() is still stuck in fetch — resultPromise
+        // has no awaiter yet → unhandled rejection → Node 24 kills the server
+        // (took down dev 2026-08-24; suspected live incident class too).
+        // Callers still receive the rejection via their own await.
+        resultPromise.catch(() => { /* handled at the call site */ });
 
         const resp = await fetch(this.postEndpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(TOOL_TIMEOUT_MS + 5000)
         });
         if (!resp.ok) {
             const p = this.pending.get(requestId);

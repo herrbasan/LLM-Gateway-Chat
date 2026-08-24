@@ -412,11 +412,22 @@ export function buildChunkView(messages, options = {}) {
 
     // Retirement check: if this content's hash is retired, emit the tombstone
     // instead of any label/ref/full text. Checked on the BARE content (labels
-    // never affect identity). Returns the tombstone string or null.
+    // never affect identity). The tombstone KEEPS the original label (stored
+    // in the retirements map at retire time) and re-registers it in the
+    // chunkTable — otherwise the model could never name the chunk to
+    // context_unretire (the label vanished with the content). The counter is
+    // pushed past the label so later chunks keep stable numbering.
     function retiredTombstone(bare) {
-        const r = retirements[fingerprint(bare).hash];
+        const hash = fingerprint(bare).hash;
+        const r = retirements[hash];
         if (!r) return null;
         stats.retired++;
+        if (r.label && /^chunk_\d+$/.test(r.label)) {
+            chunkTable.set(r.label, hash);
+            const n = parseInt(r.label.slice(6), 10);
+            if (Number.isFinite(n) && n > chunkCounter) chunkCounter = n;
+            return `[${r.label} RETIRED — distillation: "${r.distill}". Original intact in history; call context_unretire with ${r.label} to restore it.]`;
+        }
         return tombstoneText(r.distill);
     }
 
