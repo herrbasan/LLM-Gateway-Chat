@@ -39,6 +39,7 @@ const EMBED_URL      = process.env.CHAT_EMBED_URL      || cfg.embedUrl          
 const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   || 2560;
 const EMBED_MAX_TOKENS = parseInt(process.env.CHAT_EMBED_MAX_TOKENS || cfg.embedMaxTokens) || 30000;
 const EMBED_TOK_RATIO  = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
+const FILES_DIR       = process.env.CHAT_FILES_DIR     || cfg.filesDir           || path.join(path.dirname(path.resolve(USERS_DB_PATH)), 'files');
 
 const EMBED_API_KEY = process.env.GATEWAY_API_KEY || cfg.embedApiKey || null;
 
