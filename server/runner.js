@@ -59,7 +59,14 @@ class Runner {
     ctx() {
         return { user: this.user, dbInstance: this.dbInstance, embedMessageAsync: DEPS.embedMessageAsync, log: DEPS.log() };
     }
-
+    // nDB find() does NOT return live references — the conv/session objects held
+    // here go stale when appendConversationMessage (or the old client) writes.
+    // Re-read at every state-consuming point. (First acceptance bug, 2026-08-24.)
+    refresh() {
+        const { db } = this.dbInstance;
+        this.session = convStore.findSessionOrThrow(db, this.conversationId);
+        this.conv = convStore.findOrCreateConversation(db, this.session, this.user);
+    }
     scheduleIdle() {
         clearTimeout(this.idleTimer);
         this.idleTimer = setTimeout(() => this.maybeUnload(), DEPS.idleMs || 10 * 60 * 1000);
@@ -113,6 +120,7 @@ class Runner {
     }
 
     buildSnapshot() {
+        this.refresh();
         const lastAssistant = [...this.conv.messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
         return {
             meta: {
@@ -161,6 +169,10 @@ class Runner {
         this.broadcast('msg.user', this.viewMessage(message));
         this.touch();
         this.pendingSends++;
+        this.generationParams = {};
+        for (const k of ['temperature', 'max_tokens', 'reasoning_effort']) {
+            if (body[k] !== undefined) this.generationParams[k] = body[k];
+        }
         this.kick();
         return { message };
     }
@@ -187,6 +199,7 @@ class Runner {
     }
 
     async runOnce() {
+        this.refresh();
         const model = this.session.model;
         if (!model) {
             this.broadcast('error', { code: 'no-model', message: 'No model selected for this conversation.' });
@@ -237,7 +250,7 @@ class Runner {
                     'Content-Type': 'application/json',
                     ...(DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {})
                 },
-                body: JSON.stringify({ model, messages: apiMessages, stream: true, session_id: this.conversationId }),
+                body: JSON.stringify({ model, messages: apiMessages, stream: true, session_id: this.conversationId, ...(this.generationParams || {}) }),
                 signal: this.inFlight.controller.signal
             });
             if (!resp.ok) {

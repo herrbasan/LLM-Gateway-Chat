@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Runner Test View — PA acceptance harness</title>
+<style>
+    body { font: 14px/1.4 system-ui, sans-serif; background: #141414; color: #ddd; margin: 0; display: flex; height: 100vh; }
+    #side { width: 280px; border-right: 1px solid #333; padding: 10px; overflow-y: auto; }
+    #main { flex: 1; display: flex; flex-direction: column; }
+    #log { flex: 0 0 140px; overflow-y: auto; font: 11px/1.3 monospace; color: #777; border-top: 1px solid #333; padding: 6px 10px; white-space: pre-wrap; }
+    #msgs { flex: 1; overflow-y: auto; padding: 12px; }
+    #bar { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #333; }
+    button, select, input { background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 6px 10px; font: inherit; }
+    button { cursor: pointer; }
+    .m { margin: 6px 0; padding: 8px 10px; border-radius: 6px; max-width: 80%; white-space: pre-wrap; }
+    .user { background: #1d3a5f; margin-left: auto; }
+    .assistant { background: #222; border: 1px solid #333; }
+    .tool { background: #2a2415; border: 1px solid #443; font: 12px monospace; }
+    .meta { color: #667; font-size: 11px; margin-bottom: 3px; }
+    .streaming::after { content: ' ▌'; animation: b 1s infinite; }
+    @keyframes b { 50% { opacity: 0; } }
+    .embed-dot { color: #4a4; font-size: 11px; }
+    .runline { color: #576; font: 11px monospace; text-align: center; margin: 4px; }
+</style>
+</head>
+<body>
+<div id="side">
+    <div style="margin-bottom:8px;color:#89a">RUNNER TEST VIEW (PA harness)</div>
+    <select id="chats" style="width:100%"></select>
+    <div style="display:flex;gap:6px;margin-top:8px">
+        <button id="attach">Attach</button>
+        <button id="newchat">New</button>
+    </div>
+    <div id="meta" style="margin-top:10px;font:11px monospace;color:#667"></div>
+</div>
+<div id="main">
+    <div id="msgs"></div>
+    <div id="bar">
+        <input id="inp" style="flex:1" placeholder="message… (Enter to send)">
+        <button id="send">Send</button>
+        <button id="abort">Abort</button>
+    </div>
+    <div id="log"></div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const msgsEl = $('#msgs'), logEl = $('#log');
+let es = null, chatId = null;
+const bubbles = new Map(); // messageId -> element
+
+function log(...a) { logEl.textContent += a.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+function bubble(role, id) {
+    const d = document.createElement('div');
+    d.className = 'm ' + role;
+    d.dataset.id = id || '';
+    msgsEl.appendChild(d);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+    return d;
+}
+function runline(t) { const d = document.createElement('div'); d.className = 'runline'; d.textContent = t; msgsEl.appendChild(d); }
+
+function renderMessage(m) {
+    const d = bubble(m.role, m.id);
+    d.innerHTML = `<div class="meta">${m.role} · ${m.model || ''} · ${m.id}</div>`;
+    const body = document.createElement('div');
+    body.className = 'content';
+    body.textContent = m.content || (m.reasoning_content ? '[thinking] ' + m.reasoning_content : '');
+    d.appendChild(body);
+    const dot = document.createElement('span');
+    dot.className = 'embed-dot';
+    dot.textContent = m.embedStatus === 'embedded' ? ' ⬤' : ' ◌';
+    d.querySelector('.meta').appendChild(dot);
+    bubbles.set(m.id, d);
+    return d;
+}
+function renderInFlight(f) {
+    if (!f) return;
+    const d = bubble('assistant', f.id);
+    d.classList.add('streaming');
+    d.innerHTML = `<div class="meta">assistant · ${f.model || ''} · ${f.id} · STREAMING</div>`;
+    const body = document.createElement('div');
+    body.className = 'content';
+    body.textContent = f.content || '';
+    d.appendChild(body);
+    bubbles.set(f.id, d);
+}
+function setContent(el, text) { el.querySelector('.content').textContent = text; }
+function getContent(el) { return el.querySelector('.content')?.textContent || ''; }
+
+async function loadChats() {
+    const r = await fetch('/api/chats');
+    const j = await r.json();
+    const sel = $('#chats');
+    sel.innerHTML = '';
+    for (const s of (j.data || j)) {
+        const o = document.createElement('option');
+        o.value = s.id;
+        o.textContent = `${s.title} (${s.messageCount ?? '?'})`;
+        sel.appendChild(o);
+    }
+}
+
+function attach(id) {
+    if (es) es.close();
+    chatId = id;
+    msgsEl.innerHTML = ''; bubbles.clear();
+    es = new EventSource(`/api/chats/${id}/events`);
+    es.addEventListener('snapshot', e => {
+        const d = JSON.parse(e.data);
+        $('#meta').textContent = `${d.meta.title} · model:${d.meta.model} · msgs:${d.messages.length}`;
+        msgsEl.innerHTML = ''; bubbles.clear();
+        for (const m of d.messages) renderMessage(m);
+        if (d.inFlight) { renderInFlight(d.inFlight); log('snapshot: inFlight re-attach'); }
+        log('snapshot attached');
+    });
+    es.addEventListener('msg.user', e => { renderMessage(JSON.parse(e.data)); });
+    es.addEventListener('run.start', e => { const d = JSON.parse(e.data); runline(`run.start ${d.model}`); renderInFlight({ id: d.messageId, model: d.model, content: '' }); });
+    es.addEventListener('delta', e => {
+        const d = JSON.parse(e.data);
+        const el = bubbles.get(d.messageId);
+        if (!el) return;
+        setContent(el, getContent(el) + (d.content || ''));
+        msgsEl.scrollTop = msgsEl.scrollHeight;
+    });
+    es.addEventListener('msg.assistant', e => {
+        const d = JSON.parse(e.data);
+        const el = bubbles.get(d.id);
+        if (el) { el.classList.remove('streaming'); setContent(el, d.content || ''); }
+        else renderMessage(d);
+    });
+    es.addEventListener('msg.variant', e => {
+        const d = JSON.parse(e.data);
+        const el = bubbles.get(d.messageId);
+        if (el) setContent(el, d.variant?.content || '');
+        log('msg.variant', d.messageId, '→ v' + d.currentVersion);
+    });
+    es.addEventListener('embed.status', e => {
+        const d = JSON.parse(e.data);
+        const dot = bubbles.get(d.messageId)?.querySelector('.embed-dot');
+        if (dot) dot.textContent = d.status === 'embedded' ? ' ⬤' : ' ✕';
+    });
+    es.addEventListener('run.end', e => { const d = JSON.parse(e.data); runline(`run.end ${d.finishReason}${d.aborted ? ' (aborted)' : ''}`); });
+    es.addEventListener('error', e => { log('ERROR', e.data); runline('error: ' + e.data); });
+}
+
+$('#attach').onclick = () => { const id = $('#chats').value; if (id) attach(id); };
+$('#newchat').onclick = async () => {
+    const model = prompt('model?', 'badkid-llama-chat');
+    const r = await fetch('/api/chats', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ title: 'PA-4 acceptance ' + new Date().toLocaleTimeString(), model }) });
+    const j = await r.json();
+    await loadChats();
+    $('#chats').value = j.id;
+    attach(j.id);
+};
+async function send() {
+    const content = $('#inp').value.trim();
+    if (!content || !chatId) return;
+    $('#inp').value = '';
+    const r = await fetch(`/api/chats/${chatId}/send`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ content }) });
+    if (!r.ok) log('send failed', r.status, await r.text());
+}
+$('#send').onclick = send;
+$('#inp').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+$('#abort').onclick = async () => { if (chatId) await fetch(`/api/chats/${chatId}/abort`, { method: 'POST' }); };
+
+loadChats();
+</script>
+</body>
+</html>
