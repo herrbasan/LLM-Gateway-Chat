@@ -372,6 +372,55 @@ async function deleteConversationMessage(ctx, { conversationId, messageId } = {}
     return { removed, messageCount: conv.messages.length };
 }
 
+// Edit a USER message in place and truncate everything after it (the edited
+// message becomes the pending turn — the runner re-runs it). Rejects non-user
+// targets. Re-indexes, persists, returns the removed count so the caller can
+// log/broadcast. Embed vectors for the removed messages are dropped.
+async function editUserMessageAndTruncate(ctx, { conversationId, messageId, content } = {}) {
+    guardCtx('editUserMessageAndTruncate', ctx);
+    if (!conversationId) throw new Error('editUserMessageAndTruncate: conversationId required');
+    if (!messageId) throw new Error('editUserMessageAndTruncate: messageId required');
+    if (typeof content !== 'string') throw new Error('editUserMessageAndTruncate: content (string) required');
+    const { db } = ctx.dbInstance;
+    const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
+
+    const session = findSessionOrThrow(db, conversationId);
+    const conv = findConversationOrThrow(db, conversationId);
+
+    const pos = conv.messages.findIndex(m => m.id === messageId);
+    if (pos === -1) throw new Error(`editUserMessageAndTruncate: message not found: ${messageId}`);
+    const target = conv.messages[pos];
+    if (target.role !== 'user') throw new Error(`editUserMessageAndTruncate: only user messages are editable (${messageId} is ${target.role})`);
+
+    const removedIds = conv.messages.slice(pos + 1).map(m => m.id);
+    target.content = content;
+    target.updatedAt = new Date().toISOString();
+    conv.messages = conv.messages.slice(0, pos + 1);
+    for (let i = 0; i < conv.messages.length; i++) conv.messages[i].idx = i;
+
+    conv.messageCount = conv.messages.length;
+    conv.updatedAt = new Date().toISOString();
+    db.set(conv._id, 'messages', conv.messages);
+    db.set(conv._id, 'messageCount', conv.messageCount);
+    db.set(conv._id, 'updatedAt', conv.updatedAt);
+
+    session.messageCount = conv.messageCount;
+    session.updatedAt = conv.updatedAt;
+    db.set(session._id, 'messageCount', session.messageCount);
+    db.set(session._id, 'updatedAt', session.updatedAt);
+
+    if (ctx.dbInstance.embeddingsCol) {
+        for (const id of removedIds) {
+            try { ctx.dbInstance.embeddingsCol.delete(id); ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) + 1; } catch (e) {
+                log.warn('Edit-truncate embed delete failed', { sessionId: conversationId, messageId: id, error: e.message }, 'Message');
+            }
+        }
+    }
+
+    log.info('User message edited + truncated', { sessionId: conversationId, messageId, removed: removedIds.length }, 'Message');
+    return { edited: target, removedCount: removedIds.length };
+}
+
 module.exports = {
     deriveFileRef,
     bucketUrl,
@@ -386,5 +435,6 @@ module.exports = {
     appendMessageVariant,
     setMessageVariant,
     replaceConversationMessages,
-    deleteConversationMessage
+    deleteConversationMessage,
+    editUserMessageAndTruncate
 };

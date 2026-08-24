@@ -59,6 +59,14 @@ function buildMessage(m) {
     embed.title = m.embedStatus || '—';
     embed.textContent = m.embedStatus === 'embedded' ? ' ●' : m.embedStatus === 'failed' ? ' ✕' : ' ◌';
     meta.appendChild(embed);
+    if (m.role === 'user') {
+        const edit = document.createElement('button');
+        edit.className = 'msg-edit';
+        edit.title = 'Edit & resend';
+        edit.textContent = '✎';
+        edit.onclick = (ev) => { ev.stopPropagation(); if (onEdit) onEdit(m.id, m.content); };
+        meta.appendChild(edit);
+    }
     const del = document.createElement('button');
     del.className = 'msg-delete';
     del.title = 'Delete message';
@@ -141,7 +149,9 @@ function renderAssistantBody(body, m) {
 // ---- public API (called by app.js) ----
 
 let onDelete = null;
+let onEdit = null;
 export function setDeleteHandler(fn) { onDelete = fn; }
+export function setEditHandler(fn) { onEdit = fn; }
 
 export function removeMessage(messageId) {
     if (bubbles.has(messageId)) {

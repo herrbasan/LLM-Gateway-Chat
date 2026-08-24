@@ -274,6 +274,14 @@ function wire() {
         if (r.status === 200) R.removeMessage(messageId);
         else if (r.data?.error) R.errorLine(r.data.error);
     });
+    R.setEditHandler(async (messageId, currentContent) => {
+        if (!chatId || !messageId) return;
+        const next = prompt('Edit message (resend to regenerate the response):', currentContent || '');
+        if (next === null || next === (currentContent || '')) return;
+        const r = await api('PATCH', `/api/chats/${chatId}/messages/${messageId}`, { content: next });
+        // snapshot event re-renders; on error surface it
+        if (r.status !== 200 && r.data?.error) R.errorLine(r.data.error);
+    });
 }
 
 wire();

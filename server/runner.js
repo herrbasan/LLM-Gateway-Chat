@@ -570,6 +570,21 @@ class Runner {
         return { deleted: true, messageId };
     }
 
+    // Edit a user message in place, truncate after it, re-run (PC). The edited
+    // message becomes the pending turn — kick() picks it up as a fresh send.
+    async editMessage(messageId, content) {
+        const { edited, removedCount } = await convStore.editUserMessageAndTruncate(this.ctx(), {
+            conversationId: this.conversationId, messageId, content
+        });
+        this.refresh();
+        // Full snapshot: one edit + N removals is cleaner as a re-render than
+        // N incremental events.
+        this.broadcast('snapshot', this.buildSnapshot());
+        this.pendingSends++;
+        this.kick();
+        return { edited: true, messageId, removedCount };
+    }
+
     userProfile() {
         const doc = this.dbInstance.db.find('id', this.user.id).find(d => d._type === 'user_settings');
         return {

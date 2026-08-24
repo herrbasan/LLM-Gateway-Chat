@@ -1726,6 +1726,21 @@ const routes = {
       json(res, { error: e.message }, 404, req);
     }
   },
+
+  // Edit a user message in place and re-run from it
+  'PATCH /api/chats/:id/messages/:messageId': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    const body = await readBody(req);
+    try {
+      const r = runner.getRunner(user, dbInstance, params.id);
+      json(res, await r.editMessage(params.messageId, body.content), 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
   
   // Delete session
   'DELETE /api/chats/:id': async (req, res, params) => {
