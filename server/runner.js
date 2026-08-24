@@ -558,16 +558,34 @@ class Runner {
         return { message };
     }
 
-    // Single message delete (PC): the runner is the single author, so a view
-    // deletes through it and every attached view hears msg.deleted.
+    // Delete a message (PC): the runner is the single author, so a view deletes
+    // through it and every attached view hears msg.deleted. Deleting a USER
+    // message cascades — the whole turn (user + its assistant + any tool
+    // messages) goes, matching the old exchange-level delete and preventing an
+    // orphaned assistant (which would 400 the next gateway payload).
     async deleteMessage(messageId) {
-        const { removed } = await convStore.deleteConversationMessage(this.ctx(), {
-            conversationId: this.conversationId, messageId
-        });
-        this.refresh(); // conv/session objects are stale after the write
-        this.broadcast('msg.deleted', { messageId, role: removed.role });
+        this.refresh();
+        const pos = this.conv.messages.findIndex(m => m.id === messageId);
+        if (pos === -1) throw new Error(`deleteMessage: message not found: ${messageId}`);
+
+        const target = this.conv.messages[pos];
+        const ids = [messageId];
+        if (target.role === 'user') {
+            for (let i = pos + 1; i < this.conv.messages.length; i++) {
+                if (this.conv.messages[i].role === 'user') break;
+                ids.push(this.conv.messages[i].id);
+            }
+        }
+
+        for (const id of ids) {
+            await convStore.deleteConversationMessage(this.ctx(), {
+                conversationId: this.conversationId, messageId: id
+            });
+        }
+        this.refresh(); // conv/session objects are stale after the writes
+        this.broadcast('msg.deleted', { messageId, role: target.role });
         this.touch();
-        return { deleted: true, messageId };
+        return { deleted: true, messageId, removedCount: ids.length };
     }
 
     // Edit a user message in place, truncate after it, re-run (PC). The edited
