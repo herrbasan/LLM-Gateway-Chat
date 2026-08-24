@@ -455,6 +455,7 @@ embedEvents.setMaxListeners(100);
 const L = () => logger || { info() {}, warn() {}, error() {}, debug() {} };
 
 // ConversationRunner (PA-3) — server-side conversation sessions.
+const internalTools = require('./internal-tools');
 runner.init({
     gatewayUrl: process.env.LLM_GATEWAY_URL || cfg.gatewayUrl || 'http://127.0.0.1:3400',
     gatewayKey: process.env.GATEWAY_API_KEY || null,
@@ -462,8 +463,11 @@ runner.init({
     embedMessageAsync,
     log: L,
     getInstructions: () => fetchPrimeDirective(),
-    idleMs: 10 * 60 * 1000
+    idleMs: 10 * 60 * 1000,
+    embedBatch,
+    getEmbedAvailable: () => embedAvailable
 });
+internalTools.init({ log: L });
 embedEvents.on('status', runner.handleEmbedStatus);
 mcpPool.init({ log: L });
 
@@ -1746,132 +1750,13 @@ const routes = {
     const authResult = requireAuth(req, res);
     if (!authResult) return;
     const { user, dbInstance } = authResult;
-    const { db, vdb, embeddingsCol } = dbInstance;
-    
+
     const body = await readBody(req);
-    const query = (body.query || '').trim();
-    const limit = body.limit || 10;
-    const filterMode = body.mode || body.filter?.mode;
-    const filterRole = body.role || body.filter?.role;
-    const searchType = body.search_type || 'semantic';
-    const dateFrom = body.date_from || null;
-    const dateTo = body.date_to || null;
-
-    L().info('Search request', { query: query.slice(0, 50), role: filterRole, type: searchType, mode: filterMode }, 'Search');
-
-    if (!query) {
-      json(res, { results: [] }, 200, req);
-      return;
-    }
-
-    // DB is isolated per user, so we don't strictly filter by userId to allow legacy migrated data
-    const convs = db.find('_type', 'conversation');
-    const userSessions = db.find('_type', 'session');
-    const convById = new Map();
-    const msgIndex = []; // flat list of { chatId, idx, msg, session }
-
-    for (const c of convs) {
-      convById.set(c.id, c);
-      const session = userSessions.find(s => s.id === c.id);
-      if (!c.messages) continue;
-      for (const msg of c.messages) {
-        // Date filtering
-        if (dateFrom || dateTo) {
-          const d = new Date(msg.createdAt);
-          if (dateFrom && d < new Date(dateFrom)) continue;
-          if (dateTo && d > new Date(dateTo)) continue;
-        }
-        // Mode filtering
-        if (filterMode && filterMode !== 'all' && session?.mode && session.mode !== filterMode) continue;
-        if (filterRole && filterRole !== 'all' && msg.role !== filterRole) continue;
-        msgIndex.push({ chatId: c.id, idx: msg.idx, msg, session });
-      }
-    }
-
-    const results = [];
-    const seen = new Set();
-
-    // Semantic search via nVDB (skip if keyword-only)
-    if ((searchType === 'semantic' || searchType === 'hybrid') && embeddingsCol && embedAvailable) {
-      try {
-        const vectors = await embedBatch([query]);
-        const queryVector = vectors[0];
-
-        const vectorResults = await embeddingsCol.search({
-          vector: queryVector,
-          top_k: limit * 3
-        });
-
-        for (const hit of vectorResults) {
-          if (results.length >= limit) break;
-
-          const payload = hit.payload ? JSON.parse(hit.payload) : null;
-          const chatId = payload?.chatId;
-          const msgIdx = typeof payload?.msgIdx === 'number' ? payload.msgIdx : -1;
-          const msgId = payload?.messageId || hit.id;
-          const seenKey = chatId ? `${chatId}#${msgIdx}` : msgId;
-
-          if (seen.has(seenKey)) continue;
-          seen.add(seenKey);
-
-          // Lookup via chatId+idx (new format) or msgId (legacy)
-          let entry;
-          if (chatId && msgIdx >= 0) {
-            entry = msgIndex.find(e => e.chatId === chatId && e.idx === msgIdx);
-            if (!entry) {
-              // Vector hit but no corresponding message in filtered index
-              continue;
-            }
-          } else {
-            entry = msgIndex.find(e => e.msg.id === msgId);
-            if (!entry) continue;
-          }
-
-          logger.info('Search vector hit', { chatId: chatId?.slice(-20), msgIdx, score: hit.score.toFixed(3), role: entry.msg.role }, 'Search');
-
-          results.push({
-            score: hit.score,
-            message: { id: entry.msg.id, idx: entry.idx, role: entry.msg.role, model: entry.msg.model, content: entry.msg.content.slice(0, 300), createdAt: entry.msg.createdAt },
-            session: entry.session ? { id: entry.session.id, title: entry.session.title, mode: entry.session.mode, createdAt: entry.session.createdAt } : null
-          });
-        }
-      } catch (err) {
-        L().error('Semantic search failed', err, {}, 'Search');
-      }
-    }
-
-    // Text search (skip if semantic-only with results already found)
-    const semanticHadResults = results.length > 0;
-    if ((searchType === 'keyword' || searchType === 'hybrid' || (searchType === 'semantic' && !semanticHadResults)) && results.length < limit) {
-      const lowerQuery = query.toLowerCase();
-      const textHits = msgIndex
-        .filter(e => e.msg.content?.toLowerCase().includes(lowerQuery))
-        .slice(0, limit - results.length);
-
-      for (const entry of textHits) {
-        if (results.length >= limit) break;
-        const seenKey = `${entry.chatId}#${entry.idx}`;
-        if (seen.has(seenKey)) continue;
-        seen.add(seenKey);
-
-        results.push({
-          score: 0,
-          message: { id: entry.msg.id, idx: entry.idx, role: entry.msg.role, model: entry.msg.model, content: entry.msg.content.slice(0, 300), createdAt: entry.msg.createdAt },
-          session: entry.session ? { id: entry.session.id, title: entry.session.title, mode: entry.session.mode, createdAt: entry.session.createdAt } : null,
-          source: 'text-fallback'
-        });
-      }
-    }
-
-    L().info('Search', { query: query.slice(0, 80), results: results.length, type: searchType }, 'Search');
-    json(res, {
-      results,
-      query,
-      search_type: searchType,
-      method: searchType === 'keyword' ? 'text' : searchType === 'hybrid' ? (results.some(r => r.score > 0) ? 'hybrid' : 'text') : (results.some(r => r.score > 0) ? 'semantic' : 'text-fallback')
-    });
+    // Single implementation: shared with the runner's chat_archive_search (PB-b).
+    const data = await internalTools.searchArchive(dbInstance, body, { embedBatch, embedAvailable, log: L() });
+    json(res, data, 200, req);
   },
-  
+
   // List arena sessions (public)
   'GET /api/arena': async (req, res) => {
     const authResult = requireAuth(req, res);
@@ -1891,69 +1776,17 @@ const routes = {
     const authResult = requireAuth(req, res);
     if (!authResult) return;
     const { user, dbInstance } = authResult;
-    const { db } = dbInstance;
 
     const body = await readBody(req);
-    const sid = (body.session_id || '').trim();
-    const dir = body.direction || 'both';
-    if (!sid) { json(res, { error: 'Missing session_id' }, 400, req); return; }
-
-    const arenaSessions = db.find('_type', 'session')
-      .filter(s => s.mode === 'arena' || s.mode === 'direct');
-
-    const refPattern = /arena-\d+[-\w]*/g;
-
-    // Outbound: scan THIS session for references to other IDs
-    const outbound = [];
-    if (dir === 'outbound' || dir === 'both') {
-      const msgs = db.find('_type', 'message').filter(m => m.sessionId === sid);
-      for (const m of msgs) {
-        const matches = (m.content || '').match(refPattern) || [];
-        for (const match of matches) {
-          if (match === sid) continue;
-          if (outbound.some(r => r.sessionId === match)) continue;
-          const target = arenaSessions.find(s => s.id === match);
-          outbound.push({
-            sessionId: match,
-            sessionTitle: target?.title || 'unknown',
-            messageCount: target?.messageCount,
-            models: target?.arenaConfig ? `${target.arenaConfig.modelA} vs ${target.arenaConfig.modelB}` : (target?.model || 'unknown'),
-            matchedIn: m.role,
-            date: target?.createdAt
-          });
-        }
-      }
+    // Single implementation: shared with the runner's chat_archive_find_references (PB-b).
+    try {
+      const data = internalTools.findReferences(dbInstance.db, body);
+      json(res, data, 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 400, req);
     }
-
-    // Inbound: scan ALL sessions for references to THIS session_id
-    const inbound = [];
-    if (dir === 'inbound' || dir === 'both') {
-      const allMessages = db.find('_type', 'message');
-      const referencing = new Map(); // sessionId -> matchedRole
-      for (const m of allMessages) {
-        if (m.sessionId === sid) continue;
-        if ((m.content || '').includes(sid)) {
-          if (!referencing.has(m.sessionId)) referencing.set(m.sessionId, m.role);
-        }
-      }
-      for (const [refSid, matchedRole] of referencing) {
-        const session = arenaSessions.find(s => s.id === refSid);
-        if (session) {
-          inbound.push({
-            sessionId: refSid,
-            sessionTitle: session.title || 'unknown',
-            messageCount: session.messageCount,
-            models: session.arenaConfig ? `${session.arenaConfig.modelA} vs ${session.arenaConfig.modelB}` : (session.model || 'unknown'),
-            matchedIn: matchedRole,
-            date: session.createdAt
-          });
-        }
-      }
-    }
-
-    json(res, { source: { id: sid }, direction: dir, referenced_by: inbound, references: outbound }, 200, req);
   },
-   
+
   // (file serving handled below via prefix check)
 
 };

@@ -296,6 +296,23 @@ class UserPool {
         return rec.server.callTool(rec.originalName, args);
     }
 
+    // Workshop origin for storage PUTs (browser_fetch / attachment_save /
+    // saveToStorage). Mirrors the client's getMcpServerOrigin: first
+    // configured server URL's origin.
+    getStorageOrigin() {
+        const srv = this.servers.find(s => s.cfg?.url || s.url);
+        const raw = srv?.cfg?.url || srv?.url;
+        if (!raw) return null;
+        try { return sseUrlBase(raw); } catch { return null; }
+    }
+
+    hasToolPrefix(prefix) {
+        for (const llmName of this.registry.keys()) {
+            if (llmName.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
     async executeReadResource(args) {
         if (typeof args?.uri !== 'string' || !args.uri) throw new Error('read_resource: uri required');
         const connected = this.servers.filter(s => s.status === 'connected');

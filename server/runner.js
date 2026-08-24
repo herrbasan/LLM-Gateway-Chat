@@ -12,10 +12,25 @@ const convStore = require('./conversation-store');
 const { buildApiMessages } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
 const mcpPool = require('./mcp-pool');
+const internalTools = require('./internal-tools');
 
 let DEPS = null;
-// deps = { gatewayUrl, gatewayKey, publicOrigin, embedMessageAsync, log, getInstructions, idleMs }
+// deps = { gatewayUrl, gatewayKey, publicOrigin, embedMessageAsync, log, getInstructions, idleMs,
+//          embedBatch, getEmbedAvailable }
 function init(deps) { DEPS = deps; }
+
+// Model capabilities cache (vision filter) — gateway /v1/models, 5 min TTL.
+let _modelsCache = { at: 0, models: [] };
+async function getModels() {
+    if (Date.now() - _modelsCache.at < 5 * 60 * 1000 && _modelsCache.models.length) return _modelsCache.models;
+    const resp = await fetch(`${DEPS.gatewayUrl}/v1/models`, {
+        headers: DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {}
+    });
+    if (!resp.ok) throw new Error(`gateway /v1/models ${resp.status}`);
+    const data = await resp.json();
+    _modelsCache = { at: Date.now(), models: data.data || [] };
+    return _modelsCache.models;
+}
 
 const registry = new Map(); // `${userId}:${conversationId}` -> Runner
 
@@ -54,6 +69,7 @@ class Runner {
         this.abortRequested = false;
         this.idleTimer = null;
         this.chunkView = null; // lazy dynamic import (shared file, no port)
+        this._chunkTable = new Map(); // last assembly's chunk labels → hashes (context_retire)
         this.scheduleIdle();
     }
 
@@ -242,15 +258,17 @@ class Runner {
                 DEPS.getInstructions(),
                 this.chunkView ? Promise.resolve(this.chunkView) : import('../chat/js/chunk-view.js').then(m => (this.chunkView = m))
             ]);
+            const pool = mcpPool.getForUser(this.user, this.dbInstance);
+            const mcpOrigin = pool.getStorageOrigin();
             const systemPrompt = buildSystemPrompt({
                 instructions,
                 user: this.userProfile(),
                 sessionPrompt: this.session.systemPrompt || '',
-                archiveTools: null,       // PA: tools disabled
+                archiveTools: { sessionId: this.conversationId, mcpOrigin, serverSide: true },
                 mcpResources: null,
-                memoryToolsAvailable: false
+                memoryToolsAvailable: pool.hasToolPrefix('memory.')
             });
-            const apiMessages = buildApiMessages(this.conv.messages, {
+            const { messages: apiMessages, chunkTable } = buildApiMessages(this.conv.messages, {
                 systemPrompt,
                 publicOrigin: DEPS.publicOrigin,
                 chunkTransform: this.session.chunkTransform === true,
@@ -258,15 +276,29 @@ class Runner {
                 chunkView,
                 log: DEPS.log()
             });
+            this._chunkTable = chunkTable;
 
-            // PB: advertise the user's MCP tools (pool auto-connects lazily)
-            let tools = [];
+            // PB-b: internal tools (archive/browser_fetch/attachment_save,
+            // retirement in chunkTransform chats) + the user's MCP tools
+            // (pool auto-connects lazily), vision-filtered like the client.
+            let tools = internalTools.getToolDefs({ chunkTransform: this.session.chunkTransform === true });
+            let mcpTools = [];
             try {
-                tools = await mcpPool.getForUser(this.user, this.dbInstance).getFormattedTools();
+                mcpTools = await pool.getFormattedTools();
             } catch (e) {
                 DEPS.log().warn('MCP pool unavailable', { chatId: this.conversationId, error: e.message }, 'Runner');
             }
+            let modelSupportsVision = false;
+            try {
+                const models = await getModels();
+                modelSupportsVision = models.find(m => m.id === model)?.capabilities?.vision === true;
+            } catch (e) {
+                DEPS.log().warn('Model capability lookup failed', { chatId: this.conversationId, error: e.message }, 'Runner');
+            }
+            const hasAutoVisionAnalysis = this.conv.messages.some(m => m.role === 'user' && typeof m.content === 'string' && m.content.includes('[Auto-vision:'));
+            tools = tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision, hasAutoVisionAnalysis }));
             this._toolsAdvertised = tools.length > 0;
+            this._mcpOrigin = mcpOrigin;
 
             const resp = await fetch(`${DEPS.gatewayUrl}/v1/chat/completions`, {
                 method: 'POST',
@@ -322,7 +354,9 @@ class Runner {
             this.broadcast('tool.start', { toolCallId: tc.id, name: tc.function.name, args, exchangeId: f.exchangeId, messageId: f.messageId });
             let status = 'success', resultText = '', resultImages = [];
             try {
-                const result = await pool.callTool(tc.function.name, args);
+                const result = internalTools.isInternalTool(tc.function.name)
+                    ? await internalTools.executeInternalTool(tc.function.name, args, this.internalToolCtx())
+                    : await pool.callTool(tc.function.name, args);
                 ({ text: resultText, images: resultImages } = this.extractToolResult(result));
             } catch (e) {
                 status = 'error';
@@ -342,6 +376,32 @@ class Runner {
             this.broadcast('tool.end', { toolCallId: tc.id, name: tc.function.name, status, resultMessage: resultText, resultImages, toolMessageId: toolMsg.id, messageId: f.messageId });
         }
         return executed;
+    }
+
+    // PB-b: ctx for internal tool execution — everything over dbInstance,
+    // no HTTP hop to our own API. Retirement writes go through the session
+    // doc (single author: this runner).
+    internalToolCtx() {
+        return {
+            user: this.user,
+            dbInstance: this.dbInstance,
+            conversationId: this.conversationId,
+            log: DEPS.log(),
+            mcpOrigin: this._mcpOrigin || null,
+            publicOrigin: DEPS.publicOrigin,
+            chunkTable: this._chunkTable,
+            embedDeps: { embedBatch: DEPS.embedBatch, embedAvailable: DEPS.getEmbedAvailable ? DEPS.getEmbedAvailable() : true },
+            getRetirements: () => {
+                this.refresh();
+                return this.session.retirements || {};
+            },
+            setRetirements: async (map) => {
+                this.refresh();
+                this.session.retirements = map;
+                this.session.updatedAt = new Date().toISOString();
+                this.dbInstance.db.update(this.session._id, this.session);
+            }
+        };
     }
 
     // MCP result { content: [{type:'text'|'image', ...}] } → { text, images }.

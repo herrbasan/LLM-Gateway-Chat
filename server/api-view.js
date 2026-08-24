@@ -53,7 +53,9 @@ function resolveImageUrl(url, publicOrigin) {
 // messages: stored-form array (flat, ordered by idx).
 // options: { systemPrompt, publicOrigin, chunkTransform, retirements, chunkView, log }
 //   chunkView: the (dynamically imported) chat/js/chunk-view.js module, or null.
-// Returns the OpenAI-style API message array.
+// Returns { messages, chunkTable } — messages is the OpenAI-style API array;
+// chunkTable (Map<label, hash>, empty when transform is off) resolves the
+// model's chunk labels to durable content hashes for context_retire.
 function buildApiMessages(messages, options = {}) {
     if (!Array.isArray(messages)) throw new Error('buildApiMessages: messages array required');
     const { systemPrompt = '', publicOrigin, chunkTransform = false, retirements = {}, chunkView = null, log = null } = options;
@@ -285,19 +287,19 @@ function buildApiMessages(messages, options = {}) {
     // Chunk-store transform (per-chat flag). Fail loud to raw on engine error.
     if (chunkTransform === true && chunkView) {
         try {
-            const { messages: tx, stats } = chunkView.buildChunkView(merged, {
+            const { messages: tx, stats, chunkTable } = chunkView.buildChunkView(merged, {
                 retirements,
                 retirementTools: true
             });
             const savedPct = stats.bytesIn ? Math.round((1 - stats.bytesOut / stats.bytesIn) * 100) : 0;
             log?.info?.(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${savedPct}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes} retired=${stats.retired}`);
-            return tx;
+            return { messages: tx, chunkTable: chunkTable || new Map() };
         } catch (e) {
             log?.error?.('[chunk-view] transform failed, sending raw:', e);
         }
     }
 
-    return merged;
+    return { messages: merged, chunkTable: new Map() };
 }
 
 module.exports = { buildApiMessages, stripExtraTimestamps, sanitizeToolArgs, resolveImageUrl };
