@@ -3,7 +3,6 @@
 // ============================================
 
 import { Conversation, messagesToExchanges } from './conversation.js';
-import { GatewayClient } from './client-sdk.js';
 import { renderMarkdown, parseThinking } from './markdown.js';
 import { imageStore } from './image-store.js';
 import { mcpClient } from './mcp-client.js';
@@ -38,8 +37,6 @@ window._mcpTracePersist = (entry) => {
 
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
-const GATEWAY_URL = localStorage.getItem('gateway-url') || '';
-const GATEWAY_API_KEY = localStorage.getItem('gateway-api-key') || '';
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
@@ -143,23 +140,6 @@ const chatsWithNewContent = new Set();
 let _embedEventSource = null;
 let _embedEventChatId = null;
 
-let client = new GatewayClient({
-    baseUrl: GATEWAY_URL,
-    accessKey: GATEWAY_API_KEY,
-    onLog: (category, message, meta) => {
-        if (backendClient?.clientLog) backendClient.clientLog(category, message, meta).catch(() => {});
-    }
-});
-
-function updateGatewayUrl(newUrl) {
-    localStorage.setItem('gateway-url', newUrl);
-    client.restUrl = newUrl;
-}
-
-function updateGatewayApiKey(newKey) {
-    localStorage.setItem('gateway-api-key', newKey);
-    client.accessKey = newKey;
-}
 let models = [];
 let currentModel = '';
 let isStreaming = false;
@@ -199,11 +179,6 @@ const elements = {
     sidebar: document.getElementById('sidebar'),
     sidebarToggle: document.getElementById('sidebar-toggle'),
     sidebarToggleMobile: document.getElementById('sidebar-toggle-mobile'),
-    gatewayUrl: document.getElementById('gateway-url'),
-    gatewayApiKey: document.getElementById('gateway-api-key'),
-    gatewayConnectBtn: document.getElementById('gateway-connect-btn'),
-    gatewayConfigStatus: document.querySelector('#gateway-config-status .status-dot'),
-    gatewayConfigStatusText: document.querySelector('#gateway-config-status .gateway-config-status-text'),
     overallContextProgressWrap: document.getElementById('overall-context-progress-wrap'),
     overallContextProgress: document.getElementById('overall-context-progress'),
     overallContextTooltip: document.getElementById('overall-context-tooltip'),
@@ -956,12 +931,6 @@ async function init() {
         backendClient.onOfflineChange((offline) => {
             const banner = document.getElementById('backend-offline-banner');
             if (banner) banner.dataset.visible = offline ? 'true' : 'false';
-            if (!offline) {
-                // Backend recovered — flush any crash-netted messages.
-                for (const conv of activeConversations.values()) {
-                    conv.drainCrashNet?.().catch(() => {});
-                }
-            }
         });
 
         const loginForm = document.getElementById('login-form');
@@ -1037,12 +1006,6 @@ async function init() {
     // Cache in activeConversations for multi-conversation support
     activeConversations.set(currentChatId, conversation);
 
-    // Set session ID from the Conversation object itself.
-    // conv.sessionId is always set (derived from storageKey).
-    if (conversation.sessionId) {
-        client.setSessionId(conversation.sessionId);
-    }
-
     // Apply default config values (needs history loaded first for async prefs)
     await applyDefaultConfig();
 
@@ -1103,19 +1066,9 @@ async function init() {
     initContainer.style.display = 'flex'; // show the active chat
     attachRunnerEvents(currentChatId);
 
-    // Check gateway status
-    checkGatewayStatus();
-
     // Init MCP (load config from storage)
     await mcpClient.ready();
     initMCP();
-
-    // Save all conversations before page unload to prevent data loss
-    window.addEventListener('beforeunload', () => {
-        for (const [chatId, conv] of activeConversations) {
-            conv.save();
-        }
-    });
 
     // TTS controller initializes inside applyDefaultConfig() — no separate call needed
 }
@@ -1185,18 +1138,6 @@ async function applyDefaultConfig() {
     if (elements.userLanguage) {
         const input = elements.userLanguage.querySelector('input');
         if (input) input.value = language;
-    }
-
-    // Gateway URL input — populate from localStorage
-    if (elements.gatewayUrl) {
-        const input = elements.gatewayUrl.querySelector('input');
-        if (input) input.value = GATEWAY_URL;
-    }
-
-    // Gateway API key input — populate from localStorage
-    if (elements.gatewayApiKey) {
-        const input = elements.gatewayApiKey.querySelector('input');
-        if (input) input.value = GATEWAY_API_KEY;
     }
 
     // Initialize shared TTS controller (talks to nSpeech V3 API).
@@ -1428,20 +1369,12 @@ function waitForNUI() {
 // ============================================
 
 async function loadModels() {
-    if (!client.restUrl) {
-        models = [];
-        if (elements.modelSelect.setItems) {
-            elements.modelSelect.setItems([{ value: '', label: 'Set gateway URL first', disabled: true }]);
-        }
-        return;
-    }
     try {
-        const data = await client.getModels();
+        const res = await fetch('/api/models');
+        if (!res.ok) throw new Error(`/api/models ${res.status}`);
+        const data = await res.json();
         models = data.data || [];
-        if (models.length > 0) {
-        }
         await populateModelSelect();
-
     } catch (error) {
         console.error('[Chat] Failed to load models:', error);
         models = [];
@@ -1634,24 +1567,7 @@ function setupEventListeners() {
         }
     });
 
-    // Gateway Connect button — save URL + API key, update client, reload models + status
-    elements.gatewayConnectBtn?.addEventListener('click', async () => {
-        const urlInput = elements.gatewayUrl?.querySelector('input');
-        const newUrl = urlInput?.value?.trim();
-        if (!newUrl) return;
-        updateGatewayUrl(newUrl);
-
-        const keyInput = elements.gatewayApiKey?.querySelector('input');
-        const newKey = keyInput?.value?.trim() || '';
-        updateGatewayApiKey(newKey);
-
-        await loadModels();
-        checkGatewayStatus();
-    });
-
     // TTS controls are wired by NSpeechController.init() — no manual listeners here
-
-    // Send message / Toggle Stop
     elements.sendBtn?.addEventListener('click', (e) => {
         if (runnerViews.get(currentChatId)?.streaming?.el) {
             abortStream();
@@ -2954,24 +2870,11 @@ async function updateOverallContext(contextData = null) {
         if (foundContext) {
             contextData = foundContext;
         } else {
-            // Rough estimation fallback based on the data we have in the conversation text
+            // Rough estimation from the in-memory exchanges (no gateway/API call).
             let textLength = 0;
-            const msgs = await conversation.getMessagesForApi();
-            for (const m of msgs) {
-                let contentText = '';
-                if (typeof m.content === 'string') {
-                    contentText = m.content;
-                } else if (Array.isArray(m.content)) {
-                    for (const block of m.content) {
-                        if (block.type === 'text') contentText += block.text;
-                    }
-                }
-                
-                // Strip <think>...</think> blocks
-                contentText = contentText.replace(/<think>[\s\S]*?<\/think>/g, '');
-                
-                textLength += contentText.length;
-                textLength += m.role.length;
+            const strip = (s) => (typeof s === 'string' ? s.replace(/<think>[\s\S]*?<\/think>/g, '') : '');
+            for (const ex of conversation.getAll()) {
+                textLength += strip(ex.user?.content).length + strip(ex.assistant?.content).length + strip(ex.tool?.content).length;
             }
             if (textLength > 0) {
                 // Heuristic: ~4 chars per token for English
@@ -3630,7 +3533,7 @@ async function copyMessageToClipboard(exchangeId, btn) {
 
 async function startEditMode(exchangeId, role = 'user') {
     // Block editing only if this specific exchange in the current chat is currently streaming
-    if (client.hasActiveStream(currentChatId) && currentExchangeId === exchangeId) return;
+    if (runnerViews.get(currentChatId)?.streaming?.el && currentExchangeId === exchangeId) return;
 
     // Capture chat context at call time — the dialog is async and the user may
     // switch tabs while it's open. We must save edits to the original conversation.
@@ -3779,18 +3682,12 @@ async function switchChat(targetChatId) {
     // We MUST set currentChatId BEFORE any await — otherwise sendMessage()
     // can fire during the yield point and capture the old chatId, sending
     // the user's message into the wrong conversation.
-    const oldConv = conversation;
     currentChatId = targetChatId;
     storage.setActiveChatId(currentChatId).catch(() => {});
 
     // Reset preview pane — it's a shared surface across per-chat containers.
     // Without this, chat B would see chat A's preview. Idempotent: safe on init.
     preview.reset();
-
-    // Save the outgoing conversation (now safe — currentChatId already updated)
-    if (oldConv) {
-        await oldConv.save();
-    }
 
     // 1. Get or create the container for this chat (creates DOM node if first time)
     const targetContainer = getOrCreateContainer(targetChatId);
@@ -3819,14 +3716,7 @@ async function switchChat(targetChatId) {
         pill.style.display = 'none';
     }
 
-    // 3. Sync session ID from the Conversation object itself.
-    // conv.sessionId is always set (derived from storageKey), unlike
-    // chatHistory which may be empty when backend is disabled.
-    if (conv.sessionId) {
-        client.setSessionId(conv.sessionId);
-    } else {
-        console.warn('[Session] switchChat MISSING sessionId for chatId:', targetChatId);
-    }
+    // 3. (Removed — the runner owns session identity; no client session ID.)
 
     // 4. (Removed — the runner snapshot handler builds the historical DOM.)
 
@@ -3871,7 +3761,7 @@ async function switchChat(targetChatId) {
 
     // 8. Sync send button state with whether THIS chat has an active stream
     // The input area is shared across chats, so we must show correct state for the visible chat
-    const targetChatIsStreaming = client.hasActiveStream(targetChatId);
+    const targetChatIsStreaming = !!runnerViews.get(targetChatId)?.streaming?.el;
     const btn = elements.sendBtn?.querySelector('button');
     if (btn) {
         btn.innerHTML = targetChatIsStreaming
@@ -3917,8 +3807,8 @@ async function deleteChat(chatId, e) {
     // Delete from chat history (handles backend deletion)
     chatHistory.delete(chatId);
 
-    // Abort any ongoing stream for this chat
-    client.abortStream(chatId);
+    // Abort any ongoing run for this chat
+    runnerClient.abort(chatId).catch(() => {});
 
     // Clean up multi-conversation state
     activeConversations.delete(chatId);
@@ -4488,7 +4378,7 @@ function renderChatTabItem(chat) {
 
     // Indicators derived from state (nui-list recycles elements, so these are
     // re-applied on every render rather than toggled on a persistent DOM node).
-    if (client.hasActiveStream(chat.id)) item.classList.add('streaming');
+    if (runnerViews.get(chat.id)?.streaming?.el) item.classList.add('streaming');
     if (chatsWithNewContent.has(chat.id)) item.classList.add('new-content');
 
     return item;
@@ -4865,33 +4755,6 @@ function clearAttachments() {
         elements.attachmentPreview.innerHTML = '';
     }
     updateVisionToggleVisibility();
-}
-
-// ============================================
-// Gateway Status
-// ============================================
-
-async function checkGatewayStatus() {
-    if (!client.restUrl) {
-        elements.gatewayConfigStatus?.classList.add('offline');
-        if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Not connected';
-        return;
-    }
-    try {
-        if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Checking...';
-        const data = await client.getHealth();
-
-        if (data.status === 'ok') {
-            elements.gatewayConfigStatus?.classList.remove('offline');
-            if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Connected';
-        } else {
-            elements.gatewayConfigStatus?.classList.add('offline');
-            if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Error';
-        }
-    } catch (error) {
-        elements.gatewayConfigStatus?.classList.add('offline');
-        if (elements.gatewayConfigStatusText) elements.gatewayConfigStatusText.textContent = 'Offline';
-    }
 }
 
 // ============================================
