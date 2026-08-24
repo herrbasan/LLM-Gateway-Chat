@@ -2,7 +2,7 @@
 // LLM Gateway Chat - Main Controller
 // ============================================
 
-import { Conversation } from './conversation.js';
+import { Conversation, messagesToExchanges } from './conversation.js';
 import { GatewayClient } from './client-sdk.js';
 import { renderMarkdown, parseThinking } from './markdown.js';
 import { imageStore } from './image-store.js';
@@ -14,6 +14,7 @@ import { backendClient } from './api-client.js';
 import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
 import { TtsPlayerHost } from '../../lib/tts/tts-player.js';
 import { preview } from './preview.js';
+import { runnerClient } from './runner-client.js';
 
 // Fire-and-forget client log to server nLogger — never throws
 function _logTool(message, meta = {}) {
@@ -1241,6 +1242,181 @@ const elements = {
 };
 
 // ============================================
+// Runner view — event-driven rendering (PC realign).
+// The runner is the single author of conversation state. These handlers feed
+// the EXISTING renderer from snapshot + live events. send → runnerClient.send;
+// render ← GET /api/chats/:id/events. Tools / delete / edit / regenerate are a
+// follow-up increment (their handlers are stubs here to avoid errors).
+// ============================================
+const runnerViews = new Map(); // chatId -> { es, streaming: { exchangeId, el, content, reasoningContent } }
+
+function _runnerStreaming(chatId) {
+    return runnerViews.get(chatId).streaming;
+}
+
+function _findExchangeByMsgId(conv, messageId) {
+    for (const ex of conv.exchanges) {
+        if (ex._userMsgId === messageId || ex._asstMsgId === messageId || ex._toolMsgId === messageId) return ex;
+    }
+    return null;
+}
+
+function attachRunnerEvents(chatId) {
+    if (runnerViews.has(chatId)) return; // idempotent — background chats keep their stream
+
+    const container = getOrCreateContainer(chatId);
+    const view = { es: null, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '' } };
+    runnerViews.set(chatId, view);
+
+    view.es = runnerClient.attach(chatId, {
+        snapshot(snap) {
+            const conv = activeConversations.get(chatId);
+            if (!conv) return;
+            conv.exchanges = messagesToExchanges(snap.messages || []);
+            if (container.children.length === 0) {
+                buildHistoricalDomForChat(conv, container).then(() => _vsActivateWhenReady(container));
+            }
+            if (snap.lastRun?.context) updateOverallContext(snap.lastRun.context);
+            if (snap.inFlight) _runnerResumeInflight(chatId, snap.inFlight);
+        },
+        'run.start'(d) { _runnerRunStart(chatId, d); },
+        delta(d) { _runnerDelta(chatId, d); },
+        'tool.start'(d) { _runnerToolStart(chatId, d); },
+        'tool.end'(d) { _runnerToolEnd(chatId, d); },
+        'msg.assistant'(d) { _runnerAssistant(chatId, d); },
+        'msg.user'(d) { _runnerUser(chatId, d); },
+        'msg.deleted'(d) { _runnerDeleted(chatId, d); },
+        'msg.variant'(d) { _runnerVariant(chatId, d); },
+        'run.end'(d) { _runnerRunEnd(chatId, d); },
+        error(d) { _runnerError(chatId, d); },
+        'embed.status'(d) { _runnerEmbed(chatId, d); }
+    });
+}
+
+function _runnerUser(chatId, msg) {
+    const conv = activeConversations.get(chatId);
+    if (!conv) return;
+    const exchange = messagesToExchanges([msg])[0];
+    if (!exchange) return;
+    conv.exchanges.push(exchange);
+    renderExchange(exchange, getOrCreateContainer(chatId));
+    _runnerStreaming(chatId).exchangeId = exchange.id;
+}
+
+function _runnerRunStart(chatId, d) {
+    const container = getOrCreateContainer(chatId);
+    const s = _runnerStreaming(chatId);
+    if (s.exchangeId) {
+        container.querySelector(`.chat-message.user[data-exchange-id="${s.exchangeId}"] .user-pending-indicator`)?.classList.remove('visible');
+    }
+    if (!s.el) {
+        s.el = createAssistantElement(s.exchangeId || 'inflight', '', d.model || '');
+        s.el.dataset.isStreaming = 'true';
+        _vsAppendMessage(container, s.el);
+    }
+    s.content = '';
+    s.reasoningContent = '';
+    markChatAsStreaming(chatId, true);
+    updateSendButton();
+    scrollToBottom(container);
+}
+
+function _runnerDelta(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    if (!s.el) return;
+    if (d.content !== undefined) s.content += d.content;
+    if (d.reasoningContent !== undefined) s.reasoningContent += d.reasoningContent;
+    if (s._pending) return;
+    s._pending = true;
+    const el = s.el;
+    setTimeout(() => {
+        s._pending = false;
+        // The run may have ended (s.el nulled) or a new run started — only
+        // render if this element is still the active in-flight one.
+        if (s.el !== el || !el.isConnected) return;
+        updateAssistantContent(el, s.content, s.reasoningContent);
+        const c = getOrCreateContainer(chatId);
+        if (isNearBottom(100, c)) scrollToBottom(c);
+    }, 50);
+}
+
+function _runnerAssistant(chatId, msg) {
+    const conv = activeConversations.get(chatId);
+    const s = _runnerStreaming(chatId);
+    if (conv) {
+        const ex = conv.getExchange(s.exchangeId) || conv.exchanges[conv.exchanges.length - 1];
+        if (ex) {
+            ex.assistant.content = msg.content || '';
+            ex.assistant.reasoning_content = msg.reasoning_content || null;
+            ex.assistant.usage = msg.usage || null;
+            ex.assistant.context = msg.context || null;
+            ex.assistant.streamStats = msg.streamStats || null;
+            ex.assistant.model = msg.model || ex.assistant.model || null;
+            ex.assistant.embedStatus = msg.embedStatus || 'pending';
+            ex.assistant.isComplete = true;
+            ex.assistant.isStreaming = false;
+            ex._asstMsgId = msg.id || null;
+        }
+    }
+    if (s.el) {
+        finalizeAssistantElement(s.el, s.exchangeId, msg.usage, msg.context, msg.streamStats, conv);
+        forceFinalizeMarkdownStream(s.el, msg.content || '', msg.reasoning_content || null);
+    }
+}
+
+function _runnerRunEnd(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    if (d.finishReason === 'aborted' && s.el) {
+        showError(s.el, 'Stopped');
+        forceFinalizeMarkdownStream(s.el, s.content, s.reasoningContent);
+    }
+    if (d.context) updateOverallContext(d.context);
+    markChatAsStreaming(chatId, false);
+    updateSendButton();
+    s.el = null;
+    s.exchangeId = null;
+    renderHistoryList();
+}
+
+function _runnerError(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    if (s.el) {
+        showError(s.el, d.message || 'error');
+        forceFinalizeMarkdownStream(s.el, s.content, s.reasoningContent);
+    }
+}
+
+function _runnerEmbed(chatId, d) {
+    const conv = activeConversations.get(chatId);
+    if (!conv) return;
+    const ex = _findExchangeByMsgId(conv, d.messageId);
+    if (ex) setEmbedStatus(ex.id, d.status, d.embedError || null);
+}
+
+function _runnerResumeInflight(chatId, inFlight) {
+    const conv = activeConversations.get(chatId);
+    const container = getOrCreateContainer(chatId);
+    const s = _runnerStreaming(chatId);
+    const lastEx = conv?.exchanges[conv.exchanges.length - 1];
+    s.exchangeId = lastEx?.id || 'inflight';
+    s.el = createAssistantElement(s.exchangeId, '', inFlight.model || '');
+    s.el.dataset.isStreaming = 'true';
+    _vsAppendMessage(container, s.el);
+    s.content = inFlight.content || '';
+    s.reasoningContent = inFlight.reasoning_content || '';
+    if (s.content || s.reasoningContent) updateAssistantContent(s.el, s.content, s.reasoningContent);
+    markChatAsStreaming(chatId, true);
+    updateSendButton();
+}
+
+// Follow-up increment (tools / delete / edit / regenerate). Stubs avoid errors
+// if a tool or mutation fires before those land.
+function _runnerToolStart(chatId, d) {}
+function _runnerToolEnd(chatId, d) {}
+function _runnerDeleted(chatId, d) {}
+function _runnerVariant(chatId, d) {}
+
+// ============================================
 // Multi-Conversation: DOM Container Management
 // ============================================
 
@@ -1739,7 +1915,6 @@ async function init() {
 
     currentChatId = activeId;
     conversation = new Conversation(`chat-conversation-${currentChatId}`);
-    await conversation.load();
 
     // Cache in activeConversations for multi-conversation support
     activeConversations.set(currentChatId, conversation);
@@ -1803,13 +1978,12 @@ async function init() {
     await setupPresets();
     await loadModels();
 
-    // Restore conversation
+    // Restore conversation (rendering is driven by the runner snapshot handler)
     renderHistoryList();
-    // Create container for the initial chat (renderConversation uses getActiveContainer)
+    // Create container for the initial chat and show it
     const initContainer = getOrCreateContainer(currentChatId);
     initContainer.style.display = 'flex'; // show the active chat
-    renderConversation();
-    connectEmbedEvents(currentChatId);
+    attachRunnerEvents(currentChatId);
 
     // Check gateway status
     checkGatewayStatus();
@@ -2361,7 +2535,7 @@ function setupEventListeners() {
 
     // Send message / Toggle Stop
     elements.sendBtn?.addEventListener('click', (e) => {
-        if (client.hasActiveStream(currentChatId)) {
+        if (runnerViews.get(currentChatId)?.streaming?.el) {
             abortStream();
         } else {
             sendMessage();
@@ -2630,7 +2804,7 @@ When a user attaches an image or other binary, the message text includes an atta
 async function sendMessage() {
     const editor = elements.messageInput;
     const content = editor?.getMarkdown().trim();
-    
+
     // Use the DOM as ground truth — find the VISIBLE chat's ID.
     // currentChatId is a global that can be stale; the visible container
     // is what the user is actually looking at and typing into.
@@ -2640,100 +2814,56 @@ async function sendMessage() {
 
     console.log('%c✉️ SEND  %c→ %c' + sendChatId + ' %c(' + sendModel + ')',
         'font-weight:bold;color:#ffb74d', 'color:#aaa', 'color:#ffb74d', 'color:#666');
-    
-    if ((!content && attachedImages.length === 0) || client.hasActiveStream(sendChatId)) return;
+
+    if ((!content && attachedImages.length === 0)) return;
     if (!sendModel) {
         nui.components.dialog.alert('Model Required', 'Please select a model first.');
         return;
     }
-    
+
     // Clear welcome message if present (use sendChatId's container, not getActiveContainer)
     const sendContainer = getOrCreateContainer(sendChatId);
     const welcome = sendContainer?.querySelector('.welcome-message');
     if (welcome) welcome.remove();
-    
-    // Add user message to conversation
-    currentExchangeId = await sendConv.addExchange(content, [...attachedImages]);
+
+    // Upload attachments (base64 → bucket) client-side; the runner references the
+    // resulting bucket URLs. imageStore.save keeps the view's upload path (the
+    // runner's stored form expects bucket refs, not inline base64).
+    let attachments = null;
+    if (attachedImages.length > 0) {
+        const saved = (await imageStore.save('send-' + Date.now(), attachedImages)) || [];
+        attachments = attachedImages.map((att, i) => ({
+            name: att.name,
+            type: att.type,
+            url: saved[i]?.url || att.dataUrl,
+            _file: saved[i]?._file || null
+        }));
+    }
 
     // Track the used model for this chat
     updateChatModel(sendChatId, sendModel);
 
     // Update chat title if it's the first message
-    if (sendConv.length === 1 && content) {
+    if (sendConv.length === 0 && content) {
         updateChatTitle(sendChatId, content);
     }
 
-    // Check vision capabilities before sending
-    const hasImages = attachedImages.length > 0;
-    const modelSupportsVision = currentModelSupportsVision();
-    const visionToolsAvailable = areVisionToolsAvailable();
-    
-    // Validate: if images attached but no vision support
-    if (hasImages && !modelSupportsVision && !visionToolsAvailable) {
-        nui.components.dialog.alert(
-            'No Vision Support',
-            'The selected model does not support vision, and no MCP vision tools are available. Please remove images or select a vision-capable model.'
-        );
-        return;
-    }
-    
-    // Determine if we should use MCP vision (only when toggle is ON and tools available)
-    const shouldUseMcpVision = hasImages && visionToolsAvailable && useVisionAnalysis;
-    
-    // Store images for MCP vision processing before clearing
-    const imagesForMcpVision = shouldUseMcpVision ? [...attachedImages] : [];
-    
     // Clear input and attachments
     editor.setMarkdown('');
     sessionStorage.removeItem('chat-draft');
     clearAttachments();
     updateVisionToggleVisibility();
-    
-    // Render user message into the correct chat's container
-    renderExchange(sendConv.getExchange(currentExchangeId), sendContainer);
-    
-    // MCP VISION: If toggle is ON and tools available, create vision sessions BEFORE sending to model
-    // This happens AFTER user message is rendered, BEFORE LLM responds
-    if (shouldUseMcpVision) {
-        let visionSucceeded = false;
-        try {
-            const visionResult = await autoCreateVisionSessions(currentExchangeId, imagesForMcpVision, sendChatId);
 
-            if (visionResult && visionResult.analysis) {
-                // Append analysis directly to user message — becomes natural
-                // conversation history, no tool_calls backfill, no thinking_signature issues.
-                // Works for image-only messages too (empty content → marker becomes the content).
-                const ex = sendConv.getExchange(currentExchangeId);
-                if (ex?.user) {
-                    ex.user.content = (ex.user.content ? ex.user.content + '\n\n' : '')
-                        + `[Auto-vision: ${visionResult.sessionId}]\n${visionResult.analysis}`;
-                    visionSucceeded = true;
-                }
-            }
-
-            // Only clear attachments if vision analysis actually produced a result.
-            // Otherwise leave images attached so the model can still use direct vision
-            // as a fallback.
-            if (visionSucceeded) {
-                const ex = sendConv.getExchange(currentExchangeId);
-                if (ex?.user?.attachments) {
-                    ex.user.attachments = [];
-                }
-                sendConv.save();
-            }
-        } catch (err) {
-            console.error('[Vision] MCP vision session creation failed:', err);
-            nui.components.dialog.alert(
-                'MCP Vision Error',
-                `Failed to analyze images: ${err.message}. The model may not be able to process them.`
-            );
-            // Continue anyway - model might still handle it if it supports vision
-        }
+    // Send — the runner appends the user message (broadcasts msg.user) and starts
+    // the run (run.start / delta / msg.assistant); rendering is event-driven.
+    const res = await runnerClient.send(sendChatId, {
+        content,
+        attachments,
+        model: sendModel
+    });
+    if (!res.ok) {
+        nui.components.dialog.alert('Send failed', res.data?.error || `send failed (${res.status})`);
     }
-    
-    // Start streaming response — pass sendChatId so streamResponse locks to the correct chat
-    // even if the user switched tabs while vision processing was in flight
-    await streamResponse(currentExchangeId, sendChatId);
 }
 
 // ============================================
@@ -5632,7 +5762,7 @@ async function startNewChat() {
     }
 
     renderHistoryList();
-    renderConversation(); // container is empty, will show welcome
+    attachRunnerEvents(currentChatId); // snapshot (empty) shows the welcome
 
     // Auto-focus input
     setTimeout(() => {
@@ -5674,14 +5804,15 @@ async function switchChat(targetChatId) {
     // 1. Get or create the container for this chat (creates DOM node if first time)
     const targetContainer = getOrCreateContainer(targetChatId);
 
-    // 2. Load conversation from cache or backend
+    // 2. Load conversation (runner-owned) — attach to the event stream; the
+    // snapshot event populates + renders. No client-side load()/persistence.
     let conv = activeConversations.get(targetChatId);
     if (!conv) {
         conv = new Conversation(`chat-conversation-${targetChatId}`);
-        await conv.load();
         activeConversations.set(targetChatId, conv);
     }
     conversation = conv;
+    attachRunnerEvents(targetChatId);
 
     // Per-chat chunk-transform flag (chunk-store: lossless payload dedup).
     // Lives on the session doc; consulted by getMessagesForApi at send time.
@@ -5706,10 +5837,7 @@ async function switchChat(targetChatId) {
         console.warn('[Session] switchChat MISSING sessionId for chatId:', targetChatId);
     }
 
-    // 4. Build historical DOM if this is the first time viewing this session
-    if (targetContainer.children.length === 0) {
-        await buildHistoricalDomForChat(conversation, targetContainer);
-    }
+    // 4. (Removed — the runner snapshot handler builds the historical DOM.)
 
     // 5. Toggle container visibility — all other streams continue in their hidden containers
     for (const [id, container] of chatContainers.entries()) {
@@ -5766,8 +5894,8 @@ async function switchChat(targetChatId) {
         chatTabList?.update(true);
     }
 
-    // Start embed polling for the newly active chat
-    connectEmbedEvents(targetChatId);
+    // Embed status now arrives on the conversation stream (embed.status event);
+    // the separate /api/embed-events channel is retired for the runner view.
 
     console.log('%c📋 DISPLAY %c' + (chatInfo?.title || 'New Chat') + ' %c' + targetChatId,
         'font-weight:bold;color:#4fc3f7', 'color:#aaa', 'color:#666');
@@ -6614,7 +6742,7 @@ async function openChatOptions(chatId) {
 function updateSendButton() {
     const btn = elements.sendBtn?.querySelector('button');
     if (btn) {
-        const chatIsStreaming = client.hasActiveStream(currentChatId);
+        const chatIsStreaming = !!runnerViews.get(currentChatId)?.streaming?.el;
         btn.innerHTML = chatIsStreaming
             ? '<nui-icon name="close"></nui-icon>'
             : '<nui-icon name="send"></nui-icon>';
@@ -6622,8 +6750,8 @@ function updateSendButton() {
 }
 
 function abortStream() {
-    // Abort only the active chat's stream, not background chats
-    client.abortStream(currentChatId);
+    // Abort only the active chat's run (runner-owned; background chats unaffected)
+    runnerClient.abort(currentChatId).catch(() => {});
 }
 
 // ============================================

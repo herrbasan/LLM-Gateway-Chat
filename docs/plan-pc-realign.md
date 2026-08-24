@@ -3,7 +3,7 @@
 **Date:** 2026-08-24
 **Branch:** `bff-rework` · **Dev port:** :8082 · **Live:** :8080 (`D:\SRV`)
 **Supersedes:** the "build a new view" interpretation of PC (the `view/` folder). Read
-[handover-2026-08-24-session2.md](handover-2026-08-24-session2.md) for prior state.
+[handover-2026-08-24-session3.md](handover-2026-08-24-session3.md) for the landed state.
 **Design authority:** [architecture-conversation-runner.md](architecture-conversation-runner.md) · **Map:** [codebase-survey-bff.md](codebase-survey-bff.md) · **Tangle detail:** [refactor-deep-dive-report.md](refactor-deep-dive-report.md)
 
 ---
@@ -74,9 +74,11 @@ browser→upstream channels and every callsite).
   `{messages, chunkTable}`), `system-prompt` (byte-faithful, archive block + memory reminder on),
   `mcp-pool` (per-user, dual-path JSON-RPC, storage origin), `internal-tools` (archive/search/
   browser_fetch/attachment_save/retire), delete + edit routes, `/api/models` proxy.
-- **`view/` = DETOUR.** A minimal UI I built from scratch before this direction was clear. It is a
-  disposable **reference/harness** for the runner's event/route contracts — NOT the product. Do
-  NOT extend it.
+- **The rewire is LANDED (session 3).** `chat/js/runner-client.js` (SSE attach + REST) and
+  `messagesToExchanges()` (stored→exchange projection) feed the existing renderer. `switchChat` /
+  `init` / `startNewChat` attach to `/events`; `sendMessage` → `/send`; event handlers drive the
+  renderer. Happy path (load + send + stream + persist) E2E-verified on :8082. The old `view/`
+  folder was deleted — a disposable harness, superseded by the real rewire.
 
 ## Events the runner emits (the contract the existing UI must consume)
 
@@ -102,10 +104,9 @@ Rest endpoints: `POST /api/chats/:id/send`, `POST /api/chats/:id/abort`,
 
 ## Next steps
 
-1. Trace the seam in `chat.js`: where it builds `requestBody` and calls `GatewayClient`
-   (`streamResponse` ~2976, `sendMessage` ~2820s) and how it renders a message
-   (`appendChatMessage` / the `.chat-message` builder). Map exactly what feeds the renderer.
-2. Rewire send to `POST /api/chats/:id/send`; feed the renderer from `/api/chats/:id/events`.
-3. Verify the existing UI renders runner data identically (visual + interaction parity, not
-   just DOM). Use `view/` as the behavioral reference for the event contract.
-4. Only then retire orchestration channel by channel.
+1. Tool rendering — implement `_runnerToolStart` / `_runnerToolEnd` (tools already run server-side).
+2. Move delete / edit / regenerate / variant to `runnerClient` (single-author); add a runner
+   regenerate op if `switchVariant` doesn't cover it.
+3. Verify attachments round-trip, `embed.status` mapping, and server-side vision.
+4. Retire dead orchestration channel by channel (`streamResponse`, `handleToolExecution`, local
+   tools, vision pipeline, `conversation.js` persistence, then `client-sdk.js` / browser `mcp-client.js`).

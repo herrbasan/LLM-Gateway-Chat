@@ -202,12 +202,14 @@ runner's tool selection.
 
 ## 5. The view
 
-New client, grown alongside the old one. It is: conversation view (snapshot + events,
-rendered with NUI — markdown, thinking blocks, images, tool UI), input + attachments
-(existing bucket PUT upload), sidebar (existing history/search REST), TTS playback
-(nSpeech SDK stays browser-side — audio output is inherently local), settings UI.
+The EXISTING `chat/` UI is the view (PC realign 2026-08-24 — rewired in place, not rebuilt).
+It is: conversation view (snapshot + events rendered with NUI — markdown, thinking blocks,
+images, tool UI), input + attachments (existing bucket PUT upload), sidebar (existing
+history/search REST), TTS playback (nSpeech SDK stays browser-side — audio output is
+inherently local), settings UI. The renderer is load-bearing and untouched; only the data
+plumbing changed (send → `/send`, render ← `/events`).
 
-It is NOT: a state machine, a persistence layer, a gateway client, an MCP client.
+It is NOT (anymore): a state machine, a persistence layer, a gateway client, an MCP client.
 
 Build the view against five cross-process contracts, not the old client's incidental
 formats (deep-dive §3.7):
@@ -239,9 +241,9 @@ spec's open question: **same backend machinery, own view.**
   the conversation with the last completed state. Acceptable (matches retrofit plan).
 - **Gateway non-2xx before streaming:** runner broadcasts `error` with the upstream
   status + body; nothing persisted. The view renders it like today's crash-self-heal.
-- **Old client vs. new view on the same conversation:** both append through the same
-  store and the runner lazy-loads, so sequential use is fine. Simultaneous use is a
-  don't — documented, not enforced (dev-phase concern only).
+- **Two tabs/devices on the same conversation:** both attach to the same runner; the
+  runner lazy-loads and is the single author, so sequential use is fine. Simultaneous
+  use is a don't — documented, not enforced (dev-phase concern only).
 - **Concurrent sends:** no guard — appends are just added prompts (same user, other
   device). Runs never overlap; pending messages queue and batch into the follow-up run.
 - **Orphaned runs** (all views detached): the run completes and persists regardless —
@@ -281,7 +283,7 @@ is a separate batch concern, out of scope here.
 |-------|-------------|------------|
 | **A — runner core** | runner.js, event stream, send/abort routes, gateway call, shared append+embed helper, ported api-view + chunk-view. Tools disabled. | Kill the tab mid-stream → reopen → generation still running or already persisted. Attach from two browsers → both live. |
 | **B — tool port** | server MCP pool, internal archive/storage tools, tool events, server-side recursion | A tool-chain conversation runs with the browser closed between calls. |
-| **C — view parity** | new view from minimal to parity checklist | Daily-driver the new view for a week without touching the old one. |
+| **C — view parity** | rewire the existing `chat/` UI to the runner (snapshot + events); tool/delete/edit/regenerate/variant; retire orchestration | Daily-driver `chat/` against the runner for a week; the old gateway/MCP client code is gone. |
 | **D — cutover** | old client retired (or kept read-only), dead code removed (client-sdk.js, browser mcp-client.js, conversation state machine), arena re-based on runner, TTS proxy | `chat/js/` shrinks to a view. |
 
 Then **P2** (nPort cutover) and **P3** (multi-user enforcement) as already specced —

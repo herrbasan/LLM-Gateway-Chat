@@ -21,7 +21,7 @@
 
 Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM Gateway for chat streaming and embeddings; persistence in embedded Rust DBs (nDB documents, nVDB vectors).
 
-**The refactor:** today the browser orchestrates gateway, MCP, TTS, and persistence directly — eight browser→upstream channels (spec §1). Target: the ConversationRunner architecture — conversations are server-side sessions, the browser is a disposable attach/detach view, persistence is a side effect of the runner's traffic. Until phases land, the code is the client-centric architecture below.
+**The refactor:** today the browser orchestrates gateway, MCP, TTS, and persistence directly — eight browser→upstream channels (spec §1). Target: the ConversationRunner architecture — conversations are server-side sessions, the browser is a disposable attach/detach view, persistence is a side effect of the runner's traffic. **PC realign has LANDED (2026-08-24):** the existing `chat/` UI is now wired to the runner (`send` → `/send`, render ← `/events`); orchestration retires channel by channel (see `docs/plan-pc-realign.md`, `docs/handover-2026-08-24-session3.md`).
 
 ## Technology Stack
 
@@ -53,12 +53,13 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 
 | Module | Role |
 |--------|------|
-| `chat/js/chat.js` | UI controller: events, rendering, streaming, archive tools, login, presets, admin, embed-status SSE |
-| `chat/js/client-sdk.js` | `GatewayClient` — SSE-over-REST to gateway, async-iterator streaming, per-chat abort |
+| `chat/js/chat.js` | UI controller + runner event handlers (`_runner*`): rendering, login, presets, admin; send → `/send`, render ← `/events` |
+| `chat/js/runner-client.js` | same-origin SSE attach + REST (`send`/`abort`/`switchVariant`/`deleteMessage`/`editMessage`) — the view's only backend for a runner-owned conversation |
+| `chat/js/client-sdk.js` | `GatewayClient` — SSE-over-REST to gateway. **Retiring** (the runner owns the gateway call) |
 | `chat/js/api-client.js` | `BackendClient` — same-origin REST (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`) |
-| `chat/js/conversation.js` | Message history, versioning, API formatting, `thinking_signature` propagation |
+| `chat/js/conversation.js` | `messagesToExchanges` (stored→exchange projection). State machine / persistence / API formatting **retiring** |
 | `chat/js/chat-history.js` | Multi-conversation management, backend CRUD, localStorage fallback |
-| `chat/js/mcp-client.js` | MCP SSE connections, tool registry, in-browser tool execution (P1 target) |
+| `chat/js/mcp-client.js` | MCP SSE connections, tool registry. **Retiring** — tools run server-side in the runner |
 | `chat/js/file-store.js` | Attachment upload → `/api/buckets/images/…`, returns lightweight URLs |
 | `chat/js/preview.js`, `preview-url.js`, `chunk-view.js` | Preview pane + chunk inspection |
 | `chat-arena/js/arena.js` | Arena orchestrator — multiple direct `GatewayClient` instances (P1 target) |
@@ -70,7 +71,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 - **Data model:** one conversation document per session (`_type: 'conversation'`, inline `messages` array with per-message `embedStatus`). Vectors in nVDB keyed by message ID with `{ chatId, msgIdx }` payload. Users in `users_db` (scrypt-hashed, per-user `dbPath` isolation) — reconciled with nPort identity at P3.
 - **Embedding pipeline** (server-side, stays): fire-and-forget after message POST, startup reconciliation nDB↔nVDB, SSE `embed-status` events, retry with escalating backoff.
 - **Image lifecycle:** base64 intercepted client-side → bucket upload → lightweight URL in message JSON. On chat delete, refs are garbage-collected via `db.releaseFile` (orphans → `.trash`).
-- **Tool execution is currently browser-side** (OpenAI `tool_calls` protocol, aggregated in `chat.js`, executed via `mcp-client.js`; archive tools go to backend REST). Phase PB moves execution into the server-side runner.
+- **Tool execution is server-side** (runner `mcp-pool` + `internal-tools`); the view renders `tool.start`/`tool.end` events. The browser no longer runs tools, assembles system prompts, or orchestrates the gateway — it is a view over the runner's snapshot + event stream.
 
 ## Security
 
