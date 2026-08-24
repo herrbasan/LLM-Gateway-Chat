@@ -1265,7 +1265,7 @@ function attachRunnerEvents(chatId) {
     if (runnerViews.has(chatId)) return; // idempotent — background chats keep their stream
 
     const container = getOrCreateContainer(chatId);
-    const view = { es: null, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '' } };
+    const view = { es: null, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '', toolBubbles: new Map() } };
     runnerViews.set(chatId, view);
 
     view.es = runnerClient.attach(chatId, {
@@ -1273,9 +1273,10 @@ function attachRunnerEvents(chatId) {
             const conv = activeConversations.get(chatId);
             if (!conv) return;
             conv.exchanges = messagesToExchanges(snap.messages || []);
-            if (container.children.length === 0) {
-                buildHistoricalDomForChat(conv, container).then(() => _vsActivateWhenReady(container));
-            }
+            // Full re-render (initial attach OR post-mutation refresh/edit).
+            _vsDeactivate(container);
+            container.replaceChildren();
+            buildHistoricalDomForChat(conv, container).then(() => _vsActivateWhenReady(container));
             if (snap.lastRun?.context) updateOverallContext(snap.lastRun.context);
             if (snap.inFlight) _runnerResumeInflight(chatId, snap.inFlight);
         },
@@ -1409,12 +1410,147 @@ function _runnerResumeInflight(chatId, inFlight) {
     updateSendButton();
 }
 
-// Follow-up increment (tools / delete / edit / regenerate). Stubs avoid errors
-// if a tool or mutation fires before those land.
-function _runnerToolStart(chatId, d) {}
-function _runnerToolEnd(chatId, d) {}
-function _runnerDeleted(chatId, d) {}
-function _runnerVariant(chatId, d) {}
+// Tool rendering — the runner executes tools server-side and broadcasts
+// tool.start / tool.end. The view renders a bubble per tool call; the follow-up
+// assistant (post-tool) keys to the LAST tool exchange, matching
+// messagesToExchanges grouping. Delete/edit/regenerate are a later follow-up.
+
+function _runnerToolStart(chatId, d) {
+    const conv = activeConversations.get(chatId);
+    const container = getOrCreateContainer(chatId);
+    const s = _runnerStreaming(chatId);
+    if (!conv) return;
+
+    const exchange = {
+        id: 'ex_' + (Date.now() + Math.random()),
+        timestamp: Date.now(),
+        type: 'tool',
+        _toolMsgId: null,
+        tool: { name: d.name || 'unknown', args: d.args || {}, status: 'pending', content: '', images: [] },
+        user: { role: 'user', content: '', attachments: [] },
+        assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
+    };
+    conv.exchanges.push(exchange);
+
+    const el = _runnerToolBubble(d.name, d.args);
+    el.dataset.exchangeId = exchange.id;
+    el.dataset.mcpToolName = d.name || '';
+    _vsAppendMessage(container, el);
+    scrollToBottom(container);
+
+    s.toolBubbles.set(d.toolCallId, { el, exchange });
+}
+
+function _runnerToolEnd(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    const entry = s.toolBubbles.get(d.toolCallId);
+    if (!entry) return;
+
+    const { el, exchange } = entry;
+    const status = d.status === 'error' ? 'error' : 'success';
+    exchange.tool.status = status;
+    exchange.tool.content = d.resultMessage || '';
+    exchange.tool.images = d.resultImages || [];
+    exchange._toolMsgId = d.toolMessageId || null;
+    // The follow-up assistant (post-tool) keys to this tool exchange.
+    s.exchangeId = exchange.id;
+
+    _runnerFinalizeTool(el, status, d.resultMessage || '', d.resultImages || []);
+    s.toolBubbles.delete(d.toolCallId);
+}
+
+// Build a tool bubble in "Running" state (matches the retired handleToolExecution
+// markup). The delete button is deferred to the delete/edit follow-up.
+function _runnerToolBubble(name, args) {
+    const el = document.createElement('div');
+    el.className = 'chat-message tool';
+    el.innerHTML = `
+        <div class="tool-bubble">
+            <div class="message-header tool-header">
+                <nui-icon name="extension"></nui-icon>
+                <strong class="tool-title">${formatToolDisplayName(name, args)}</strong>
+                <nui-badge variant="primary" class="tool-status">Running</nui-badge>
+            </div>
+            <div class="tool-notifications" style="display: block;">
+                <span class="tool-spinner"></span> Running…
+            </div>
+            <div class="tool-images" style="display: none;"></div>
+            <div class="message-content tool-payload" style="display: none;">
+                <div class="tool-section-title">Arguments</div>
+                <div class="tool-args">${jsonStringifyForDisplay(args)}</div>
+                <div class="tool-section-title">Execution Result</div>
+                <div class="tool-result"></div>
+            </div>
+        </div>
+    `;
+    el.querySelector('.message-header').addEventListener('click', (e) => {
+        if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
+        const payloadBox = el.querySelector('.tool-payload');
+        payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none';
+    });
+    _decoratePreviewToolButton(el, name, args);
+    return el;
+}
+
+function _runnerFinalizeTool(el, status, result, images) {
+    const isError = status === 'error';
+    el.querySelector('.tool-status').setAttribute('variant', isError ? 'danger' : 'success');
+    el.querySelector('.tool-status').innerHTML = isError ? 'Failed' : 'Success';
+    el.querySelector('.tool-notifications').style.display = 'none';
+    // textContent (not innerHTML) — tool content can contain arbitrary markup
+    const resultEl = el.querySelector('.tool-result');
+    resultEl.innerHTML = isError ? '<strong>Error:</strong> ' : '<strong>Result:</strong><br>';
+    resultEl.appendChild(document.createTextNode(result || ''));
+    if (isError) {
+        const notif = el.querySelector('.tool-notifications');
+        notif.style.display = 'block';
+        notif.innerHTML = '<span class="tool-error-text"></span> <span class="tool-error-hint">— click for details</span>';
+        notif.querySelector('.tool-error-text').textContent = toolErrorSummary(result || '');
+    }
+    if (images && images.length > 0) {
+        const imagesDiv = el.querySelector('.tool-images');
+        imagesDiv.style.display = 'block';
+        imagesDiv.innerHTML = images.map(img => `<img src="${img}" class="tool-image" />`).join('');
+    }
+}
+
+// Delete / edit / variant (single-author through the runner). Regenerate needs a
+// runner method (not yet built) — deferred.
+function _runnerDeleteMessage(exchange, role) {
+    const msgId = role === 'assistant' ? exchange?._asstMsgId
+        : role === 'tool' ? exchange?._toolMsgId
+        : exchange?._userMsgId;
+    if (!msgId) return;
+    runnerClient.deleteMessage(currentChatId, msgId).catch(() => {});
+}
+
+function _runnerDeleted(chatId, d) {
+    // Re-render from a fresh snapshot (message removal re-groups exchanges).
+    setTimeout(() => _runnerRefresh(chatId), 0);
+}
+
+function _runnerVariant(chatId, d) {
+    const conv = activeConversations.get(chatId);
+    if (!conv) return;
+    const ex = _findExchangeByMsgId(conv, d.messageId);
+    if (!ex) return;
+    ex.assistant.content = d.variant?.content || '';
+    ex.assistant.reasoning_content = d.variant?.reasoning_content || null;
+    ex.assistant.currentVersion = d.currentVersion ?? 0;
+    const container = getOrCreateContainer(chatId);
+    const el = container.querySelector(`.chat-message.assistant[data-exchange-id="${ex.id}"]`);
+    if (el) {
+        updateAssistantContent(el, d.variant?.content || '', d.variant?.reasoning_content || null);
+        updateVersionControls(el, ex.id);
+    }
+}
+
+function _runnerRefresh(chatId) {
+    const v = runnerViews.get(chatId);
+    if (v?.es) { try { v.es.close(); } catch {} }
+    runnerViews.delete(chatId);
+    attachRunnerEvents(chatId);
+}
 
 // ============================================
 // Multi-Conversation: DOM Container Management
@@ -1615,8 +1751,7 @@ function buildExchangeElement(exchange) {
 
         toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
             e.stopPropagation();
-            conversation.deleteExchange(exchange.id);
-            _vsRemoveExchangeDom(toolEl, exchange.id);
+            _runnerDeleteMessage(exchange, 'tool');
         });
 
         toolEl.querySelector('.message-header').addEventListener('click', (e) => {
@@ -1694,8 +1829,7 @@ function buildExchangeElement(exchange) {
     `;
     userEl.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchange.id, 'user'));
     userEl.querySelector('.delete-message')?.addEventListener('click', () => {
-        conversation.deleteExchange(exchange.id);
-        _vsRemoveExchangeDom(userEl, exchange.id);
+        _runnerDeleteMessage(exchange, 'user');
     });
 
     // Set embed status directly on detached element (not in DOM yet)
@@ -4289,8 +4423,7 @@ function renderExchange(exchange, targetContainer = null) {
 
         toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
             e.stopPropagation();
-            conversation.deleteExchange(exchange.id);
-            _vsRemoveExchangeDom(toolEl, exchange.id);
+            _runnerDeleteMessage(exchange, 'tool');
         });
 
         toolEl.querySelector('.message-header').addEventListener('click', (e) => {
@@ -4372,8 +4505,7 @@ function renderExchange(exchange, targetContainer = null) {
     // Bind user message action buttons
     userEl.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchange.id, 'user'));
     userEl.querySelector('.delete-message')?.addEventListener('click', () => {
-        conversation.deleteExchange(exchange.id);
-        _vsRemoveExchangeDom(userEl, exchange.id);
+        _runnerDeleteMessage(exchange, 'user');
     });
 
     if (container) _vsAppendMessage(container, userEl);
@@ -4467,8 +4599,7 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
     el.querySelector('.copy-message')?.addEventListener('click', (e) => copyMessageToClipboard(exchangeId, e.currentTarget));
     el.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchangeId, 'assistant'));
     el.querySelector('.delete-message')?.addEventListener('click', () => {
-        conversation.deleteExchange(exchangeId);
-        _vsRemoveExchangeDom(el, exchangeId);
+        _runnerDeleteMessage(conversation.getExchange(exchangeId), 'assistant');
     });
 
     return el;
@@ -5547,41 +5678,18 @@ function toggleTts(exchangeId, el) {
 }
 
 async function regenerate(exchangeId) {
-    if (client.hasActiveStream(currentChatId)) return;
-    
-    conversation.regenerateResponse(exchangeId);
-
-    // Remove old assistant element
-    const oldEl = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
-    if (oldEl) {
-        oldEl.querySelector('.message-content').innerHTML = '';
-        oldEl.querySelector('.streaming-indicator').classList.add('visible');
-        oldEl.querySelector('.message-actions').classList.remove('visible');
-        // WI-2: height change detected by the frame loop. If the element is
-        // off-screen (detached), the change is invisible anyway — offsets
-        // reconcile when the user scrolls back and the loop re-attaches it.
-        const container = oldEl.closest('.conversation-container');
-        if (container) _vsWake(container);
-    }
-
-    // Stream new response — pass currentChatId to lock to the correct chat
-    currentExchangeId = exchangeId;
-    await streamResponse(exchangeId, currentChatId);
+    // Regenerate needs a runner method (append a variant + re-run the turn) —
+    // not built yet. Deferred; the button is a no-op until then.
+    console.warn('Regenerate not yet supported by the runner.');
 }
 
 function switchVersion(exchangeId, direction) {
-    const directionKey = direction === 'prev' ? 'prev' : 'next';
-        if (conversation.switchVersion(exchangeId, directionKey)) {
-        const exchange = conversation.getExchange(exchangeId);
-        const el = document.querySelector(`.chat-message.assistant[data-exchange-id="${exchangeId}"]`);
-        if (el) {
-            updateAssistantContent(el, exchange.assistant.content, exchange.assistant.reasoning_content);
-            updateVersionControls(el, exchangeId);
-            finalizeAssistantElement(el, exchangeId);
-            // WI-2: height change detected by the frame loop (updateAssistantContent
-            // calls _vsWake via its container lookup).
-        }
-    }
+    const exchange = conversation.getExchange(exchangeId);
+    const msgId = exchange?._asstMsgId;
+    if (!msgId) return;
+    runnerClient.switchVariant(currentChatId, { messageId: msgId, direction }).catch((err) => {
+        console.error('Variant switch failed:', err);
+    });
 }
 
 async function copyMessageToClipboard(exchangeId, btn) {
@@ -5697,35 +5805,17 @@ function commitEdit(exchangeId, role, newContent, editConv, editChatId) {
     if (!exchange) return;
 
     if (role === 'user') {
-        // 1. Update content with timestamp
-        const timestamp = conv._formatTimestamp(new Date(exchange.timestamp));
-        exchange.user.content = `${timestamp} ${newContent}`;
-
-        // 2. Sync full state (content changed in-place, not append) and render
-        conv._syncFullState();
-        renderConversation();
+        const msgId = exchange._userMsgId;
+        if (!msgId) return;
+        // Single-author edit: the runner truncates after + re-runs + broadcasts a
+        // full snapshot (which this view re-renders). No client-side persistence.
+        runnerClient.editMessage(editChatId, msgId, newContent).catch((err) => {
+            console.error('Edit failed:', err);
+        });
     } else {
-        // 1. Update content for assistant with timestamp
-        const timestamp = conv._formatTimestamp();
-        const contentWithTimestamp = `${timestamp} ${newContent}`;
-        exchange.assistant.content = contentWithTimestamp;
-
-        // Update the current version to match
-        if (exchange.assistant.versions && exchange.assistant.versions.length > 0) {
-            const currentVersionObj = exchange.assistant.versions[exchange.assistant.currentVersion] || exchange.assistant.versions[0];
-            if (currentVersionObj) {
-                currentVersionObj.content = contentWithTimestamp;
-            }
-        }
-
-        // 2. Truncate conversation downstream
-        conv.truncateAfter(exchangeId);
-
-        // 3. Save manually since we aren't streaming
-        conv.save();
-
-        // 4. Render wipes downstream
-        renderConversation();
+        // Assistant edit is not supported by the runner (only user messages are
+        // editable server-side). Deferred — see handover.
+        console.warn('Assistant message edit not yet supported by the runner.');
     }
 }
 

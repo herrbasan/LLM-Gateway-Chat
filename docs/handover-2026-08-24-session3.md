@@ -39,17 +39,26 @@ These are the contract; do not change them while completing the view side.
 
 ## Still open (follow-ups, in order)
 
-1. **Tool rendering** — `_runnerToolStart` / `_runnerToolEnd` are stubs. Tools already run
-   server-side; the view just needs to render the `tool.start`/`tool.end` bubbles.
-2. **Delete / edit / regenerate / variant** — still on the old client path. Move them to
-   `runnerClient.deleteMessage` / `editMessage` / `switchVariant` (single-author). Regenerate
-   needs a runner route — confirm `switchVariant` semantics or add a regenerate op.
-3. **Attachments / `embed.status` / vision** — attachment upload is wired into `sendMessage`
+1. **Regenerate + assistant-edit** — the runner has no regenerate method (append a variant +
+   re-run the turn) and no assistant-edit (only user messages are editable). `regenerate` and
+   assistant `commitEdit` are currently no-ops (`console.warn`). Build the runner methods, then
+   wire `regenerate` and assistant edit.
+2. **Attachments / `embed.status` / vision** — attachment upload is wired into `sendMessage`
    (`imageStore.save` → bucket refs → `/send`); verify round-trip. `_runnerEmbed` maps
    `embed.status` → exchange. Vision is now server-side (the client vision pipeline retired).
-4. **Retire dead orchestration** — `streamResponse`, `handleToolExecution`, `executeLocalTool`,
+3. **Retire dead orchestration** — `streamResponse`, `handleToolExecution`, `executeLocalTool`,
    the vision pipeline, `conversation.js` persistence methods (`_syncMessage`/`_syncFullState`/
    `save`), then `client-sdk.js` and browser `mcp-client.js`, channel by channel.
+
+## Landed since the first cut (verified E2E on :8082)
+
+- **Tool rendering** — `_runnerToolStart`/`_runnerToolEnd` + `_runnerToolBubble`/`_runnerFinalizeTool`
+  render `tool.start`/`tool.end` bubbles (Running → Success/Failed, args/result/images). The
+  follow-up assistant keys to the LAST tool exchange (matches `messagesToExchanges` grouping).
+- **Delete / edit / variant** — routed through the runner (single-author). Delete → `msg.deleted` →
+  `_runnerRefresh` (re-attach → snapshot re-render). Edit → runner broadcasts `snapshot` → re-render
+  + re-run. Variant → `msg.variant` → local content update. The snapshot handler now always
+  re-renders (initial attach AND post-mutation).
 
 ## Runner event contract (what the view consumes)
 
