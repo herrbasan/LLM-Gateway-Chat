@@ -11,6 +11,7 @@
 const convStore = require('./conversation-store');
 const { buildApiMessages } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
+const mcpPool = require('./mcp-pool');
 
 let DEPS = null;
 // deps = { gatewayUrl, gatewayKey, publicOrigin, embedMessageAsync, log, getInstructions, idleMs }
@@ -192,9 +193,23 @@ class Runner {
     }
 
     async runLoop() {
-        while (this.pendingSends > 0) {
-            this.pendingSends = 0; // batch: one run covers everything appended since
-            await this.runOnce();
+        let more = this.pendingSends > 0;
+        this.pendingSends = 0;
+        let hops = 0;
+        while (more) {
+            const toolChain = await this.runOnce();
+            if (toolChain) {
+                hops++;
+                if (hops >= 12) {
+                    DEPS.log().warn('Runner tool-hop cap reached', { chatId: this.conversationId, hops }, 'Runner');
+                    this.broadcast('error', { code: 'tool-hop-cap', message: 'Tool chain stopped after 12 hops.' });
+                    break;
+                }
+                more = true;
+                continue;
+            }
+            if (this.pendingSends > 0) { this.pendingSends = 0; more = true; }
+            else more = false;
         }
     }
 
@@ -244,13 +259,22 @@ class Runner {
                 log: DEPS.log()
             });
 
+            // PB: advertise the user's MCP tools (pool auto-connects lazily)
+            let tools = [];
+            try {
+                tools = await mcpPool.getForUser(this.user, this.dbInstance).getFormattedTools();
+            } catch (e) {
+                DEPS.log().warn('MCP pool unavailable', { chatId: this.conversationId, error: e.message }, 'Runner');
+            }
+            this._toolsAdvertised = tools.length > 0;
+
             const resp = await fetch(`${DEPS.gatewayUrl}/v1/chat/completions`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     ...(DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {})
                 },
-                body: JSON.stringify({ model, messages: apiMessages, stream: true, session_id: this.conversationId, ...(this.generationParams || {}) }),
+                body: JSON.stringify({ model, messages: apiMessages, stream: true, session_id: this.conversationId, ...(tools.length ? { tools } : {}), ...(this.generationParams || {}) }),
                 signal: this.inFlight.controller.signal
             });
             if (!resp.ok) {
@@ -270,7 +294,69 @@ class Runner {
                 outcome = 'error';
             }
         }
+        const f = this.inFlight;
         await this.endRun(outcome);
+        if (outcome === 'tool_calls' && this._toolsAdvertised && f) {
+            return await this.executeToolCalls(f); // true → runLoop continues immediately
+        }
+        return false;
+    }
+
+    // PB: execute the run's tool calls server-side, persist each tool message
+    // (single author), broadcast tool.start/tool.end. Returns true when at least
+    // one tool ran (the runLoop then issues the follow-up gateway request).
+    async executeToolCalls(f) {
+        const toolCalls = f.toolCalls.filter(Boolean);
+        if (toolCalls.length === 0) return false;
+        const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        let executed = false;
+        for (const tc of toolCalls) {
+            let args = {};
+            try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
+            DEPS.log().info('Runner tool call', { chatId: this.conversationId, tool: tc.function.name }, 'Runner');
+            this.broadcast('tool.start', { toolCallId: tc.id, name: tc.function.name, args, exchangeId: f.exchangeId, messageId: f.messageId });
+            let status = 'success', resultText = '', resultImages = [];
+            try {
+                const result = await pool.callTool(tc.function.name, args);
+                ({ text: resultText, images: resultImages } = this.extractToolResult(result));
+            } catch (e) {
+                status = 'error';
+                resultText = `Tool error: ${e.message}`;
+            }
+            const { message: toolMsg } = await convStore.appendConversationMessage(this.ctx(), {
+                conversationId: this.conversationId,
+                role: 'tool',
+                content: resultText,
+                toolName: tc.function.name,
+                toolArgs: args,
+                toolStatus: status,
+                toolImages: resultImages.length ? resultImages : undefined,
+                tool_call_id: tc.id
+            });
+            executed = true;
+            this.broadcast('tool.end', { toolCallId: tc.id, name: tc.function.name, status, resultMessage: resultText, resultImages, toolMessageId: toolMsg.id, messageId: f.messageId });
+        }
+        return executed;
+    }
+
+    // MCP result { content: [{type:'text'|'image', ...}] } → { text, images }.
+    // Images: base64 → nDB bucket (internal storeFile — no HTTP hop, no 401s).
+    extractToolResult(result) {
+        const parts = result?.content;
+        if (!Array.isArray(parts)) {
+            return { text: typeof result === 'string' ? result : JSON.stringify(result ?? ''), images: [] };
+        }
+        const texts = [], images = [];
+        for (const p of parts) {
+            if (p?.type === 'text') texts.push(p.text || '');
+            else if (p?.type === 'image' && p.data) {
+                const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' })[p.mimeType] || 'bin';
+                const filename = `tool_${Date.now()}_${images.length}.${ext}`;
+                const meta = this.dbInstance.db.storeFile('images', filename, Buffer.from(p.data, 'base64'), p.mimeType || 'application/octet-stream');
+                images.push(`/api/buckets/images/${meta._file.id}.${meta._file.ext}`);
+            }
+        }
+        return { text: texts.join('\n'), images };
     }
 
     async consume(resp) {

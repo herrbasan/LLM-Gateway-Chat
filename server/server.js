@@ -10,6 +10,7 @@ const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
 const convStore = require('./conversation-store');
 const runner = require('./runner');
+const mcpPool = require('./mcp-pool');
 
 // Load minimal .env natively
 try {
@@ -457,6 +458,7 @@ runner.init({
     idleMs: 10 * 60 * 1000
 });
 embedEvents.on('status', runner.handleEmbedStatus);
+mcpPool.init({ log: L });
 
 function parseCookies(req) {
     const list = {};
