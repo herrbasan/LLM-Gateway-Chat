@@ -1817,6 +1817,47 @@ nui-slider.tts-player-scrub .tts-player-scrub-buffer {
     animation: spin 0.9s linear infinite;
 }
 
+/* A phase that's been running too long — visually distinct from "busy" so a
+   stuck run doesn't look identical to a working one. */
+.assistant-waiting.slow {
+    color: var(--color-warning, #d4a017);
+    font-style: normal;
+    font-weight: 600;
+}
+.assistant-waiting.slow .assistant-waiting-spinner {
+    border-top-color: var(--color-warning, #d4a017);
+}
+
+/* Global activity indicator (header) — persists across the whole turn incl. tool
+   hops, so the backend being busy is always visible. */
+#activity-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    background: var(--color-shade1, transparent);
+    color: var(--text-color);
+    font-size: 0.85em;
+    font-weight: 600;
+    white-space: nowrap;
+}
+#activity-indicator.slow {
+    color: var(--color-warning, #d4a017);
+}
+.activity-spinner {
+    width: 0.85rem;
+    height: 0.85rem;
+    flex-shrink: 0;
+    border: 0.15rem solid var(--color-shade3);
+    border-top-color: var(--color-highlight);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+}
+#activity-indicator.slow .activity-spinner {
+    border-top-color: var(--color-warning, #d4a017);
+}
+
 /* Version Controls */
 .version-info {
     min-width: 3rem;

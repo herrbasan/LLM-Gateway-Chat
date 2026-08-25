@@ -11,8 +11,8 @@
 // Event names the runner emits. Kept as a single source of truth for attach().
 const EVENT_NAMES = [
     'snapshot', 'run.start', 'delta', 'tool.start', 'tool.end',
-    'msg.assistant', 'msg.user', 'msg.deleted', 'msg.variant',
-    'run.end', 'error', 'embed.status'
+    'msg.assistant', 'msg.user', 'msg.deleted',
+    'run.end', 'run.status', 'error', 'embed.status'
 ];
 
 function _parseJSON(data) {
@@ -55,12 +55,6 @@ function abort(chatId) {
     return _api('POST', `/api/chats/${chatId}/abort`);
 }
 
-// Switch the selected variant of an assistant message.
-// { messageId, index?, direction? } → { status, ok, data: { message } }
-function switchVariant(chatId, body) {
-    return _api('POST', `/api/chats/${chatId}/variant`, body);
-}
-
 // Delete one message (single-author write through the runner).
 function deleteMessage(chatId, messageId) {
     return _api('DELETE', `/api/chats/${chatId}/messages/${encodeURIComponent(messageId)}`);
@@ -71,4 +65,20 @@ function editMessage(chatId, messageId, content) {
     return _api('PATCH', `/api/chats/${chatId}/messages/${encodeURIComponent(messageId)}`, { content });
 }
 
-export const runnerClient = { attach, send, abort, switchVariant, deleteMessage, editMessage };
+// Event names the user-level list stream emits (sidebar sync across devices).
+const LIST_EVENT_NAMES = ['chat.created', 'chat.updated', 'chat.deleted'];
+
+// Attach to the user-level list stream. handlers maps event name → callback(data).
+// Returns { close() }. Long-lived for the page — the sidebar must track new chats
+// created on another device.
+function attachListEvents(handlers = {}) {
+    const es = new EventSource('/api/events');
+    for (const name of LIST_EVENT_NAMES) {
+        if (typeof handlers[name] === 'function') {
+            es.addEventListener(name, (e) => handlers[name](_parseJSON(e.data)));
+        }
+    }
+    return { close: () => es.close() };
+}
+
+export const runnerClient = { attach, send, abort, deleteMessage, editMessage, attachListEvents };

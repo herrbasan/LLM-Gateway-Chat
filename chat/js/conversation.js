@@ -123,17 +123,6 @@ export class Conversation {
         return this.exchanges.find(e => e.id === id);
     }
 
-    getVersionInfo(exchangeId) {
-        const exchange = this.getExchange(exchangeId);
-        if (!exchange) return null;
-
-        return {
-            current: exchange.assistant.currentVersion + 1,
-            total: exchange.assistant.versions.length,
-            hasMultiple: exchange.assistant.versions.length > 1
-        };
-    }
-
     getAll() {
         return this.exchanges;
     }

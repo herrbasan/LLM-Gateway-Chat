@@ -25,7 +25,6 @@ export class ChatHistory {
                 const sessions = await backendClient.listSessions();
                 this.conversations = sessions
                     .filter(s => s.mode !== 'arena')
-                    .filter(s => (s.messageCount || 0) > 0)
                     .map(s => this._backendToLocal(s));
                 return;
             } catch (err) {

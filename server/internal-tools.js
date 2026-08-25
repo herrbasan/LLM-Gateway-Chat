@@ -219,7 +219,7 @@ const ARCHIVE_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'browser_fetch',
-            description: `${SERVER_EXEC_NOTE}\\n\\nDirect HTTP fetch from the chat backend — no MCP JSON-RPC size limits, no CORS. Use this to download a file or resource from ANY URL when the response may be too large for MCP (typically capped around 64 KB). Works for storage files, LAN addresses, and public internet URLs alike.\\n\\n**Binary upload**: use body_type="data_url" with a data URL body to send binary data to HTTP endpoints (e.g. PUT /storage/* on the MCP server). NOTE: to save a chat attachment to workshop storage, use attachment_save instead — it handles the transfer in one call.\\n\\n**Response handling**: text/* and application/json responses up to max_inline_bytes (default 5 MB) are returned inline. Anything larger, or any binary type (images, PDFs, audio, etc.), is uploaded to the chat's bucket and a \\/api\\/buckets\\/images\\/... URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when storage_read returns a relative path pointer (prepend your MCP origin and fetch it).`,
+            description: `${SERVER_EXEC_NOTE}\\n\\nDirect HTTP fetch from the chat backend — no MCP JSON-RPC size limits, no CORS. Use this to download a file or resource from ANY URL when the response may be too large for MCP (typically capped around 64 KB). Works for storage files, LAN addresses, and public internet URLs alike.\\n\\n**Binary upload**: use body_type="data_url" with a data URL body to send binary data to HTTP endpoints (e.g. PUT /storage/* on the MCP server). NOTE: to save a chat attachment to workshop storage, use attachment_save instead — it handles the transfer in one call.\\n\\n**Response handling**: small text (≤ 32 KB) is returned inline. Text larger than 32 KB is auto-CHUNKED (bucketFile + chunk count; read chunks via bucket_file/chunk, retire consumed chunks with context_retire). Binary types (images, PDFs, audio, etc.) are uploaded to the chat's bucket and a \\/api\\/buckets\\/images\\/... URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when storage_read returns a relative path pointer (prepend your MCP origin and fetch it).`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -228,7 +228,9 @@ const ARCHIVE_TOOL_DEFS = [
                     headers: { type: 'object', description: 'Optional request headers as key/value strings' },
                     body: { type: 'string', description: 'Optional request body for POST/PUT/PATCH. When body_type is "text" (default), sent as-is. When body_type is "data_url", this must be a data URL (data:mime;base64,...) which is decoded to binary before sending.' },
                     body_type: { type: 'string', enum: ['text', 'data_url'], description: 'How to interpret the body. "text" (default): send as string. "data_url": parse body as a data URL, decode base64 to binary, send with the data URL MIME type as Content-Type.' },
-                    max_inline_bytes: { type: 'number', description: 'Max bytes to return inline as text (default 5,242,880 = 5 MB). Set to 0 to always upload to bucket and return a URL.' }
+                    max_inline_bytes: { type: 'number', description: 'Max bytes to return inline as text. Text larger than 32 KB is auto-CHUNKED (returns bucketFile + chunk count) regardless of this value. Set to 0 to always upload to bucket and return a URL.' },
+                    bucket_file: { type: 'string', description: 'Chunk read mode: the bucketFile from a chunked response. Pair with chunk=N to read one chunk (omit url).' },
+                    chunk: { type: 'number', description: 'Chunk read mode: 0-indexed chunk to read from bucket_file (omit url).' }
                 },
                 required: ['url']
             }
@@ -375,6 +377,35 @@ const ARCHIVE_TOOL_DEFS = [
                 required: ['url', 'storage_path']
             }
         }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_preview_show',
+            description: `${SERVER_EXEC_NOTE}\n\nQueue content or a file/URL for rendering in the chat's preview pane (a second rendering surface). Pass EXACTLY ONE of content (text to render, markdown or code) or url (a /storage/... path or absolute http(s) URL to fetch). The preview renders CLIENT-side: this tool returns a confirmation and the user clicks "Show in preview" on the tool bubble to render it. Use content mode for generated work product (edits, diffs, code); url mode for existing files.`,
+            parameters: {
+                type: 'object',
+                properties: {
+                    id: { type: 'string', description: 'Stable identifier (reuse the same id to update an existing preview in place)' },
+                    title: { type: 'string', description: 'Human-readable label shown in the preview dropdown' },
+                    content: { type: 'string', description: 'Content mode: the text to render (markdown or code)' },
+                    url: { type: 'string', description: 'URL mode: a /storage/... path or absolute http(s) URL to fetch and display' },
+                    language: { type: 'string', description: "Language hint: 'markdown' for rendered markdown, else a code language name" },
+                    source: { type: 'string', description: 'Optional provenance label' }
+                }
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'chat_preview_state',
+            description: `${SERVER_EXEC_NOTE}\n\nReturn the preview items shown so far in this conversation (metadata only: id, title, language, source — no content). Use to recall what you've already previewed when the user refers to "this" or "the current one". Live view state (which item is selected in the dropdown, whether the pane is open) is client-side and not queryable by the backend.`,
+            parameters: {
+                type: 'object',
+                properties: {}
+            }
+        }
     }
 ];
 
@@ -454,7 +485,13 @@ async function executeInternalTool(name, args, ctx) {
             return executeBrowserFetch(args, dbInstance);
 
         case 'attachment_save':
-            return executeAttachmentSave(args, { mcpOrigin, publicOrigin });
+            return executeAttachmentSave(args, { mcpOrigin, publicOrigin, readBucketBytes: (b, i, e) => dbInstance.db.getFile(b, i, e) });
+
+        case 'chat_preview_show':
+            return executePreviewShow(args);
+
+        case 'chat_preview_state':
+            return executePreviewState(args, { dbInstance, conversationId });
 
         case 'chat_archive_update_metadata':
             return executeUpdateMetadata(args, { db, conversationId });
@@ -658,8 +695,74 @@ const MIME_TO_EXT = {
     'application/zip': 'zip', 'application/octet-stream': 'bin'
 };
 
+// Chunking for large text responses: inlining a 400KB file bloats the model's
+// context and stalls generation. Store the full text, return a summary + chunk
+// count; the model reads chunks incrementally (browser_fetch bucket_file + chunk)
+// and retires consumed chunks with context_retire.
+const CHUNK_THRESHOLD_BYTES = 32 * 1024;
+const CHUNK_BYTES = 16 * 1024;
+
+// "images:43ba3326.txt" → { bucket, id, ext }.
+function parseFileRef(_file) {
+    if (!_file || typeof _file !== 'string') return null;
+    const idx = _file.indexOf(':');
+    if (idx === -1) return null;
+    const bucket = _file.slice(0, idx);
+    const rest = _file.slice(idx + 1);
+    const dot = rest.lastIndexOf('.');
+    if (dot === -1) return { bucket, id: rest, ext: '' };
+    return { bucket, id: rest.slice(0, dot), ext: rest.slice(dot + 1) };
+}
+
+function splitChunks(text, chunkBytes) {
+    const chunks = [];
+    for (let i = 0; i < text.length; i += chunkBytes) chunks.push(text.slice(i, i + chunkBytes));
+    return chunks;
+}
+
+function chunkLargeText(buffer, contentType, dbInstance) {
+    const text = buffer.toString('utf8');
+    const chunkCount = Math.max(1, Math.ceil(text.length / CHUNK_BYTES));
+    const filename = `browser_fetch_${Date.now()}.txt`;
+    const meta = dbInstance.db.storeFile('images', filename, buffer, contentType || 'text/plain');
+    const bucketFile = `images:${meta._file.id}.${meta._file.ext}`;
+    return {
+        content: [{
+            type: 'text',
+            text: JSON.stringify({
+                chunked: true,
+                bucketFile,
+                chunks: chunkCount,
+                chunkBytes: CHUNK_BYTES,
+                totalBytes: buffer.length,
+                preview: text.slice(0, 400),
+                note: `Large text response (${buffer.length} bytes) chunked to avoid context bloat. Read a chunk with browser_fetch(bucket_file="${bucketFile}", chunk=N) (0-indexed). Retire consumed chunks with context_retire.`
+            }, null, 2)
+        }]
+    };
+}
+
+function readBucketChunk(bucketFile, chunk, dbInstance) {
+    const ref = parseFileRef(bucketFile);
+    if (!ref) throw new Error(`browser_fetch: invalid bucket_file "${bucketFile}" (expected bucket:id.ext)`);
+    const buffer = dbInstance.db.getFile(ref.bucket, ref.id, ref.ext);
+    if (!buffer || buffer.length === 0) throw new Error(`browser_fetch: bucket file not found: ${bucketFile}`);
+    const chunks = splitChunks(buffer.toString('utf8'), CHUNK_BYTES);
+    if (!Number.isInteger(chunk) || chunk < 0 || chunk >= chunks.length) {
+        throw new Error(`browser_fetch: chunk ${chunk} out of range (0..${chunks.length - 1})`);
+    }
+    return { content: [{ type: 'text', text: JSON.stringify({ chunk, chunkCount: chunks.length, content: chunks[chunk] }, null, 2) }] };
+}
+
 async function executeBrowserFetch(args, dbInstance) {
     if (!args || typeof args !== 'object') throw new Error('browser_fetch: args object required');
+
+    // Chunk read mode: browser_fetch(bucket_file, chunk) reads one chunk of a
+    // previously chunked large response (see chunkLargeText).
+    if (typeof args.bucket_file === 'string' && typeof args.chunk === 'number') {
+        return readBucketChunk(args.bucket_file, args.chunk, dbInstance);
+    }
+
     if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('browser_fetch: url required');
     if (args.method !== undefined && !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(args.method)) {
         throw new Error(`browser_fetch: invalid method "${args.method}"`);
@@ -734,6 +837,12 @@ async function executeBrowserFetch(args, dbInstance) {
 
     const buffer = Buffer.from(await res.arrayBuffer());
 
+    // Large text (within the inline budget) → chunk it instead of inlining, to
+    // avoid bloating the model's context. max_inline_bytes is the escape hatch.
+    if (isText && maxInlineBytes !== 0 && buffer.length > CHUNK_THRESHOLD_BYTES && buffer.length <= maxInlineBytes) {
+        return chunkLargeText(buffer, contentType, dbInstance);
+    }
+
     const tooLargeForInline = maxInlineBytes > 0 && buffer.length > maxInlineBytes;
     if (!isText || maxInlineBytes === 0 || tooLargeForInline) {
         const mime = contentType || 'application/octet-stream';
@@ -776,29 +885,51 @@ async function executeBrowserFetch(args, dbInstance) {
 // attachment_save — server-to-server copy: bucket URL → MCP storage PUT.
 // ============================================
 
-async function executeAttachmentSave(args, { mcpOrigin, publicOrigin }) {
+// Bucket URL (/api/buckets/<bucket>/<id>.<ext>) → { bucket, id, ext }.
+function parseBucketUrl(url) {
+    if (!url || typeof url !== 'string') return null;
+    const m = url.match(/\/api\/buckets\/([^/]+)\/([^/.]+)\.([^/?]+)/);
+    if (!m) return null;
+    return { bucket: m[1], id: m[2], ext: m[3].toLowerCase() };
+}
+
+const BUCKET_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' };
+
+async function executeAttachmentSave(args, { mcpOrigin, publicOrigin, readBucketBytes }) {
     if (!args || typeof args !== 'object') throw new Error('attachment_save: args object required');
     if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('attachment_save: url required');
     if (typeof args.storage_path !== 'string' || args.storage_path.length === 0) throw new Error('attachment_save: storage_path required');
     if (!mcpOrigin) throw new Error('attachment_save: no MCP server configured — cannot determine storage endpoint');
 
-    // Relative bucket URLs resolve against our own public origin.
-    let srcUrl = args.url;
-    if (srcUrl.startsWith('/')) {
-        if (!publicOrigin) throw new Error('attachment_save: relative url but no public origin configured');
-        srcUrl = `${publicOrigin}${srcUrl}`;
-    }
+    LOG.info('attachment_save', { src: args.url, storage_path: args.storage_path }, 'InternalTools');
 
-    LOG.info('attachment_save', { srcUrl, storage_path: args.storage_path }, 'InternalTools');
-
+    // Bucket-backed source: read INTERNALLY via db.getFile — the bucket GET
+    // route requires cookie auth (issue #5), so HTTP-fetching a bucket URL 401s.
+    // External http(s) URLs still go over HTTP.
     let buffer, mime;
-    try {
-        const res = await fetch(srcUrl);
-        if (!res.ok) throw new Error(`source fetch returned ${res.status} ${res.statusText}`);
-        buffer = Buffer.from(await res.arrayBuffer());
-        mime = res.headers.get('content-type') || 'application/octet-stream';
-    } catch (err) {
-        throw new Error(`attachment_save: failed to fetch source URL — ${err.message}`);
+    const bucketRef = parseBucketUrl(args.url);
+    if (bucketRef && typeof readBucketBytes === 'function') {
+        try {
+            buffer = readBucketBytes(bucketRef.bucket, bucketRef.id, bucketRef.ext);
+            if (!buffer || buffer.length === 0) throw new Error('empty bucket file');
+            mime = BUCKET_MIME[bucketRef.ext] || 'application/octet-stream';
+        } catch (err) {
+            throw new Error(`attachment_save: failed to read bucket file — ${err.message}`);
+        }
+    } else {
+        let srcUrl = args.url;
+        if (srcUrl.startsWith('/')) {
+            if (!publicOrigin) throw new Error('attachment_save: relative url but no public origin configured');
+            srcUrl = `${publicOrigin}${srcUrl}`;
+        }
+        try {
+            const res = await fetch(srcUrl);
+            if (!res.ok) throw new Error(`source fetch returned ${res.status} ${res.statusText}`);
+            buffer = Buffer.from(await res.arrayBuffer());
+            mime = res.headers.get('content-type') || 'application/octet-stream';
+        } catch (err) {
+            throw new Error(`attachment_save: failed to fetch source URL — ${err.message}`);
+        }
     }
     if (!buffer || buffer.length === 0) throw new Error('attachment_save: source URL returned empty response');
 
@@ -970,6 +1101,47 @@ function formatSessionList(all, args, kind) {
             }, null, 2)
         }]
     };
+}
+
+// chat_preview_show is the one tool whose EFFECT is client-side: the preview
+// pane is a view surface (architecture §4 "preview becomes pure view"), so the
+// runner can't render to it. Validate the args and return a confirmation; the
+// view already renders a "Show in preview" button (chat.js _decoratePreviewToolButton)
+// that calls preview.show(args) using the args from tool.start.
+function executePreviewShow(args) {
+    if (!args || typeof args !== 'object') throw new Error('chat_preview_show: args object required');
+    const hasContent = args.content !== undefined && args.content !== null;
+    const hasUrl = typeof args.url === 'string' && args.url.length > 0;
+    if (hasContent && hasUrl) throw new Error('chat_preview_show: pass content OR url, not both');
+    if (!hasContent && !hasUrl) throw new Error('chat_preview_show: one of content or url required');
+    const label = args.title || args.id || 'item';
+    const mode = hasUrl ? `URL ${args.url}` : `${(args.content || '').length} chars`;
+    return { content: [{ type: 'text', text: `Preview queued (${mode}). Click "Show in preview" on this tool bubble to render "${label}".` }] };
+}
+
+// chat_preview_state: reconstruct the preview items shown so far from the
+// conversation's chat_preview_show tool calls (metadata only). Live view state
+// (selected item, pane open/closed) is client-side and not queryable.
+function executePreviewState(args, { dbInstance, conversationId }) {
+    let items = [];
+    try {
+        const conv = dbInstance.db.find('id', conversationId).find(d => d._type === 'conversation');
+        if (conv && Array.isArray(conv.messages)) {
+            items = conv.messages
+                .filter(m => m.role === 'tool' && m.toolName === 'chat_preview_show' && m.toolArgs)
+                .map(m => {
+                    let a = m.toolArgs;
+                    if (typeof a === 'string') { try { a = JSON.parse(a); } catch { a = null; } }
+                    if (!a) return null;
+                    return { id: a.id || null, title: a.title || null, language: a.language || null, source: a.source || null, mode: a.url ? 'url' : 'content' };
+                })
+                .filter(Boolean);
+        }
+    } catch (e) { /* best-effort */ }
+    return { content: [{ type: 'text', text: JSON.stringify({
+        previewItemsShown: items,
+        note: 'Live view state (currently selected item, pane open/closed) is client-side and not queryable by the backend.'
+    }, null, 2) }] };
 }
 
 module.exports = {

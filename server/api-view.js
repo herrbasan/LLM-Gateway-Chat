@@ -50,6 +50,40 @@ function resolveImageUrl(url, publicOrigin) {
     return null;
 }
 
+const EXT_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' };
+
+// Parse a compact _file nURI ("images:43ba3326.jpg") → { bucket, id, ext }.
+function parseFileRef(_file) {
+    if (!_file || typeof _file !== 'string') return null;
+    const idx = _file.indexOf(':');
+    if (idx === -1) return null;
+    const bucket = _file.slice(0, idx);
+    const rest = _file.slice(idx + 1);
+    const dot = rest.lastIndexOf('.');
+    if (dot === -1) return { bucket, id: rest, ext: '' };
+    return { bucket, id: rest.slice(0, dot), ext: rest.slice(dot + 1) };
+}
+
+// Resolve an attachment to a gateway-safe image source. Bucket-backed images are
+// read INTERNALLY (readImageBytes) and inlined as base64 data URLs — the bucket
+// GET route requires cookie auth (issue #5), so an absolute bucket URL handed to
+// the gateway would 401 when the gateway/adapter fetches it for a vision model.
+function resolveImageDataUrl(att, readImageBytes) {
+    if (att?.dataUrl && att.dataUrl.startsWith('data:')) return att.dataUrl;
+    const ref = parseFileRef(att?._file);
+    if (ref && typeof readImageBytes === 'function') {
+        try {
+            const buffer = readImageBytes(ref.bucket, ref.id, ref.ext);
+            if (buffer) {
+                const mime = att.type || EXT_MIME[ref.ext] || 'application/octet-stream';
+                return `data:${mime};base64,${Buffer.from(buffer).toString('base64')}`;
+            }
+        } catch (e) { /* fall through to URL */ }
+    }
+    if (att?.url && /^https?:\/\//.test(att.url)) return att.url;
+    return null;
+}
+
 // messages: stored-form array (flat, ordered by idx).
 // options: { systemPrompt, publicOrigin, chunkTransform, retirements, chunkView, log }
 //   chunkView: the (dynamically imported) chat/js/chunk-view.js module, or null.
@@ -58,7 +92,7 @@ function resolveImageUrl(url, publicOrigin) {
 // model's chunk labels to durable content hashes for context_retire.
 function buildApiMessages(messages, options = {}) {
     if (!Array.isArray(messages)) throw new Error('buildApiMessages: messages array required');
-    const { systemPrompt = '', publicOrigin, chunkTransform = false, retirements = {}, chunkView = null, log = null } = options;
+    const { systemPrompt = '', publicOrigin, chunkTransform = false, retirements = {}, chunkView = null, log = null, readImageBytes = null } = options;
     if (!publicOrigin) throw new Error('buildApiMessages: options.publicOrigin required');
 
     const rawMessages = [];
@@ -146,8 +180,7 @@ function buildApiMessages(messages, options = {}) {
 
             if (validAttachments.length > 0) {
                 const gatewayImageUrls = validAttachments
-                    .map(att => resolveImageUrl(att.dataUrl || att.url, publicOrigin))
-                    .filter(u => u !== null);
+                .map(att => resolveImageDataUrl(att, readImageBytes))
 
                 // Attachment manifest: bucket URLs resolved to absolute, so every
                 // model (vision or not) gets awareness + a resolvable reference.

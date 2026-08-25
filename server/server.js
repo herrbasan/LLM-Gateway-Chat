@@ -192,7 +192,6 @@ for (const userDef of usersToSeed) {
             dbPath: userDef.dbPath,
             passwordHash: salt + ':' + hash,
             rights: userDef.rights || { login: true },
-            userToken: null,
             lastAccess: null,
             createdAt: new Date().toISOString()
         });
@@ -230,7 +229,7 @@ for (const userDef of usersToSeed) {
         }
 
         if (changed) {
-            doc.userToken = null; // force re-login on config footprint change
+            revokeAllSessions(userDef.id); // force re-login on config footprint change
             usersDb.update(doc._id, doc);
             logger.info('User updated', { id: userDef.id, username: userDef.username, reason: changeReason }, 'Auth');
         }
@@ -463,6 +462,15 @@ function getOrLoadUserDb(dbPath) {
 const embedEvents = new EventEmitter();
 embedEvents.setMaxListeners(100);
 
+// List-level mutations (chat created/updated/deleted) broadcast to all of a
+// user's attached list views, so the sidebar stays in sync across devices.
+const listEvents = new EventEmitter();
+listEvents.setMaxListeners(100);
+
+function emitListEvent(userId, event, data) {
+    listEvents.emit('event', { userId, event, data });
+}
+
 const L = () => logger || { info() {}, warn() {}, error() {}, debug() {} };
 
 // ConversationRunner (PA-3) — server-side conversation sessions.
@@ -498,28 +506,47 @@ function getAuthUser(req) {
     const cookies = parseCookies(req);
     const token = cookies.userToken;
     if (!token) return null;
-    
-    // Cookie-only auth. No X-API-Key fallback according to dev_plan
-    const user = usersDb.find('userToken', token).find(d => d._type === 'user');
+
+    // Multi-session auth: one _type:'auth_session' doc per login, validated
+    // independently so the same credentials can attach from several devices at
+    // once (stress-testing the runner's multi-view model). nPort will own the
+    // token/identity eventually; here the token maps to a user via userId.
+    const session = usersDb.find('token', token).find(d => d._type === 'auth_session');
+    if (!session) return null;
+
+    const user = usersDb.find('id', session.userId).find(d => d._type === 'user');
     if (!user) return null;
 
-    if (SESSION_TTL > 0 && user.lastAccess) {
-        if (Date.now() - new Date(user.lastAccess).getTime() > SESSION_TTL) {
-            user.userToken = null; // Expire Token
-            usersDb.set(user._id, 'userToken', null);
+    if (SESSION_TTL > 0 && session.lastAccess) {
+        if (Date.now() - new Date(session.lastAccess).getTime() > SESSION_TTL) {
+            usersDb.delete(session._id); // expired session
             return null;
         }
         // Refresh lastAccess only if more than half the TTL has elapsed
-        if (Date.now() - new Date(user.lastAccess).getTime() > SESSION_TTL / 2) {
-            user.lastAccess = new Date().toISOString();
-            usersDb.set(user._id, 'lastAccess', user.lastAccess);
+        if (Date.now() - new Date(session.lastAccess).getTime() > SESSION_TTL / 2) {
+            touchSession(session, user);
         }
     } else if (SESSION_TTL > 0) {
-        user.lastAccess = new Date().toISOString();
-        usersDb.set(user._id, 'lastAccess', user.lastAccess);
+        touchSession(session, user);
     }
-    
+
     return user;
+}
+
+// Refresh a session's lastAccess (caller throttles) and mirror to the user doc
+// so admin's last-seen stays current.
+function touchSession(session, user) {
+    const now = new Date().toISOString();
+    usersDb.set(session._id, 'lastAccess', now);
+    user.lastAccess = now;
+    usersDb.set(user._id, 'lastAccess', now);
+}
+
+// Revoke every active session for a user (password change, config change, admin edit).
+function revokeAllSessions(userId) {
+    for (const s of usersDb.find('userId', userId).filter(d => d._type === 'auth_session')) {
+        usersDb.delete(s._id);
+    }
 }
 
 function requireAuth(req, res) {
@@ -1164,12 +1191,13 @@ const routes = {
         return json(res, { error: 'Invalid credentials' }, 401);
     }
     
-    // Login successful
+    // Login successful — mint a NEW session (do not overwrite existing ones:
+    // the same credentials may attach from multiple devices simultaneously).
     const userToken = 'sess_' + crypto.randomUUID().replace(/-/g, '');
-    user.userToken = userToken;
-    user.lastAccess = new Date().toISOString();
-    usersDb.set(user._id, 'userToken', user.userToken);
-    usersDb.set(user._id, 'lastAccess', user.lastAccess);
+    const now = new Date().toISOString();
+    usersDb.insert({ _type: 'auth_session', token: userToken, userId: user.id, createdAt: now, lastAccess: now });
+    user.lastAccess = now;
+    usersDb.set(user._id, 'lastAccess', now);
     
     // Check if user requires initialization of settings in their chat db
     const dbInstance = getOrLoadUserDb(user.dbPath);
@@ -1198,10 +1226,11 @@ const routes = {
   },
 
   'POST /api/auth/logout': async (req, res) => {
-    const user = getAuthUser(req);
-    if (user) {
-        user.userToken = null;
-        usersDb.set(user._id, 'userToken', null);
+    // Revoke only THIS session — other devices stay logged in.
+    const token = parseCookies(req).userToken;
+    if (token) {
+        const session = usersDb.find('token', token).find(d => d._type === 'auth_session');
+        if (session) usersDb.delete(session._id);
     }
     
     res.writeHead(200, {
@@ -1293,7 +1322,6 @@ const routes = {
         dbPath: dbPath,
         passwordHash: salt + ':' + hash,
         rights: rights || { login: true, read: true, write: true },
-        userToken: null,
         lastAccess: null,
         createdAt: new Date().toISOString()
     };
@@ -1378,7 +1406,7 @@ const routes = {
     }
 
     if (changed) {
-        targetUser.userToken = null; // force re-login
+        revokeAllSessions(targetId); // force re-login
         usersDb.update(targetUser._id, targetUser);
         usersDb.compact();
         logger.info('User updated via admin API', { adminId: authResult.user.id, targetId, username: targetUser.username }, 'Admin');
@@ -1401,7 +1429,7 @@ const routes = {
     const userToUpdate = users[0];
     const newSalt = crypto.randomBytes(16).toString('hex');
     userToUpdate.passwordHash = newSalt + ':' + crypto.scryptSync(body.password, newSalt, 64).toString('hex');
-    userToUpdate.userToken = null; // force re-login
+    revokeAllSessions(targetId); // force re-login
     
     usersDb.update(userToUpdate._id, userToUpdate);
     usersDb.compact();
@@ -1473,6 +1501,40 @@ const routes = {
   // ============================================
 
   // List sessions
+  // SSE stream of list-level mutations (chat created/updated/deleted) — the
+  // sidebar lives across devices, so a new chat on one device must appear on
+  // all others. Mirrors the embed-events framing.
+  'GET /api/events': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user } = authResult;
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+    res.write(':ok\n\n');
+
+    const onEvent = (payload) => {
+      if (payload.userId !== user.id) return;
+      try {
+        res.write(`event: ${payload.event}\ndata: ${JSON.stringify(payload.data)}\n\n`);
+      } catch (e) { /* client gone — cleaned up on close */ }
+    };
+    listEvents.on('event', onEvent);
+
+    const keepalive = setInterval(() => {
+      try { res.write(':keepalive\n\n'); } catch (e) {}
+    }, 15000);
+
+    req.on('close', () => {
+      listEvents.off('event', onEvent);
+      clearInterval(keepalive);
+    });
+  },
+
   'GET /api/chats': async (req, res) => {
     const authResult = requireAuth(req, res);
     if (!authResult) return;
@@ -1567,6 +1629,7 @@ const routes = {
     };
     db.insert(conv);
     
+    emitListEvent(user.id, 'chat.created', session);
     json(res, session, 201, req);
   },
   
@@ -1600,6 +1663,7 @@ const routes = {
     if (body.arenaConfig !== undefined) session.arenaConfig = body.arenaConfig;
     session.updatedAt = new Date().toISOString();
     db.update(session._id, session);
+    emitListEvent(user.id, 'chat.updated', session);
     json(res, session, 200, req);
   },
   
@@ -1697,22 +1761,6 @@ const routes = {
     }
   },
   
-  // Switch the selected variant of an assistant message (§2.4)
-  'POST /api/chats/:id/variant': async (req, res, params) => {
-    const authResult = requireAuth(req, res);
-    if (!authResult) return;
-    const { user, dbInstance } = authResult;
-
-    const body = await readBody(req);
-    try {
-      const r = runner.getRunner(user, dbInstance, params.id);
-      const { message } = await r.switchVariant({ messageId: body.messageId, index: body.index, direction: body.direction });
-      json(res, { message }, 200, req);
-    } catch (e) {
-      json(res, { error: e.message }, 404, req);
-    }
-  },
-
   // Delete one message (single-author write through the runner)
   'DELETE /api/chats/:id/messages/:messageId': async (req, res, params) => {
     const authResult = requireAuth(req, res);
@@ -1806,6 +1854,7 @@ const routes = {
         }
       }
       
+      emitListEvent(user.id, 'chat.deleted', { id: params.id });
       json(res, { success: true }, 200, req);
     },
     

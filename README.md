@@ -108,7 +108,7 @@ Navigate to `http://localhost:8080/chat/`
 - **Vision Support:** Attach images — automatically analyzed via MCP Vision tools for non-vision models
 - **Markdown & Code:** Full markdown rendering with syntax highlighting
 - **Streaming & Thinking Blocks:** Real-time streaming with expandable reasoning blocks
-- **Edit & Regenerate:** Destructive message editing with automatic context truncation
+- **Edit Messages:** Destructive message editing with automatic context truncation
 - **TPS/TTFT Display:** Real-time tokens-per-second and time-to-first-token metrics
 - **System Prompt Presets:** Save, name, and quick-select frequently used system prompts
 - **Import/Export:** Full conversation export with images, clipboard debug export, file import

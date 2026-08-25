@@ -220,11 +220,85 @@ function _findExchangeByMsgId(conv, messageId) {
     return null;
 }
 
+// ---- live waiting indicator ----
+// The "Waiting for response…" line ticks the elapsed time and flags slow phases,
+// so a stuck run (no phase change for 30s+) is visually distinct from a busy one.
+const WAIT_WARN_MS = 30000;
+
+function _formatElapsed(ms) {
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) return `${sec}s`;
+    return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+}
+
+function _tickWaiting(chatId) {
+    const s = _runnerStreaming(chatId);
+    if (!s?.el) return;
+    const waitingText = s.el.querySelector('.assistant-waiting-text');
+    if (!waitingText) return;
+    const elapsedMs = Date.now() - (s.phaseStart || Date.now());
+    waitingText.textContent = `${s.phase || 'Working…'} · ${_formatElapsed(elapsedMs)}`;
+    const waiting = s.el.querySelector('.assistant-waiting');
+    if (waiting) waiting.classList.toggle('slow', elapsedMs >= WAIT_WARN_MS);
+}
+
+function _startWaitingTicker(chatId) {
+    const s = _runnerStreaming(chatId);
+    if (!s) return;
+    if (s.tickTimer) clearInterval(s.tickTimer);
+    s.phaseStart = Date.now();
+    s.tickTimer = setInterval(() => _tickWaiting(chatId), 1000);
+    _tickWaiting(chatId);
+}
+
+function _stopWaitingTicker(chatId) {
+    const s = _runnerStreaming(chatId);
+    if (s?.tickTimer) { clearInterval(s.tickTimer); s.tickTimer = null; }
+}
+
+// ---- global activity indicator (header) ----
+// Persists across the WHOLE turn (generation + tool hops), so the user always
+// sees that the backend is doing something and for how long.
+let _activityPhase = 'Working…';
+let _activityStart = 0;
+let _activityTimer = null;
+
+function _showActivity(message) {
+    _activityPhase = message || 'Working…';
+    _activityStart = Date.now();
+    const el = document.getElementById('activity-indicator');
+    if (el) el.style.display = '';
+    if (_activityTimer) clearInterval(_activityTimer);
+    _activityTimer = setInterval(_activityTick, 1000);
+    _activityTick();
+}
+
+function _hideActivity() {
+    const el = document.getElementById('activity-indicator');
+    if (el) el.style.display = 'none';
+    if (_activityTimer) { clearInterval(_activityTimer); _activityTimer = null; }
+}
+
+function _setActivityPhase(message) {
+    _activityPhase = message || 'Working…';
+    _activityStart = Date.now();
+    _activityTick();
+}
+
+function _activityTick() {
+    const el = document.getElementById('activity-indicator');
+    const text = document.getElementById('activity-indicator-text');
+    if (!el || !text) return;
+    const elapsedMs = Date.now() - _activityStart;
+    text.textContent = `${_activityPhase} · ${_formatElapsed(elapsedMs)}`;
+    el.classList.toggle('slow', elapsedMs >= WAIT_WARN_MS);
+}
+
 function attachRunnerEvents(chatId) {
     if (runnerViews.has(chatId)) return; // idempotent — background chats keep their stream
 
     const container = getOrCreateContainer(chatId);
-    const view = { es: null, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '', toolBubbles: new Map() } };
+    const view = { es: null, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '', toolBubbles: new Map(), phase: 'Working…', phaseStart: 0, tickTimer: null } };
     runnerViews.set(chatId, view);
 
     view.es = runnerClient.attach(chatId, {
@@ -246,8 +320,8 @@ function attachRunnerEvents(chatId) {
         'msg.assistant'(d) { _runnerAssistant(chatId, d); },
         'msg.user'(d) { _runnerUser(chatId, d); },
         'msg.deleted'(d) { _runnerDeleted(chatId, d); },
-        'msg.variant'(d) { _runnerVariant(chatId, d); },
         'run.end'(d) { _runnerRunEnd(chatId, d); },
+        'run.status'(d) { _runnerStatus(chatId, d); },
         error(d) { _runnerError(chatId, d); },
         'embed.status'(d) { _runnerEmbed(chatId, d); }
     });
@@ -279,6 +353,17 @@ function _runnerRunStart(chatId, d) {
     markChatAsStreaming(chatId, true);
     updateSendButton();
     scrollToBottom(container);
+    _startWaitingTicker(chatId);
+    _showActivity('Working…');
+}
+
+function _runnerStatus(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    if (!s.el) return;
+    s.phase = d.message || 'Working…';
+    s.phaseStart = Date.now();
+    _tickWaiting(chatId);
+    _setActivityPhase(d.message);
 }
 
 function _runnerDelta(chatId, d) {
@@ -325,6 +410,7 @@ function _runnerAssistant(chatId, msg) {
 }
 
 function _runnerRunEnd(chatId, d) {
+    _stopWaitingTicker(chatId);
     const s = _runnerStreaming(chatId);
     if (d.finishReason === 'aborted' && s.el) {
         showError(s.el, 'Stopped');
@@ -336,9 +422,12 @@ function _runnerRunEnd(chatId, d) {
     s.el = null;
     s.exchangeId = null;
     renderHistoryList();
+    if (d.finishReason !== 'tool_calls') _hideActivity();
 }
 
 function _runnerError(chatId, d) {
+    _stopWaitingTicker(chatId);
+    _hideActivity();
     const s = _runnerStreaming(chatId);
     if (s.el) {
         showError(s.el, d.message || 'error');
@@ -366,6 +455,7 @@ function _runnerResumeInflight(chatId, inFlight) {
     s.reasoningContent = inFlight.reasoning_content || '';
     if (s.content || s.reasoningContent) updateAssistantContent(s.el, s.content, s.reasoningContent);
     markChatAsStreaming(chatId, true);
+    _startWaitingTicker(chatId);
     updateSendButton();
 }
 
@@ -398,6 +488,7 @@ function _runnerToolStart(chatId, d) {
     scrollToBottom(container);
 
     s.toolBubbles.set(d.toolCallId, { el, exchange });
+    _setActivityPhase('Running tool…');
 }
 
 function _runnerToolEnd(chatId, d) {
@@ -486,22 +577,6 @@ function _runnerDeleteMessage(exchange, role) {
 function _runnerDeleted(chatId, d) {
     // Re-render from a fresh snapshot (message removal re-groups exchanges).
     setTimeout(() => _runnerRefresh(chatId), 0);
-}
-
-function _runnerVariant(chatId, d) {
-    const conv = activeConversations.get(chatId);
-    if (!conv) return;
-    const ex = _findExchangeByMsgId(conv, d.messageId);
-    if (!ex) return;
-    ex.assistant.content = d.variant?.content || '';
-    ex.assistant.reasoning_content = d.variant?.reasoning_content || null;
-    ex.assistant.currentVersion = d.currentVersion ?? 0;
-    const container = getOrCreateContainer(chatId);
-    const el = container.querySelector(`.chat-message.assistant[data-exchange-id="${ex.id}"]`);
-    if (el) {
-        updateAssistantContent(el, d.variant?.content || '', d.variant?.reasoning_content || null);
-        updateVersionControls(el, ex.id);
-    }
 }
 
 function _runnerRefresh(chatId) {
@@ -978,6 +1053,22 @@ async function init() {
         await chatHistory.refreshList();
     } else {
         await chatHistory.ready();
+    }
+
+    // Sidebar sync across devices: any list mutation (chat created/updated/
+    // deleted on another view) re-fetches + re-renders this history. refreshList()
+    // is idempotent; renderHistoryList() has a structural-signature guard so it
+    // only rebuilds when something actually changed.
+    if (CONFIG.enableBackend === true && typeof CONFIG.backendUrl === 'string') {
+        const onListChange = async () => {
+            await chatHistory.refreshList();
+            renderHistoryList();
+        };
+        runnerClient.attachListEvents({
+            'chat.created': onListChange,
+            'chat.updated': onListChange,
+            'chat.deleted': onListChange
+        });
     }
 
     // Restore theme (needs history loaded first for async prefs)
@@ -2752,10 +2843,6 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
         </div>
         <div class="message-actions">
             <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="volume"></nui-icon></button></nui-button>
-            <nui-button class="action-btn regenerate" title="Regenerate"><button type="button"><nui-icon name="sync"></nui-icon></button></nui-button>
-            <nui-button class="action-btn prev-version" title="Previous version"><button type="button"><nui-icon name="arrow" class="arrow-rotated"></nui-icon></button></nui-button>
-            <span class="version-info"></span>
-            <nui-button class="action-btn next-version" title="Next version"><button type="button"><nui-icon name="arrow"></nui-icon></button></nui-button>
             <div class="spacer"></div>
             <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
             <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
@@ -2765,9 +2852,6 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
 
     // Bind action buttons
     el.querySelector('.speaker')?.addEventListener('click', () => toggleTts(exchangeId, el));
-    el.querySelector('.regenerate')?.addEventListener('click', () => regenerate(exchangeId));
-    el.querySelector('.prev-version')?.addEventListener('click', () => switchVersion(exchangeId, 'prev'));
-    el.querySelector('.next-version')?.addEventListener('click', () => switchVersion(exchangeId, 'next'));
     el.querySelector('.copy-message')?.addEventListener('click', (e) => copyMessageToClipboard(exchangeId, e.currentTarget));
     el.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchangeId, 'assistant'));
     el.querySelector('.delete-message')?.addEventListener('click', () => {
@@ -3307,16 +3391,7 @@ function hideCompactionIndicator(el) {
 function showError(el, message) {
     const contentDiv = el.querySelector('.message-content');
     if (contentDiv) {
-        const exchangeId = el.dataset.exchangeId || null;
-        const retryBtn = exchangeId
-            ? `<nui-button size="small" class="retry-response"><button type="button">Retry</button></nui-button>`
-            : '';
-        contentDiv.innerHTML += `<div class="error-message">Error: ${escapeHtml(message)}${retryBtn ? ' ' + retryBtn : ''}</div>`;
-
-        if (exchangeId) {
-            const btn = contentDiv.querySelector('.error-message .retry-response');
-            btn?.addEventListener('click', () => regenerate(exchangeId));
-        }
+        contentDiv.innerHTML += `<div class="error-message">Error: ${escapeHtml(message)}</div>`;
     }
     
     // Remove waiting placeholder — the bubble now shows an error state
@@ -3374,21 +3449,11 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
         updateUsageDisplay(el, { used_tokens: roughTokens, isEstimate: true });
     }
 
-    // Show actions only if we have multiple versions or after regeneration
-    const info = convRef.getVersionInfo(exchangeId);
+    // Show the action toolbar (speaker / copy / edit / delete).
     const actions = el.querySelector('.message-actions');
-    if (actions && info?.hasMultiple) {
+    if (actions) {
         actions.classList.add('visible');
-        updateVersionControls(el, exchangeId, convRef);
         actions.querySelector('.speaker').style.display = 'inline-block';
-    } else if (actions) {
-        // Only show regenerate and speaker buttons initially
-        actions.classList.add('visible');
-        actions.querySelector('.regenerate').style.display = 'inline-block';
-        actions.querySelector('.speaker').style.display = 'inline-block';
-        actions.querySelector('.prev-version').style.display = 'none';
-        actions.querySelector('.next-version').style.display = 'none';
-        actions.querySelector('.version-info').style.display = 'none';
     }
     
     // Remove streaming class from thinking block
@@ -3405,37 +3470,6 @@ function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = nu
         _vsWake(container);
         _vsUpdateVisible(container);
     }
-}
-
-function updateVersionControls(el, exchangeId, conversationRef = null) {
-    const convRef = conversationRef || conversation;
-    const info = convRef.getVersionInfo(exchangeId);
-    if (!info) return;
-    
-    const infoEl = el.querySelector('.version-info');
-    const prevBtn = el.querySelector('.prev-version');
-    const nextBtn = el.querySelector('.next-version');
-    const regenerateBtn = el.querySelector('.regenerate');
-    
-    // Show version info only when multiple versions exist
-    if (info.hasMultiple) {
-        if (infoEl) {
-            infoEl.textContent = `${info.current}/${info.total}`;
-            infoEl.style.display = 'inline-block';
-        }
-        if (prevBtn) prevBtn.style.display = 'inline-block';
-        if (nextBtn) nextBtn.style.display = 'inline-block';
-    } else {
-        if (infoEl) infoEl.style.display = 'none';
-        if (prevBtn) prevBtn.style.display = 'none';
-        if (nextBtn) nextBtn.style.display = 'none';
-    }
-    
-    // Always show regenerate
-    if (regenerateBtn) regenerateBtn.style.display = 'inline-block';
-    // Always show speaker
-    const speakerBtn = el.querySelector('.speaker');
-    if (speakerBtn) speakerBtn.style.display = 'inline-block';
 }
 
 // ============================================
@@ -3479,21 +3513,6 @@ function toggleTts(exchangeId, el) {
     currentTtsExchangeId = exchangeId;
     ttsPlayer?.reveal();
     tts.speak(text, el);
-}
-
-async function regenerate(exchangeId) {
-    // Regenerate needs a runner method (append a variant + re-run the turn) —
-    // not built yet. Deferred; the button is a no-op until then.
-    console.warn('Regenerate not yet supported by the runner.');
-}
-
-function switchVersion(exchangeId, direction) {
-    const exchange = conversation.getExchange(exchangeId);
-    const msgId = exchange?._asstMsgId;
-    if (!msgId) return;
-    runnerClient.switchVariant(currentChatId, { messageId: msgId, direction }).catch((err) => {
-        console.error('Variant switch failed:', err);
-    });
 }
 
 async function copyMessageToClipboard(exchangeId, btn) {
@@ -3617,9 +3636,13 @@ function commitEdit(exchangeId, role, newContent, editConv, editChatId) {
             console.error('Edit failed:', err);
         });
     } else {
-        // Assistant edit is not supported by the runner (only user messages are
-        // editable server-side). Deferred — see handover.
-        console.warn('Assistant message edit not yet supported by the runner.');
+        const msgId = exchange._asstMsgId;
+        if (!msgId) return;
+        // Assistant edit = in-place content update (no re-run) — the runner
+        // dispatches by role. Same single-author path as user edit.
+        runnerClient.editMessage(editChatId, msgId, newContent).catch((err) => {
+            console.error('Edit failed:', err);
+        });
     }
 }
 

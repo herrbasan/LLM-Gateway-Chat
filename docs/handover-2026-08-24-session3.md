@@ -37,13 +37,16 @@ Runner core (`server/runner.js`), `api-view.js`, `system-prompt.js`, `mcp-pool.j
 `internal-tools.js`, `conversation-store.js`, delete/edit routes, `/api/models` proxy.
 These are the contract; do not change them while completing the view side.
 
-## Still open (one item)
+## Still open — none (PC complete)
 
-1. **Regenerate + assistant-edit** — the runner has no regenerate method (append a variant +
-   re-run the turn) and no assistant-edit (only user messages are editable). `regenerate` and
-   assistant `commitEdit` are currently no-ops (`console.warn`). Build the runner methods
-   (server-side, in `server/runner.js` + routes), then wire `regenerate` and assistant edit.
-   Everything else in the PC realign is done and committed.
+1. ~~**Regenerate + assistant-edit**~~ — **RESOLVED 2026-08-24.**
+   - **Regenerate was RETIRED, not built** (user decision — unused and confusing). The regenerate
+     button, prev/next version arrows, `switchVariant` route/method/event, and the dead
+     `appendMessageVariant`/`setMessageVariant`/`getVersionInfo` helpers were all removed.
+   - **Assistant edit was implemented**: `conversation-store.js editAssistantMessageContent()`
+     (in-place content update, no re-run) + `runner.editMessage()` dispatches by role (user →
+     truncate + re-run; assistant → in-place + snapshot). Verified E2E via the PATCH route.
+   - `storage.batch` missing a `delete` op is a **workshop/MCP-side** gap (not this repo).
 
 ## Landed since the first cut (verified E2E on :8082)
 

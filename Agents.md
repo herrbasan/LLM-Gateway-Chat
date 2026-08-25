@@ -54,7 +54,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | Module | Role |
 |--------|------|
 | `chat/js/chat.js` | UI controller + runner event handlers (`_runner*`): rendering, login, presets, admin; send → `/send`, render ← `/events` |
-| `chat/js/runner-client.js` | same-origin SSE attach + REST (`send`/`abort`/`switchVariant`/`deleteMessage`/`editMessage`) — the view's only backend for a runner-owned conversation |
+| `chat/js/runner-client.js` | same-origin SSE attach + REST (`send`/`abort`/`deleteMessage`/`editMessage`) + list-events sync (`attachListEvents`) — the view's only backend for a runner-owned conversation |
 | `chat/js/client-sdk.js` | `GatewayClient` — SSE-over-REST to gateway. **Retiring** (the runner owns the gateway call) |
 | `chat/js/api-client.js` | `BackendClient` — same-origin REST (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`) |
 | `chat/js/conversation.js` | `messagesToExchanges` (stored→exchange projection). State machine / persistence / API formatting **retiring** |

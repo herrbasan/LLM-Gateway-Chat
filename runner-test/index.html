@@ -128,12 +128,6 @@ function attach(id) {
         if (el) { el.classList.remove('streaming'); setContent(el, d.content || ''); }
         else renderMessage(d);
     });
-    es.addEventListener('msg.variant', e => {
-        const d = JSON.parse(e.data);
-        const el = bubbles.get(d.messageId);
-        if (el) setContent(el, d.variant?.content || '');
-        log('msg.variant', d.messageId, '→ v' + d.currentVersion);
-    });
     es.addEventListener('embed.status', e => {
         const d = JSON.parse(e.data);
         const dot = bubbles.get(d.messageId)?.querySelector('.embed-dot');

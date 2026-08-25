@@ -54,6 +54,16 @@ function handleEmbedStatus(evt) {
     }
 }
 
+// Abort the gateway stream if no data arrives for this long — prevents a hung
+// gateway/model from wedging the run forever (the fetch + body reader have no
+// other timeout). Reset on every chunk, so slow-but-progressing generations are
+// unaffected; only total silence for this window is treated as a stall.
+const STREAM_STALL_MS = 300000;
+
+// Cap on consecutive tool hops in a single run — a guard against an infinite
+// tool loop. 12 was too low: a legitimate archive job (write N files) needs more.
+const MAX_TOOL_HOPS = 50;
+
 class Runner {
     constructor(user, dbInstance, conversationId) {
         this.user = user;
@@ -68,6 +78,7 @@ class Runner {
         this.pendingSends = 0;
         this.abortRequested = false;
         this.idleTimer = null;
+        this._stallTimer = null;
         this.chunkView = null; // lazy dynamic import (shared file, no port)
         this._chunkTable = new Map(); // last assembly's chunk labels → hashes (context_retire)
         this.scheduleIdle();
@@ -98,6 +109,21 @@ class Runner {
     }
     touch() { this.scheduleIdle(); }
 
+    // Stall detector: abort the in-flight gateway request if no data flows for
+    // STREAM_STALL_MS. Reset on every chunk (consume) — a hung stream (gateway
+    // accepted but never streams, or stalls mid-generation) is the failure mode
+    // this guards against.
+    resetStallTimer() {
+        clearTimeout(this._stallTimer);
+        this._stallTimer = setTimeout(() => {
+            if (this.inFlight && !this.inFlight.stalled) {
+                this.inFlight.stalled = true;
+                DEPS.log().warn('Runner stream stall', { chatId: this.conversationId, ms: STREAM_STALL_MS }, 'Runner');
+                this.inFlight.controller.abort();
+            }
+        }, STREAM_STALL_MS);
+    }
+
     // ---- view attach (SSE: snapshot + live events) ----
     attach(req, res) {
         res.writeHead(200, {
@@ -118,6 +144,14 @@ class Runner {
     }
     broadcast(event, data) {
         for (const res of this.views) this.sendTo(res, event, data);
+    }
+
+    // Progress indication: log + broadcast a phase transition so a view (and the
+    // logs) can show what the backend is doing between run.start and the first
+    // delta. Phases: assembling → streaming → (tool.start/end) → run.end.
+    _status(phase, message) {
+        DEPS.log().info('Runner phase', { chatId: this.conversationId, phase, message }, 'Runner');
+        this.broadcast('run.status', { messageId: this.inFlight?.messageId ?? null, phase, message });
     }
 
     // View form (contract #1): densified attachments + {content, timestamp} split.
@@ -216,9 +250,9 @@ class Runner {
             const toolChain = await this.runOnce();
             if (toolChain) {
                 hops++;
-                if (hops >= 12) {
+                if (hops >= MAX_TOOL_HOPS) {
                     DEPS.log().warn('Runner tool-hop cap reached', { chatId: this.conversationId, hops }, 'Runner');
-                    this.broadcast('error', { code: 'tool-hop-cap', message: 'Tool chain stopped after 12 hops.' });
+                    this.broadcast('error', { code: 'tool-hop-cap', message: `Tool chain stopped after ${MAX_TOOL_HOPS} hops.` });
                     break;
                 }
                 more = true;
@@ -251,6 +285,7 @@ class Runner {
         };
         this.abortRequested = false;
         this.broadcast('run.start', { exchangeId, model, messageId: this.inFlight.messageId });
+        this._status('assembling', 'Assembling context + tool definitions…');
 
         let outcome = 'stop';
         try {
@@ -274,7 +309,8 @@ class Runner {
                 chunkTransform: this.session.chunkTransform === true,
                 retirements: this.session.retirements || {},
                 chunkView,
-                log: DEPS.log()
+                log: DEPS.log(),
+                readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
             });
             this._chunkTable = chunkTable;
 
@@ -299,6 +335,8 @@ class Runner {
             tools = tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision, hasAutoVisionAnalysis }));
             this._toolsAdvertised = tools.length > 0;
             this._mcpOrigin = mcpOrigin;
+            this.resetStallTimer();
+            this._status('streaming', 'Calling model…');
 
             const resp = await fetch(`${DEPS.gatewayUrl}/v1/chat/completions`, {
                 method: 'POST',
@@ -311,6 +349,9 @@ class Runner {
             });
             if (!resp.ok) {
                 const text = await resp.text().catch(() => '');
+                // FAIL LOUD: a gateway non-2xx is a real error. Log it (nLogger) so
+                // it's never a silent hang, and broadcast to attached views.
+                DEPS.log().error('Gateway error', null, { chatId: this.conversationId, status: resp.status, body: text.slice(0, 1000) }, 'Runner');
                 // Debug capture: the exact payload that failed (thinking-contract hunts)
                 try {
                     require('fs').writeFileSync(require('path').join(__dirname, '..', '_scratch', 'last-error-payload.json'),
@@ -323,7 +364,13 @@ class Runner {
                 outcome = this.abortRequested ? 'aborted' : (this.inFlight.finishReason || 'stop');
             }
         } catch (err) {
-            if (this.abortRequested || err?.name === 'AbortError') {
+            if (this.abortRequested) {
+                outcome = 'aborted';
+            } else if (this.inFlight?.stalled) {
+                DEPS.log().error('Runner stream stalled', null, { chatId: this.conversationId, ms: STREAM_STALL_MS }, 'Runner');
+                this.broadcast('error', { code: 'stream-stall', message: `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`, exchangeId });
+                outcome = 'error';
+            } else if (err?.name === 'AbortError') {
                 outcome = 'aborted';
             } else {
                 DEPS.log().error('Runner stream error', { chatId: this.conversationId, error: err?.message }, 'Runner');
@@ -347,7 +394,8 @@ class Runner {
         if (toolCalls.length === 0) return false;
         const pool = mcpPool.getForUser(this.user, this.dbInstance);
         let executed = false;
-        for (const tc of toolCalls) {
+        for (let i = 0; i < toolCalls.length; i++) {
+            const tc = toolCalls[i];
             let args = {};
             try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
             DEPS.log().info('Runner tool call', { chatId: this.conversationId, tool: tc.function.name }, 'Runner');
@@ -362,15 +410,23 @@ class Runner {
                 status = 'error';
                 resultText = `Tool error: ${e.message}`;
             }
-            const { message: toolMsg } = await convStore.appendConversationMessage(this.ctx(), {
+            // Insert the tool result at its RESERVED position — right after the
+            // assistant (f.idx + 1 + i). A queued user send that landed between
+            // endRun and here must NOT split the assistant's tool_calls from its
+            // result (anthropic rejects "tool_use without tool_result"). The insert
+            // re-indexes everything after it.
+            const { message: toolMsg } = await convStore.insertConversationMessageAt(this.ctx(), {
                 conversationId: this.conversationId,
-                role: 'tool',
-                content: resultText,
-                toolName: tc.function.name,
-                toolArgs: args,
-                toolStatus: status,
-                toolImages: resultImages.length ? resultImages : undefined,
-                tool_call_id: tc.id
+                atIdx: f.idx + 1 + i,
+                message: {
+                    role: 'tool',
+                    content: resultText,
+                    toolName: tc.function.name,
+                    toolArgs: args,
+                    toolStatus: status,
+                    toolImages: resultImages.length ? resultImages : undefined,
+                    tool_call_id: tc.id
+                }
             });
             executed = true;
             this.broadcast('tool.end', { toolCallId: tc.id, name: tc.function.name, status, resultMessage: resultText, resultImages, toolMessageId: toolMsg.id, messageId: f.messageId });
@@ -474,7 +530,7 @@ class Runner {
                 out.toolCalls = delta.tool_calls; any = true;
             }
             if (choice.finish_reason) f.finishReason = choice.finish_reason;
-            if (any) this.broadcast('delta', out);
+            if (any) { this.broadcast('delta', out); this.resetStallTimer(); }
         };
 
         while (true) {
@@ -492,6 +548,7 @@ class Runner {
     }
 
     async endRun(outcome) {
+        clearTimeout(this._stallTimer);
         const f = this.inFlight;
         if (!f) return;
         const durationMs = Date.now() - f.startedAt;
@@ -544,20 +601,6 @@ class Runner {
         return true;
     }
 
-    async switchVariant({ messageId, index, direction }) {
-        const { message } = await convStore.setMessageVariant(this.ctx(), {
-            conversationId: this.conversationId, messageId, index, direction
-        });
-        const variant = message.versions[message.currentVersion];
-        this.broadcast('msg.variant', {
-            messageId: message.id,
-            currentVersion: message.currentVersion,
-            variant
-        });
-        this.touch();
-        return { message };
-    }
-
     // Delete a message (PC): the runner is the single author, so a view deletes
     // through it and every attached view hears msg.deleted. Deleting a USER
     // message cascades — the whole turn (user + its assistant + any tool
@@ -588,9 +631,24 @@ class Runner {
         return { deleted: true, messageId, removedCount: ids.length };
     }
 
-    // Edit a user message in place, truncate after it, re-run (PC). The edited
-    // message becomes the pending turn — kick() picks it up as a fresh send.
+    // Edit a message in place (PC). Dispatch by role: USER edit truncates after
+    // it and re-runs (the edited message becomes the pending turn); ASSISTANT
+    // edit updates the answer in place WITHOUT re-running (correcting/trimming,
+    // not re-generating the turn).
     async editMessage(messageId, content) {
+        this.refresh();
+        const target = this.conv.messages.find(m => m.id === messageId);
+        if (!target) throw new Error(`editMessage: message not found: ${messageId}`);
+
+        if (target.role === 'assistant') {
+            await convStore.editAssistantMessageContent(this.ctx(), {
+                conversationId: this.conversationId, messageId, content
+            });
+            this.refresh();
+            this.broadcast('snapshot', this.buildSnapshot());
+            return { edited: true, messageId };
+        }
+
         const { edited, removedCount } = await convStore.editUserMessageAndTruncate(this.ctx(), {
             conversationId: this.conversationId, messageId, content
         });
