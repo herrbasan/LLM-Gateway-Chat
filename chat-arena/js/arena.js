@@ -1491,14 +1491,17 @@ class ArenaUI {
     }
 
     _newSpectatorSession(id, config) {
+        const participantA = { name: config.nameA, modelName: config.modelA };
+        const participantB = { name: config.nameB, modelName: config.modelB };
         return {
             id,
             messages: [],
             maxTurns: config.maxTurns || 10,
             currentTurn: 0,
-            participantA: { name: config.nameA, modelName: config.modelA },
-            participantB: { name: config.nameB, modelName: config.modelB },
-            participantAConfig: { name: config.nameA },
+            participantA,
+            participantB,
+            participantAConfig: participantA,
+            participantBConfig: participantB,
             getContextDisplayData: () => this._computeContextDisplay()
         };
     }
@@ -1521,14 +1524,28 @@ class ArenaUI {
             this.arena = this._newSpectatorSession(id, cfg);
             this.arena.messages = snap.messages || [];
             this.arena.maxTurns = cfg.maxTurns || this.arena.maxTurns;
-            this.arena.currentTurn = snap.currentTurn || 0;
+            this.arena.currentTurn = this._completedTurns();
             if (this.messagesContainer) this.messagesContainer.innerHTML = '';
             if (this.welcomeEl) this.welcomeEl.style.display = 'none';
             if (this.footerEl) this.footerEl.style.display = 'block';
             for (const m of this.arena.messages) this._renderMessage(m);
+            // Mid-run attach: render the in-flight partial as a streaming bubble;
+            // live deltas continue into it (same messageId).
+            if (snap.inFlight) {
+                this._activeStream = {
+                    messageId: snap.inFlight.id,
+                    speakerName: snap.inFlight.speaker,
+                    content: snap.inFlight.content || '',
+                    reasoning: snap.inFlight.reasoning_content || '',
+                    el: null, timer: null
+                };
+                this._renderStreamBubble();
+            }
             const activeName = snap.activeSpeaker === 'A' ? this.arena.participantA.name
                 : snap.activeSpeaker === 'B' ? this.arena.participantB.name : null;
-            this._updateStatus({ isRunning: snap.running, activeSpeaker: activeName, turn: this.arena.currentTurn });
+            this._updateStatus({ isRunning: snap.running, activeSpeaker: activeName,
+                turn: snap.running ? this.arena.currentTurn + 1 : this.arena.currentTurn });
+            this._updateContextDisplay(this.arena.getContextDisplayData());
         });
         es.addEventListener('msg.moderator', (e) => {
             const msg = JSON.parse(e.data);
@@ -1538,25 +1555,48 @@ class ArenaUI {
         });
         es.addEventListener('turn.start', (e) => {
             const evt = JSON.parse(e.data);
-            this._updateStatus({ isRunning: true, activeSpeaker: evt.speakerName, turn: evt.turn });
+            // Server turn is 0-based and cumulative — display the in-progress number.
+            if (this.arena) this.arena.currentTurn = evt.turn + 1;
+            this._updateStatus({ isRunning: true, activeSpeaker: evt.speakerName, turn: evt.turn + 1 });
+        });
+        es.addEventListener('run.start', (e) => {
+            const evt = JSON.parse(e.data);
+            this._clearStreamBubble();
+            this._activeStream = { messageId: evt.messageId, speakerName: evt.speakerName, content: '', reasoning: '', el: null, timer: null };
+        });
+        es.addEventListener('delta', (e) => {
+            const d = JSON.parse(e.data);
+            const s = this._activeStream;
+            if (!s || d.messageId !== s.messageId) return;
+            if (d.content) s.content += d.content;
+            if (d.reasoningContent) s.reasoning += d.reasoningContent;
+            this._renderStreamBubbleThrottled();
         });
         es.addEventListener('msg.assistant', (e) => {
             const msg = JSON.parse(e.data);
             if (!this.arena) return;
+            this._clearStreamBubble();
             this.arena.messages.push(msg);
             this._renderMessage(msg);
+            this.arena.currentTurn = this._completedTurns();
+            this._updateStatus({ isRunning: true, activeSpeaker: null, turn: this.arena.currentTurn });
             this._updateContextDisplay(this.arena.getContextDisplayData());
         });
-        es.addEventListener('run.end', (e) => {
-            if (this.arena) this._updateStatus({ isRunning: false, activeSpeaker: null, turn: this.arena.currentTurn });
+        es.addEventListener('run.end', () => {
+            if (this.arena) this._updateStatus({ isRunning: false, activeSpeaker: null, turn: this._completedTurns() });
         });
         es.addEventListener('arena.end', (e) => {
             const evt = JSON.parse(e.data);
             if (!this.arena) return;
-            this._updateStatus({ isRunning: false, activeSpeaker: null, turn: this.arena.currentTurn });
+            this._clearStreamBubble();
+            this._updateStatus({ isRunning: false, activeSpeaker: null, turn: this._completedTurns() });
             if (evt.reason === 'maxTurns') this._showExtendOption(this.arena.maxTurns);
+            this._loadHistory(); // sidebar tab picks up the final message count
         });
         es.addEventListener('error', (e) => {
+            // EventSource ALSO fires 'error' (no data) on connection drops —
+            // those are transport events, not SSE error frames; ignore them.
+            if (!e.data) return;
             const evt = JSON.parse(e.data);
             this._showError(evt.message || 'Arena error');
         });
@@ -1566,24 +1606,69 @@ class ArenaUI {
         });
     }
 
+    _completedTurns() {
+        return (this.arena?.messages || []).filter(m => m.role === 'assistant').length;
+    }
+
+    _renderStreamBubbleThrottled() {
+        const s = this._activeStream;
+        if (!s || s.timer) return;
+        s.timer = setTimeout(() => { s.timer = null; this._renderStreamBubble(); }, 120);
+    }
+
+    _renderStreamBubble() {
+        const s = this._activeStream;
+        if (!s || !this.messagesContainer) return;
+        if (!s.el) {
+            const el = document.createElement('div');
+            el.className = 'chat-message assistant streaming';
+            el.innerHTML = `
+                <div class="message-header">
+                    <span class="message-author">${this._escapeHtml(s.speakerName || '…')}</span>
+                    <span class="message-timestamp"><span class="streaming-indicator"></span></span>
+                </div>
+                <div class="message-content"></div>`;
+            this.messagesContainer.appendChild(el);
+            s.el = el;
+        }
+        const contentEl = s.el.querySelector('.message-content');
+        const answer = parseThinking(s.content).answer || s.content || '';
+        let html = '';
+        if (s.reasoning) {
+            html += `<div class="thinking-block collapsed"><div class="thinking-header"><span class="thinking-title">Thoughts</span></div><div class="thinking-content">${this._escapeHtml(s.reasoning)}</div></div>`;
+        }
+        html += renderMarkdown(answer);
+        contentEl.innerHTML = html;
+        if (this._isNearBottom()) {
+            this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+        }
+    }
+
+    _clearStreamBubble() {
+        const s = this._activeStream;
+        if (!s) return;
+        if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+        s.el?.remove();
+        this._activeStream = null;
+    }
+
     _computeContextDisplay() {
         const empty = { used_tokens: 0, window_size: null, isEstimate: true, participantA: {}, participantB: {} };
         if (!this.arena) return empty;
-        const acc = (slot, msg) => {
-            const used = msg.usage?.total_tokens
-                || ((msg.usage?.prompt_tokens || 0) + (msg.usage?.completion_tokens || 0))
-                || msg.context?.used_tokens || 0;
-            const win = msg.context?.window_size || null;
-            const cur = empty[slot] || {};
-            cur.used_tokens = (cur.used_tokens || 0) + used;
-            if (win) cur.window_size = win;
-            if (used || win) cur.isEstimate = false;
-            empty[slot] = cur;
+        // Each participant has its OWN request context per turn; the latest message
+        // per participant carries the current fill. Summing total_tokens across
+        // turns multiplies the count (every turn re-sends the whole history).
+        const scan = (slot, name) => {
+            const msgs = (this.arena.messages || []).filter(m => m.speaker === name && (m.usage || m.context));
+            const last = msgs.at(-1);
+            if (!last) return;
+            const used = last.context?.used_tokens ?? last.usage?.total_tokens
+                ?? ((last.usage?.prompt_tokens || 0) + (last.usage?.completion_tokens || 0));
+            const win = last.context?.window_size || null;
+            empty[slot] = { used_tokens: used || 0, window_size: win, isEstimate: false };
         };
-        for (const m of (this.arena.messages || [])) {
-            if (m.speaker === this.arena.participantA?.name) acc('participantA', m);
-            else if (m.speaker === this.arena.participantB?.name) acc('participantB', m);
-        }
+        scan('participantA', this.arena.participantA?.name);
+        scan('participantB', this.arena.participantB?.name);
         empty.used_tokens = (empty.participantA.used_tokens || 0) + (empty.participantB.used_tokens || 0);
         const winA = empty.participantA.window_size, winB = empty.participantB.window_size;
         empty.window_size = (winA && winB) ? Math.min(winA, winB) : (winA || winB || null);
@@ -1665,6 +1750,7 @@ class ArenaUI {
             this._renderMessage({ role: 'system', speaker: 'moderator', content: `Topic: ${topic}` });
 
             this._attachArenaEvents(session.id);
+            await this._loadHistory(); // the new arena's tab appears immediately
         } catch (err) {
             this._showError(`Failed to start arena: ${err.message}`);
         }
@@ -2911,15 +2997,12 @@ class ArenaUI {
     _updateParticipantModel(participant, newModelId) {
         if (!this.arena || !newModelId) return;
 
-        if (participant === 'A' && this.arena.participantA) {
-            this.arena.participantA.modelName = newModelId;
-            this.arena.participantAConfig.modelName = newModelId;
-            this.arena.participantA.name = newModelId.split('/').pop();
-        } else if (participant === 'B' && this.arena.participantB) {
-            this.arena.participantB.modelName = newModelId;
-            this.arena.participantBConfig.modelName = newModelId;
-            this.arena.participantB.name = newModelId.split('/').pop();
-        }
+        // participantAConfig/participantBConfig alias the participant objects,
+        // so one write keeps both views consistent.
+        const p = participant === 'A' ? this.arena.participantA : this.arena.participantB;
+        if (!p) return;
+        p.modelName = newModelId;
+        p.name = newModelId.split('/').pop();
     }
 
     _escapeHtml(text) {

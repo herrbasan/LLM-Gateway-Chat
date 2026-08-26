@@ -182,8 +182,16 @@ class ArenaRunner {
             this.broadcast('msg.moderator', this.viewMessage(message));
         }
 
-        this.currentTurn = 0;
-        this.activeSpeaker = Math.random() < 0.5 ? 'A' : 'B';
+        // Derive position from history (this.conv already refreshed above): the
+        // turn counter is cumulative across starts, so continue/extend runs only
+        // the remaining turns (maxTurns is a total), and the speaker alternates
+        // from whoever spoke last instead of re-randomizing mid-conversation.
+        const assistantMsgs = this.conv.messages.filter(m => m.role === 'assistant');
+        this.currentTurn = assistantMsgs.length;
+        const lastSpeaker = assistantMsgs.at(-1)?.speaker;
+        this.activeSpeaker = lastSpeaker
+            ? (lastSpeaker === this.speakerName('A') ? 'B' : 'A')
+            : (Math.random() < 0.5 ? 'A' : 'B');
         this.abortRequested = false;
         this.kick();
     }
@@ -224,6 +232,10 @@ class ArenaRunner {
     }
 
     async runOneTurn() {
+        // nDB find() returns detached copies — this.conv is frozen at the last
+        // refresh, so without this every turn would build the payload from the
+        // conversation as it was at mount (topic-only → models repeat themselves).
+        this.refresh();
         const speakerKey = this.activeSpeaker;
         const model = this.speakerModel(speakerKey);
         const speakerName = this.speakerName(speakerKey);
