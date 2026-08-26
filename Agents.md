@@ -21,7 +21,7 @@
 
 Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM Gateway for chat streaming and embeddings; persistence in embedded Rust DBs (nDB documents, nVDB vectors).
 
-**The refactor:** today the browser orchestrates gateway, MCP, TTS, and persistence directly — eight browser→upstream channels (spec §1). Target: the ConversationRunner architecture — conversations are server-side sessions, the browser is a disposable attach/detach view, persistence is a side effect of the runner's traffic. **PC realign has LANDED (2026-08-24):** the existing `chat/` UI is now wired to the runner (`send` → `/send`, render ← `/events`); orchestration retires channel by channel. Completed phase plans and session handovers are archived under `docs/_Archive/`.
+**The refactor:** today the browser orchestrates gateway, MCP, TTS, and persistence directly — eight browser→upstream channels (spec §1). Target: the ConversationRunner architecture — conversations are server-side sessions, the browser is a disposable attach/detach view, persistence is a side effect of the runner's traffic. **PC realign has LANDED (2026-08-24):** the existing `chat/` UI is now wired to the runner (`send` → `/send`, render ← `/events`); orchestration retires channel by channel. **Arena re-based on the server ArenaRunner (Phase D, landed e06f3dd, fix cluster 2026-08-26):** the arena conversation is a server-side autonomous session; `chat-arena/` is a spectator view. Remaining direct-gateway remnant there: summary generation + legacy import. Completed phase plans and session handovers are archived under `docs/_Archive/`.
 
 ## Technology Stack
 
@@ -43,7 +43,9 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 ├── chat/            # Main SPA (index.html, css/, js/)
 ├── chat-arena/      # Arena mode (LLM-to-LLM autonomous conversations)
 ├── lib/             # Submodules: nui_wc2, ndb, nvdb, nlogger; tts/
-├── server/          # Backend: server.js, embed.js, config.json, migrations (historical)
+├── server/          # Backend: server.js (router+routes), runner.js, arena-runner.js,
+│                    #   conversation-store.js, api-view.js, system-prompt.js, mcp-pool.js,
+│                    #   internal-tools.js, embed.js, config.json, migrations (historical)
 │   ├── data/        # nDB + nVDB files (gitignored, per-user subdirs)
 │   └── logs/        # JSON Lines logs (gitignored)
 └── docs/            # Governing spec + codebase survey
@@ -62,7 +64,19 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | `chat/js/mcp-client.js` | MCP SSE connections, tool registry. **Retiring** — tools run server-side in the runner |
 | `chat/js/file-store.js` | Attachment upload → `/api/buckets/images/…`, returns lightweight URLs |
 | `chat/js/preview.js`, `preview-url.js`, `chunk-view.js` | Preview pane + chunk inspection |
-| `chat-arena/js/arena.js` | Arena orchestrator — multiple direct `GatewayClient` instances (P1 target) |
+| `chat-arena/js/arena.js` | Arena **spectator view** over the server ArenaRunner (snapshot + events via `/api/chats/:id/events`, start/stop/extend via `/api/arena/:id/*`). Legacy `Participant`/`Arena` classes (lines ~40–1165) are dead orchestration except: summary generation (`summarize`, direct `GatewayClient`) and legacy import — **cutover remnants** |
+
+## Module Map (server side)
+
+| Module | Role |
+|--------|------|
+| `server/runner.js` | ConversationRunner — single author of chat conversation state; gateway stream, tool loop, queued sends |
+| `server/arena-runner.js` | ArenaRunner — autonomous N-participant runner variant; no tools; refreshes store state every turn; derives turn/speaker from history on (re)start |
+| `server/conversation-store.js` | Shared stored-form authoring: append/insert-at/edit messages, session↔conversation resolution. nDB `find()` returns detached copies — **re-read at every use point, never cache across writes** |
+| `server/api-view.js` | Stored → provider payload projection (ported `getMessagesForApi`), vision base64 inlining |
+| `server/system-prompt.js` | System-prompt assembly (prime-directive blob + metadata + tool context) |
+| `server/mcp-pool.js`, `internal-tools.js` | Server-side tool execution (MCP SSE pool + internal archive/storage/bucket tools) |
+| `server/embed.js` | Embed pipeline: fire-and-forget, retry backoff, startup reconciliation, `embed.status` events |
 
 ## Invariants That Survive the Refactor
 

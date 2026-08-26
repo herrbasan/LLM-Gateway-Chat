@@ -32,7 +32,7 @@ Also worth stating: channels 1/2/6 are all **the same underlying GatewayClient S
 | 3 | Gateway WebSocket `/v1/realtime` | **retired** — no code | — |
 | 4 | nSpeech V3 REST/SSE/EventSource + audio stream | NSpeechController / SpeechPlayer | Yes |
 | 5 | MCP SSE connect + POST JSON-RPC | mcp-client.js | Yes |
-| 6 | Arena per-participant GatewayClient instances | arena.js | Yes |
+| 6 | Arena per-participant GatewayClient instances | arena.js | Yes — **RETIRED 2026-08-26** (see Channel 6 note) |
 | 7 | MCP storage box plain-HTTP PUT `/storage/...` | chat.js archive tools | Yes |
 | 8 | `browser_fetch` arbitrary URL | chat.js | Yes (by design) |
 
@@ -105,6 +105,8 @@ The browser both **connects to** MCP servers (SSE) and **executes** tools (POST)
 ### Channel 6 — Arena per-participant GatewayClient instances
 
 `Participant` builds its own `GatewayClient` (arena.js:50–56), base from `options.gatewayUrl || localStorage['gateway-url'] || window.ARENA_CONFIG?.gatewayUrl || ''` (arena.js:44). Summary generation spawns a fresh client via `_createGatewayClient(this.gatewayUrl)` (arena.js:732, 1051) and streams `/v1/chat/completions` (arena.js:1104). Arena `index.html` loads **both** `js/config.js` (static ARENA_CONFIG) and `../chat/js/config.js` (dynamic CHAT_CONFIG) (arena index.html:323, 326), so it also sees `enableBackend`/`backendUrl`.
+
+> **STATUS 2026-08-26 — conversation path RETIRED.** The arena conversation runs server-side in `server/arena-runner.js` (ArenaRunner, landed e06f3dd; fix cluster 5bcd8e2); `ArenaUI` is a spectator over `/api/chats/:id/events` + `/api/arena/:id/*`. The `Participant` class and its per-participant `GatewayClient` (arena.js:50–56, 114) are dead code. **Still live direct-gateway remnants:** summary generation (`Arena.summarize` → arena.js:1051, 1104, called from the options dialog at arena.js:2685) and the legacy import path (`new Arena`, arena.js:810, 2171).
 
 ### Channel 7 — browser → MCP storage box plain-HTTP PUT (ADDED)
 
@@ -191,6 +193,8 @@ The deepest client-orchestration encoding. Full loop:
 ### W4 — Arena mode (MEDIUM-HIGH)
 `arena.js` is a parallel orchestrator: `Participant` streams directly to gateway (arena.js:50–56, 114), summary generation streams directly to gateway (arena.js:732, 1051, 1104), persistence is backend-only via `arenaStorage` (chat-arena/js/storage.js, "No localStorage, no IndexedDB fallback") replaying messages through `backendClient.sendMessage` (arena.js:374) and PATCHing metadata (arena.js:2128–2137, 2350–2357). It also opens an embed `EventSource` (arena.js:1865). Two direct-gateway surfaces (participant + summary) plus its own controller duplicate channel 1. It loads the dynamic chat config too (arena index.html:326), so it is BFF-ready on config; the work is re-pointing its two GatewayClient uses through the proxy.
 
+> **STATUS 2026-08-26 — mostly RETIRED.** Arena is re-based on the server ArenaRunner (Phase D); the spectator view holds no orchestration, persistence is a side effect of the runner's appends. Remaining work, downgraded to LOW: summary generation still streams browser→gateway directly (arena.js:2685 → `Arena.summarize`), legacy import still constructs the old `Arena` orchestrator, and the dead `Participant`/`Arena` classes (arena.js:40–1165) await deletion in the Phase D cleanup pass.
+
 ### W5 — TTS player (MEDIUM)
 `NSpeechController` + `TtsPlayerHost` (chat.js:1914–1925; arena.js:1681) are fully browser-driven nSpeech clients (channel 4). Coupling is moderate: voices/audio are fetched per-endpoint; the endpoint is user-configurable (localStorage + config). Routing through the backend means proxying a fairly large REST+SSE+EventSource+audio surface and deciding whether per-user TTS endpoint config becomes a server concern.
 
@@ -210,7 +214,7 @@ Settings/profiles live in the backend already: `storage.js` reads/writes `/api/u
 | H2 | **Server-owned stream ownership (P0 core)** | Today a killed tab loses the partial assistant stream — nothing server-side holds it. Need: buffer the proxied SSE, re-attach with offset, and **distinguish user-abort (`client.abortStream`, chat.js:6624/5802 → `controller.abort()` → `'aborted'` event, client-sdk.js:250–253) from tab-kill (browser just dies → server sees connection close)**. No server machinery exists (no mid-stream store; `embed.js` is a queue for *embeddings*, not streams). | New: proxy route, in-flight buffer keyed by session+user, re-attach offset, abort semantics (explicit abort header vs connection-close). The `embed-events` EventEmitter relay (server.js:853–882) is the pattern to copy for the browser-facing SSE. | **P0** |
 | H3 | **TTS channel is a whole SDK, not a GET** (W5) | Proxying TTS means proxy POST `/v1/audio/speech` (SSE audio), voice/admin GETs, and `/v1/admin/events` EventSource — not just "GET with query passthrough" (spec P1 gotcha is incomplete). | Backend `/api/tts/*` proxy mirroring nspeech-client.js routes; decide if endpoint config moves server-side. | **P1** |
 | H4 | **Bucket URLs auth for non-browser fetchers** (issue #5) | `GET /api/buckets/*` needs cookie (server.js:968). Server-side/model-side fetches (vision, `attachment_save`) get 401. | Server-to-server fetch with the user's identity attached, or a short-lived signed URL / internal header; align with P3 identity. | P1 / P3 |
-| H5 | **Arena dual direct-gateway surfaces** (W4) | Two `GatewayClient` uses (participant + summary) stream straight to gateway. | Re-point both through the P0 proxy; make `chat-arena/js/config.js` dynamic (server.js:2182 currently static). | P0/P1 |
+| H5 | **Arena dual direct-gateway surfaces** (W4) | Two `GatewayClient` uses (participant + summary) stream straight to gateway. | **Participant surface RETIRED 2026-08-26** (server ArenaRunner). Remaining: summary generation (options dialog) — re-point through the backend when the summary flow is re-based; make `chat-arena/js/config.js` dynamic (server.js:2182 currently static). | ~~P0/P1~~ → P1 remnant |
 | H6 | **`browser_fetch` / `saveToStorage` channels 7–8** | Give the model arbitrary browser reach (CORS-bound) and direct writes to the MCP storage box. | Decide policy: keep browser-native (they are CORS-limited anyway) or move server-side with identity. Lower priority — they are already same-origin for the backend REST parts. | P1 (keep browser-native) |
 | H7 | **`gatewayUrl` config is dead / default '' 404s** | Chat `GatewayClient` uses localStorage only (chat.js:40); generated `config.js.gatewayUrl` unread; default '' is a same-origin 404. | P0 must stop relying on localStorage and inject the proxy URL into the client; keep a fallback for the direct-debug path. | **P0** |
 
