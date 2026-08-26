@@ -1,7 +1,7 @@
 # Spec: Backend-Routed Refactor (BFF) + Multi-User Scoping
 
 **Date:** 2026-08-23 (specced during an nPort session; execution happens in THIS repo)
-**Status:** ARCHITECTURE PIVOT (2026-08-23) — the proxy-retrofit is replaced by the **ConversationRunner** architecture; [architecture-conversation-runner.md](architecture-conversation-runner.md) is the design authority. Survey: [codebase-survey-bff.md](codebase-survey-bff.md) (channel × callsite authority; §1/§2 corrected with its findings). Retrofit P0 design kept as input: [plan-p0-stream-ownership.md](plan-p0-stream-ownership.md). Phases re-scoped in §4. **PA FULLY SPECIFIED (2026-08-24):** [pa-implementation-spec.md](pa-implementation-spec.md) — frame schemas + helper extraction, approved.
+**Status:** ARCHITECTURE PIVOT (2026-08-23) — the proxy-retrofit is replaced by the **ConversationRunner** architecture; [architecture-conversation-runner.md](architecture-conversation-runner.md) is the design authority. Survey: [codebase-survey-bff.md](codebase-survey-bff.md) (channel × callsite authority; §1/§2 corrected with its findings). Retrofit P0 design kept as input: [_Archive/plan-p0-stream-ownership.md](_Archive/plan-p0-stream-ownership.md). Phases re-scoped in §4. **PA FULLY SPECIFIED (2026-08-24):** [_Archive/pa-implementation-spec.md](_Archive/pa-implementation-spec.md) — frame schemas + helper extraction, approved.
 **Branch:** `bff-rework` (worktree `D:\DEV\LLM-Gateway-Chat`, dev port 8082)
 **Live:** `D:\SRV\LLM-Gateway-Chat` on `master`, port 8080 — must keep working throughout
 **Tracking:** LLM-Gateway-Chat issue #12
@@ -123,12 +123,12 @@ re-scope phases, mark status READY FOR EXECUTION.
 
 ### PA–PD — Runner build-out (strangler; full detail in the architecture doc §9)
 
-- **PA — runner core:** `server/runner.js`, conversation event stream, `send`/`abort` routes, gateway call, shared append+embed helper (stored-form authoring: timestamp prefix, nURI offload, message metadata), ported api-view + chunk-view, **system-prompt assembly server-side** (deep-dive G1 — byte-equivalent to today's `getSystemPromptWithMetadata`). Tools disabled. Frame schemas + helper signatures: [pa-implementation-spec.md](pa-implementation-spec.md). **Acceptance:** kill the tab mid-stream on :8082 → reopen → generation still running or already persisted; two browsers attached → both live. **DONE 2026-08-24** (commits 6c15cc1, 4190ded, 7b533b3, +PA-4): acceptance verified on :8082 — two browsers live (inFlight re-attach in the mid-run snapshot), tab-kill mid-run loses nothing (run completes + persists with zero views). Harness: `runner-test/index.html`. Not yet exercised live: queue+batch under concurrent sends, variant switching, regenerate flow (→ PB).
+- **PA — runner core:** `server/runner.js`, conversation event stream, `send`/`abort` routes, gateway call, shared append+embed helper (stored-form authoring: timestamp prefix, nURI offload, message metadata), ported api-view + chunk-view, **system-prompt assembly server-side** (deep-dive G1 — byte-equivalent to today's `getSystemPromptWithMetadata`). Tools disabled. Frame schemas + helper signatures: [_Archive/pa-implementation-spec.md](_Archive/pa-implementation-spec.md). **Acceptance:** kill the tab mid-stream on :8082 → reopen → generation still running or already persisted; two browsers attached → both live. **DONE 2026-08-24** (commits 6c15cc1, 4190ded, 7b533b3, +PA-4): acceptance verified on :8082 — two browsers live (inFlight re-attach in the mid-run snapshot), tab-kill mid-run loses nothing (run completes + persists with zero views). Harness: `runner-test/index.html`. Not yet exercised live: queue+batch under concurrent sends, variant switching, regenerate flow (→ PB).
 - **PB — tool port:** server MCP pool, internal archive/storage/fetch tools, tool events, server-side recursion. Acceptance: a tool-chain conversation completes with the browser closed between calls. **PB-a DONE 2026-08-24** (commit 53c0ea4): `server/mcp-pool.js` (per-user pool, dual-path JSON-RPC, settings-sourced config, tools default enabled server-side), runner tool loop (tool.start/end events, single-author tool messages, 12-hop cap, recursion), MCP images → internal buckets. Acceptance PASSED: browser killed 3s into a read→write chain; artifact verified on disk. Remaining **PB-b:** internal archive tools (chat_archive_*), browser_fetch/saveToStorage as server calls, context_retire/unretire on the server chunk table, vision filter, the prompt blocks (archive/MCP/memory) whose CONTEXT C text must be rewritten for server-side execution.
 - **PC — view parity (realigned 2026-08-24):** rewire the EXISTING `chat/` UI to the runner (send → `/send`, render ← `/events`) — no new UI. The renderer is preserved; orchestration retires channel by channel. Build against the five view contracts (architecture §5: timestamp, keying, versioning, system prompt, module boundary).
 - **PD — cutover:** old client retired/read-only, dead browser code removed (client-sdk, mcp-client, conversation state machine), arena re-based as a runner variant, TTS + `/v1/models` proxied.
 
-The old proxy-retrofit P0/P1 plan is superseded — kept in [plan-p0-stream-ownership.md](plan-p0-stream-ownership.md) for its citation map and stream mechanics.
+The old proxy-retrofit P0/P1 plan is superseded — kept in [_Archive/plan-p0-stream-ownership.md](_Archive/plan-p0-stream-ownership.md) for its citation map and stream mechanics.
 
 ### P2 — nPort cutover (the unsafe state ends here; lands in herrbasan/nPort)
 
@@ -193,9 +193,9 @@ Verify `/health` and `/v1/models` through the public domain before declaring don
 
 - **Architecture (design authority):** [docs/architecture-conversation-runner.md](architecture-conversation-runner.md) — the ConversationRunner design
 - **Survey (P−1 output):** [docs/codebase-survey-bff.md](codebase-survey-bff.md) — channel × callsite table, server inventory, coupling ranking, spec corrections
-- **Retrofit P0 plan (superseded, design input):** [docs/plan-p0-stream-ownership.md](plan-p0-stream-ownership.md)
-- **Deep-dive (2026-08-24):** [docs/refactor-deep-dive-report.md](refactor-deep-dive-report.md) — system-prompt gap (G1), stored-form authoring (G2), five view contracts; companion to the survey
-- **PA implementation spec (2026-08-24):** [docs/pa-implementation-spec.md](pa-implementation-spec.md) — event frame schemas (field-provenance tagged) + append/embed helper extraction
+- **Retrofit P0 plan (superseded, design input):** [_Archive/plan-p0-stream-ownership.md](_Archive/plan-p0-stream-ownership.md)
+- **Deep-dive (2026-08-24):** [_Archive/refactor-deep-dive-report.md](_Archive/refactor-deep-dive-report.md) — system-prompt gap (G1), stored-form authoring (G2), five view contracts; companion to the survey
+- **PA implementation spec (2026-08-24):** [_Archive/pa-implementation-spec.md](_Archive/pa-implementation-spec.md) — event frame schemas (field-provenance tagged) + append/embed helper extraction
 - memory #700 — six-channel browser→upstream analysis (2026-07-11; superseded by the survey's 8-channel map)
 - memory #1662 — family multi-user model (2026-08-23)
 - memory #1664 — session record of this spec's creation (2026-08-23)
