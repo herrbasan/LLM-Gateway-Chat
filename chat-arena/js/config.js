@@ -19,8 +19,8 @@ window.ARENA_CONFIG = {
     // Set to null to fall back to the first available chat model.
     defaultSummaryModel: null,
 
-    // TTS Configuration
-    ttsEndpoint: '',
+    // TTS Configuration — same-origin backend proxy → nSpeech (see server.js proxyTts)
+    ttsEndpoint: '/api/tts',
     ttsVoiceA: '',
     ttsVoiceB: '',
     ttsSpeed: 1.0,
