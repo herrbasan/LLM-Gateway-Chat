@@ -222,18 +222,6 @@ function sseUrlBase(url) {
     return `${u.protocol}//${u.host}`;
 }
 
-// Compact replacement for the workshop dispatcher's ~24K-char description:
-// the chat prime directive (Agents_Prime_Chat.md) carries the tool catalog and
-// usage rules, so the schema only needs the mechanics. Keeps small-context
-// models viable with MCP tools always advertised (2026-08-25).
-const DISPATCHER_DESCRIPTION = 'Workshop unified dispatcher (MCP server: memory, storage, browser/research, vdb, git, llm, forge, vision). Call with {method: "agent.action", payload: {...}} — payload is ALWAYS a JSON object. Your system instructions contain the full tool catalog and usage rules. Response is wrapped: parse content[0].text (usually JSON); isError:true = failure — surface it.';
-
-function slimDescription(def) {
-    const d = def.description || '';
-    if (def.name === 'tools' && d.startsWith('WORKSHOP UNIFIED API')) return DISPATCHER_DESCRIPTION;
-    return d;
-}
-
 class UserPool {
     constructor(user, dbInstance, log) {
         this.user = user;
@@ -290,17 +278,14 @@ class UserPool {
             if (srv.status !== 'connected' || !srv.tools) continue;
             for (const t of srv.tools) {
                 if (!this.isEnabled(srv.id, t.name)) continue;
-                // Always prefix with the server name: `workshop.tools` — the
-                // old-chat convention. A bare `tools` name reads as a category
-                // placeholder to models (they never called it — 2026-08-25
-                // parity test) and collides with the API's own `tools` key.
-                // `serverName__toolName` stays the disambiguation scheme for
-                // same-tool-name collisions across servers.
+                // Pass the tool through with its native name — exactly what
+                // Copilot does. The name must stay OpenAI-spec legal
+                // (^[a-zA-Z0-9_-]+$); a dot breaks Kimi/Deepseek validation.
+                // Only disambiguate on a real name collision, with a valid
+                // `__` separator.
                 let llmName = t.name;
                 if (nameCounts.get(t.name) > 1) {
                     llmName = `${srv.name.replace(/[^a-zA-Z0-9_-]/g, '_')}__${t.name}`;
-                } else if (!llmName.includes('.')) {
-                    llmName = `${srv.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.${t.name}`;
                 }
                 this.registry.set(llmName, { server: srv, originalName: t.name, definition: t });
             }
@@ -315,7 +300,7 @@ class UserPool {
                 type: 'function',
                 function: {
                     name: llmName,
-                    description: slimDescription(rec.definition),
+                    description: rec.definition.description,
                     parameters: rec.definition.inputSchema || { type: 'object', properties: {} }
                 }
             });
