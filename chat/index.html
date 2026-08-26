@@ -121,31 +121,11 @@
                         <button>Model</button>
                         <button>User</button>
                         <button>System</button>
-                        <button>MCP</button>
                         <button>TTS</button>
                     </nav>
                     
                     <!-- Model Tab -->
                     <div>
-                        <nui-input-group class="sidebar-section">
-                            <div class="gateway-config-header">
-                                <label>Gateway</label>
-                                <span class="gateway-config-status" id="gateway-config-status">
-                                    <span class="status-dot"></span>
-                                    <span class="gateway-config-status-text">Not connected</span>
-                                </span>
-                            </div>
-                            <nui-input id="gateway-url">
-                                <input type="url" placeholder="http://localhost:3400" id="gateway-url-input">
-                            </nui-input>
-                            <nui-input id="gateway-api-key">
-                                <input type="password" placeholder="API Key" id="gateway-api-key-input">
-                            </nui-input>
-                            <nui-button id="gateway-connect-btn">
-                                <button type="button">Connect</button>
-                            </nui-button>
-                        </nui-input-group>
-                        
                         <nui-input-group class="sidebar-section">
                             <label>Model</label>
                             <nui-select id="model-select" searchable data-label="Select model...">
@@ -225,40 +205,8 @@
                         </div>
                     </div>
                     
-                    <!-- MCP Tab -->
-                    <div>
-                        <nui-input-group class="sidebar-section">
-                            <label for="mcp-server-name-input">Add MCP Server</label>
-                            <nui-input id="mcp-server-name">
-                                <input type="text" placeholder="Server Name (e.g. Local Files)" id="mcp-server-name-input">
-                            </nui-input>
-                            <nui-input id="mcp-server-url" style="margin-top: 0.5rem;">
-                                <input type="url" placeholder="SSE URL (e.g. http://localhost:8080/sse)">
-                            </nui-input>
-                            <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">
-                                <nui-button id="mcp-add-btn" variant="primary">
-                                    <button type="button">Connect Server</button>
-                                </nui-button>
-                            </div>
-                        </nui-input-group>
-                        
-                        <div class="sidebar-section">
-                            <label>Connected Servers</label>
-                            <div id="mcp-servers-list" style="display: flex; flex-direction: column; gap: 1rem;">
-                                <!-- MCP Servers injected here -->
-                            </div>
-                        </div>
-                    </div>
-                    
                     <!-- TTS Tab -->
                     <div>
-                        <nui-input-group class="sidebar-section">
-                            <label for="tts-endpoint-input">Endpoint URL</label>
-                            <nui-input id="tts-endpoint">
-                                <input type="url" placeholder="http://localhost:2233" id="tts-endpoint-input">
-                            </nui-input>
-                        </nui-input-group>
-                        
                         <nui-input-group class="sidebar-section">
                             <label>Engine</label>
                             <nui-select id="tts-engine-select" data-label="Select engine...">
@@ -489,31 +437,6 @@
         </dialog>
     </nui-dialog>
 
-    <!-- MCP Edit Dialog -->
-    <template id="mcp-edit-template">
-        <div style="padding: 1rem; max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem;">
-            <nui-input-group>
-                <label>Server URL</label>
-                <nui-input>
-                    <input type="text" id="mcp-edit-url" readonly style="color: var(--color-shade5);">
-                </nui-input>
-            </nui-input-group>
-
-            <div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                    <h3 style="margin: 0; color: var(--text-color); font-size: 1.1rem;">Available Tools</h3>
-                    <nui-button variant="ghost" id="mcp-edit-toggle-all">
-                        <button type="button">Toggle All</button>
-                    </nui-button>
-                </div>
-                <div id="mcp-edit-tools-container" style="display: flex; flex-direction: column;">
-                    <!-- populated dynamically -->
-                </div>
-            </div>
-        </div>
-    </template>
-
-    <!-- Config - Edit chat/js/config.js to configure your Gateway -->
     <script src="js/config.js?v=2"></script>
 
     <!-- Scripts -->
@@ -521,7 +444,7 @@
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-lightbox.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-list.js?v=2" type="module"></script>
-    <script src="js/chat.js?v=34" type="module"></script>
+    <script src="js/chat.js?v=35" type="module"></script>
     <script>
         // NUI specific interactions for app shell
         document.addEventListener('click', (e) => {

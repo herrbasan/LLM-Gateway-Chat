@@ -64,6 +64,26 @@ const STREAM_STALL_MS = 300000;
 // tool loop. 12 was too low: a legitimate archive job (write N files) needs more.
 const MAX_TOOL_HOPS = 50;
 
+// Pull a readable one-liner out of a gateway/provider error body. The gateway
+// wraps the provider's JSON inside its own message string (double-encoded), so
+// peel layers until the innermost "message" surfaces, then flatten whitespace.
+function errorDetailFromBody(text, fallback) {
+    let msg = String(text || '');
+    for (let i = 0; i < 3; i++) {
+        let next = null;
+        try { next = JSON.parse(msg)?.error?.message ?? null; } catch { /* not pure JSON */ }
+        if (!next) {
+            const m = msg.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+            next = m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, ' ') : null;
+        }
+        if (!next || next === msg) break;
+        msg = next;
+    }
+    msg = msg.replace(/\s+/g, ' ').trim();
+    if (!msg) return fallback;
+    return msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
+}
+
 class Runner {
     constructor(user, dbInstance, conversationId) {
         this.user = user;
@@ -81,6 +101,14 @@ class Runner {
         this._stallTimer = null;
         this.chunkView = null; // lazy dynamic import (shared file, no port)
         this._chunkTable = new Map(); // last assembly's chunk labels → hashes (context_retire)
+        // Orphaned run? The previous process died mid-chain and left its stamp
+        // behind — mark the conversation LOUDLY, then clear the stamp. Without
+        // this a restart mid-run is a permanent silent stall (2026-08-25).
+        if (this.session.activeRun) {
+            this._persistFailureNote('Run interrupted — the server restarted while a run was in flight. Send a message to continue.')
+                .catch(err => DEPS.log().error('Orphan-run note failed', { chatId: conversationId, error: err?.message }, 'Runner'));
+            this._clearActiveRunStamp();
+        }
         this.scheduleIdle();
     }
 
@@ -108,6 +136,44 @@ class Runner {
         }
     }
     touch() { this.scheduleIdle(); }
+
+    // Active-run stamp: durable "a run chain is in flight" marker on the
+    // session doc — set when the loop starts, cleared when it drains. Survives
+    // a process kill, which is exactly when it's needed (orphan detection).
+    _setActiveRunStamp() {
+        this.refresh();
+        this.session.activeRun = { startedAt: new Date().toISOString() };
+        this.dbInstance.db.update(this.session._id, this.session);
+    }
+
+    _clearActiveRunStamp() {
+        this.refresh();
+        if (!this.session.activeRun) return;
+        delete this.session.activeRun;
+        this.dbInstance.db.update(this.session._id, this.session);
+    }
+
+    // Persist a run failure as an assistant message (error flag) — the durable
+    // counterpart of the transient 'error' broadcast, which only reaches
+    // continuously-attached views. Everyone else (reconnect, background
+    // reclaim, restart) got a quiet stop; this makes the failure part of the
+    // conversation record. ⚠️ in the content makes it unmistakable; error:true
+    // lets the view style the bubble.
+    async _persistFailureNote(detail, { atIdx = null, messageId = null, model = null } = {}) {
+        const msg = {
+            conversationId: this.conversationId,
+            role: 'assistant',
+            content: `⚠️ ${detail}`,
+            model: model || this.conv?.model || undefined,
+            error: true
+        };
+        if (messageId) msg.id = messageId;
+        const { message: stored } = atIdx !== null
+            ? await convStore.insertConversationMessageAt(this.ctx(), { conversationId: this.conversationId, message: msg, atIdx })
+            : await convStore.appendConversationMessage(this.ctx(), msg);
+        this.broadcast('msg.assistant', this.viewMessage(stored));
+        return stored;
+    }
 
     // Stall detector: abort the in-flight gateway request if no data flows for
     // STREAM_STALL_MS. Reset on every chunk (consume) — a hung stream (gateway
@@ -221,9 +287,14 @@ class Runner {
         this.touch();
         this.pendingSends++;
         this.generationParams = {};
-        for (const k of ['temperature', 'max_tokens', 'reasoning_effort']) {
+        for (const k of ['temperature', 'max_tokens', 'reasoning_effort', 'enable_thinking']) {
             if (body[k] !== undefined) this.generationParams[k] = body[k];
         }
+        // PARITY with the old chat: never force enable_thinking. When no
+        // reasoning_effort is selected, send NOTHING and let the gateway apply
+        // its per-model default (thinking on for local models). Forcing
+        // enable_thinking=false made small models roleplay the tool manual
+        // (2026-08-25) — thinking is the scratchpad that digests it.
         this.kick();
         return { message };
     }
@@ -231,14 +302,17 @@ class Runner {
     kick() {
         if (this.running) return; // queued — the loop picks it up (batch)
         this.running = true;
+        this._setActiveRunStamp();
         this.runLoop()
-            .catch(err => {
+            .catch(async err => {
                 DEPS.log().error('Runner runLoop crashed', { chatId: this.conversationId, error: err?.message, stack: err?.stack }, 'Runner');
                 this.broadcast('error', { code: 'runner', message: err?.message || 'runLoop crashed' });
+                await this._persistFailureNote(`Runner crashed: ${err?.message || 'unknown error'}`).catch(() => {});
             })
             .finally(() => {
                 this.running = false;
                 if (this.pendingSends > 0) this.kick();
+                else this._clearActiveRunStamp();
             });
     }
 
@@ -253,6 +327,7 @@ class Runner {
                 if (hops >= MAX_TOOL_HOPS) {
                     DEPS.log().warn('Runner tool-hop cap reached', { chatId: this.conversationId, hops }, 'Runner');
                     this.broadcast('error', { code: 'tool-hop-cap', message: `Tool chain stopped after ${MAX_TOOL_HOPS} hops.` });
+                    await this._persistFailureNote(`Tool chain stopped after ${MAX_TOOL_HOPS} hops — send "continue" to resume.`);
                     break;
                 }
                 more = true;
@@ -268,6 +343,7 @@ class Runner {
         const model = this.session.model;
         if (!model) {
             this.broadcast('error', { code: 'no-model', message: 'No model selected for this conversation.' });
+            await this._persistFailureNote('No model selected for this conversation — pick a model and resend.');
             this.broadcast('run.end', { finishReason: 'error', usage: null, context: null, aborted: false, messageId: null });
             return;
         }
@@ -358,6 +434,7 @@ class Runner {
                         JSON.stringify({ status: resp.status, model, generationParams: this.generationParams, toolsCount: tools.length, messages: apiMessages }, null, 2));
                 } catch { /* debug only */ }
                 this.broadcast('error', { code: `gateway-${resp.status}`, message: `Gateway ${resp.status}`, raw: text.slice(0, 2000), exchangeId });
+                this.inFlight.errorDetail = `Gateway ${resp.status}: ${errorDetailFromBody(text, 'no error body')}`;
                 outcome = 'error';
             } else {
                 await this.consume(resp);
@@ -369,12 +446,14 @@ class Runner {
             } else if (this.inFlight?.stalled) {
                 DEPS.log().error('Runner stream stalled', null, { chatId: this.conversationId, ms: STREAM_STALL_MS }, 'Runner');
                 this.broadcast('error', { code: 'stream-stall', message: `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`, exchangeId });
+                this.inFlight.errorDetail = `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`;
                 outcome = 'error';
             } else if (err?.name === 'AbortError') {
                 outcome = 'aborted';
             } else {
                 DEPS.log().error('Runner stream error', { chatId: this.conversationId, error: err?.message }, 'Runner');
                 this.broadcast('error', { code: 'stream', message: err?.message || 'stream error', exchangeId });
+                this.inFlight.errorDetail = err?.message || 'stream error';
                 outcome = 'error';
             }
         }
@@ -559,7 +638,13 @@ class Runner {
             aborted: outcome === 'aborted'
         };
         const hasPayload = !!(f.content || f.reasoning_content || f.toolCalls.filter(Boolean).length > 0);
-        if (hasPayload && outcome !== 'error') {
+        if (outcome === 'error') {
+            // FAIL LOUD, durably: persist the failure at the reserved slot so
+            // every current AND future view sees where and why the run died.
+            // The transient 'error' broadcast alone only reaches continuously-
+            // attached views — everyone else got a quiet stop (2026-08-25).
+            await this._persistFailureNote(f.errorDetail || 'Run failed.', { atIdx: f.idx, messageId: f.messageId, model: f.model });
+        } else if (hasPayload) {
             const toolCalls = f.toolCalls.filter(Boolean);
             // Aborted runs persist CONTENT only. Reasoning cut mid-stream is a
             // truncated thinking block — persisting it poisons every follow-up

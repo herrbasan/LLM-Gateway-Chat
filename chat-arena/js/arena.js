@@ -1209,9 +1209,6 @@ class ArenaUI {
         this.thinkingCheckbox = document.getElementById('thinking-checkbox');
         this.autoAdvanceCheckbox = document.getElementById('auto-advance-checkbox');
         this.startButton = document.getElementById('start-btn');
-        this.gatewayUrlInput = document.getElementById('arena-gateway-url');
-        this.gatewayApiKeyInput = document.getElementById('arena-gateway-api-key');
-        this.gatewayConnectBtn = document.getElementById('arena-gateway-connect-btn');
         this.stopButton = document.getElementById('stop-btn');
         this.summarizeBtn = document.getElementById('summarize-btn');
         this.promptInput = document.getElementById('arena-prompt-input');
@@ -1220,7 +1217,6 @@ class ArenaUI {
         this.scrollToBottomBtn = document.getElementById('scroll-to-bottom');
 
         // TTS Elements
-        this.ttsEndpoint = document.getElementById('tts-endpoint');
         this.ttsEngineASelect = document.getElementById('tts-engine-a-select');
         this.ttsEngineBSelect = document.getElementById('tts-engine-b-select');
         this.ttsVoiceASelect = document.getElementById('tts-voice-a-select');
@@ -1294,27 +1290,6 @@ class ArenaUI {
         this._importInput.style.display = 'none';
         this._importInput.addEventListener('change', (e) => this._handleFileImport(e));
         document.body.appendChild(this._importInput);
-
-        // Gateway Connect button — save URL, reload models
-        this.gatewayConnectBtn?.addEventListener('click', async () => {
-            const input = this.gatewayUrlInput?.querySelector('input');
-            const newUrl = input?.value?.trim();
-            if (!newUrl) return;
-            localStorage.setItem('gateway-url', newUrl);
-
-            const keyInput = this.gatewayApiKeyInput?.querySelector('input');
-            const newKey = keyInput?.value?.trim() || '';
-            localStorage.setItem('gateway-api-key', newKey);
-
-            try {
-                const client = _createGatewayClient(newUrl);
-                const response = await client.getModels();
-                this.models = response.data || response.models || [];
-                this._populateModelSelects();
-            } catch (err) {
-                this._showError('Failed to connect to gateway. Check the URL and API key.');
-            }
-        });
 
         // TTS controls are wired by NSpeechController.init() — no manual listeners here
 
@@ -1442,19 +1417,10 @@ class ArenaUI {
         await this._loadHistory();
 
         try {
-            const gatewayUrl = localStorage.getItem('gateway-url') || '';
-            const gatewayApiKey = _getGatewayApiKey();
-            if (this.gatewayUrlInput) {
-                const input = this.gatewayUrlInput.querySelector('input');
-                if (input) input.value = gatewayUrl;
-            }
-            if (this.gatewayApiKeyInput) {
-                const input = this.gatewayApiKeyInput.querySelector('input');
-                if (input) input.value = gatewayApiKey;
-            }
-            const client = _createGatewayClient(gatewayUrl);
-            const response = await client.getModels();
-            this.models = response.data || response.models || [];
+            const resp = await fetch('/api/models');
+            if (!resp.ok) throw new Error(`/api/models ${resp.status}`);
+            const data = await resp.json();
+            this.models = data.data || [];
 
             this._populateModelSelects();
 
@@ -1467,7 +1433,7 @@ class ArenaUI {
             }
         } catch (err) {
             console.error('Failed to fetch models:', err);
-            this._showError('Failed to fetch models. Is the gateway running?');
+            this._showError('Failed to fetch models. Is the backend running?');
         }
     }
 
@@ -1524,15 +1490,114 @@ class ArenaUI {
         return nativeSelect?.value || '';
     }
 
-    _startConversation() {
+    _newSpectatorSession(id, config) {
+        return {
+            id,
+            messages: [],
+            maxTurns: config.maxTurns || 10,
+            currentTurn: 0,
+            participantA: { name: config.nameA, modelName: config.modelA },
+            participantB: { name: config.nameB, modelName: config.modelB },
+            participantAConfig: { name: config.nameA },
+            getContextDisplayData: () => this._computeContextDisplay()
+        };
+    }
+
+    _closeArenaEvents() {
+        if (this._arenaEventSource) {
+            this._arenaEventSource.close();
+            this._arenaEventSource = null;
+        }
+    }
+
+    _attachArenaEvents(id) {
+        this._closeArenaEvents();
+        const es = new EventSource(`/api/chats/${id}/events`);
+        this._arenaEventSource = es;
+
+        es.addEventListener('snapshot', (e) => {
+            const snap = JSON.parse(e.data);
+            const cfg = snap.meta?.arenaConfig || {};
+            this.arena = this._newSpectatorSession(id, cfg);
+            this.arena.messages = snap.messages || [];
+            this.arena.maxTurns = cfg.maxTurns || this.arena.maxTurns;
+            this.arena.currentTurn = snap.currentTurn || 0;
+            if (this.messagesContainer) this.messagesContainer.innerHTML = '';
+            if (this.welcomeEl) this.welcomeEl.style.display = 'none';
+            if (this.footerEl) this.footerEl.style.display = 'block';
+            for (const m of this.arena.messages) this._renderMessage(m);
+            const activeName = snap.activeSpeaker === 'A' ? this.arena.participantA.name
+                : snap.activeSpeaker === 'B' ? this.arena.participantB.name : null;
+            this._updateStatus({ isRunning: snap.running, activeSpeaker: activeName, turn: this.arena.currentTurn });
+        });
+        es.addEventListener('msg.moderator', (e) => {
+            const msg = JSON.parse(e.data);
+            if (!this.arena) return;
+            this.arena.messages.push(msg);
+            this._renderMessage(msg);
+        });
+        es.addEventListener('turn.start', (e) => {
+            const evt = JSON.parse(e.data);
+            this._updateStatus({ isRunning: true, activeSpeaker: evt.speakerName, turn: evt.turn });
+        });
+        es.addEventListener('msg.assistant', (e) => {
+            const msg = JSON.parse(e.data);
+            if (!this.arena) return;
+            this.arena.messages.push(msg);
+            this._renderMessage(msg);
+            this._updateContextDisplay(this.arena.getContextDisplayData());
+        });
+        es.addEventListener('run.end', (e) => {
+            if (this.arena) this._updateStatus({ isRunning: false, activeSpeaker: null, turn: this.arena.currentTurn });
+        });
+        es.addEventListener('arena.end', (e) => {
+            const evt = JSON.parse(e.data);
+            if (!this.arena) return;
+            this._updateStatus({ isRunning: false, activeSpeaker: null, turn: this.arena.currentTurn });
+            if (evt.reason === 'maxTurns') this._showExtendOption(this.arena.maxTurns);
+        });
+        es.addEventListener('error', (e) => {
+            const evt = JSON.parse(e.data);
+            this._showError(evt.message || 'Arena error');
+        });
+        es.addEventListener('embed.status', (e) => {
+            const evt = JSON.parse(e.data);
+            this._updateEmbedStatus(evt.messageId, evt.status, evt.embedError);
+        });
+    }
+
+    _computeContextDisplay() {
+        const empty = { used_tokens: 0, window_size: null, isEstimate: true, participantA: {}, participantB: {} };
+        if (!this.arena) return empty;
+        const acc = (slot, msg) => {
+            const used = msg.usage?.total_tokens
+                || ((msg.usage?.prompt_tokens || 0) + (msg.usage?.completion_tokens || 0))
+                || msg.context?.used_tokens || 0;
+            const win = msg.context?.window_size || null;
+            const cur = empty[slot] || {};
+            cur.used_tokens = (cur.used_tokens || 0) + used;
+            if (win) cur.window_size = win;
+            if (used || win) cur.isEstimate = false;
+            empty[slot] = cur;
+        };
+        for (const m of (this.arena.messages || [])) {
+            if (m.speaker === this.arena.participantA?.name) acc('participantA', m);
+            else if (m.speaker === this.arena.participantB?.name) acc('participantB', m);
+        }
+        empty.used_tokens = (empty.participantA.used_tokens || 0) + (empty.participantB.used_tokens || 0);
+        const winA = empty.participantA.window_size, winB = empty.participantB.window_size;
+        empty.window_size = (winA && winB) ? Math.min(winA, winB) : (winA || winB || null);
+        empty.isEstimate = empty.used_tokens === 0;
+        return empty;
+    }
+
+    async _startConversation() {
         const topic = this.topicInput?.value?.trim();
         const modelA = this._getSelectValue(this.modelASelect);
         const modelB = this._getSelectValue(this.modelBSelect);
         const maxTurns = parseInt(this.maxTurnsInput?.value) || 10;
-        const maxTokens = this.maxTokensInput?.value?.trim() || '';
         const temperature = parseFloat(this.temperatureSlider?.value) || 0.7;
         const reasoningEffort = this.thinkingCheckbox?.checked ? 'medium' : null;
-        const autoAdvance = this.autoAdvanceCheckbox?.checked !== false;
 
         if (!topic) {
             this._showError('Please enter a topic');
@@ -1547,116 +1612,93 @@ class ArenaUI {
             return;
         }
 
-        const config = window.ARENA_CONFIG || {};
-        this.arena = new Arena({
-            gatewayUrl: localStorage.getItem('gateway-url') || config.gatewayUrl || '',
-            gatewayApiKey: _getGatewayApiKey(),
+        const config = {
+            modelA,
+            modelB,
+            nameA: modelA.split('/').pop(),
+            nameB: modelB.split('/').pop(),
+            topic,
             maxTurns,
-            autoAdvance,
             temperature,
             reasoningEffort,
-            onMessage: (msg) => this._renderMessage(msg),
-            onStatusChange: (status) => this._updateStatus(status),
-            onError: (err) => this._showError(err),
-            onMaxTurnsReached: (maxTurns) => this._showExtendOption(maxTurns),
-            onContextUpdate: (contextData) => this._updateContextDisplay(contextData),
-            onSave: () => this._loadHistory(),
-            onProgress: (progress) => this._updateGenerationProgress(progress),
-            onMessagePersisted: (msg) => this._onMessagePersisted(msg)
-        });
+            showIdentities: true,
+            systemPromptA: this.roleplayCheckbox?.checked ? (this.systemPromptAInput?.value || null) : null,
+            systemPromptB: this.roleplayCheckbox?.checked ? (this.systemPromptBInput?.value || null) : null
+        };
 
-        const systemPromptTemplate = `You are in a conversation. Your identity: {modelName}.
-You are speaking with {otherParticipantName} (model: {otherModelName}).
-Topic: {topic}
-Speak naturally as if in a thoughtful conversation. Respond concisely but thoroughly.`;
+        try {
+            const cr = await fetch('/api/chats', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'arena', title: topic.slice(0, 60), arenaConfig: config })
+            });
+            if (!cr.ok) throw new Error(`create ${cr.status}`);
+            const session = await cr.json();
 
-        // Extract short names for display (last part of model path)
-        const modelAName = modelA.split('/').pop();
-        const modelBName = modelB.split('/').pop();
+            await fetch(`/api/arena/${session.id}/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            });
 
-        // Parse targetTokens - use as hint only, not sent as hard limit
-        const parsedTargetTokens = (maxTokens && !isNaN(parseInt(maxTokens))) ? parseInt(maxTokens) : null;
+            this.arena = this._newSpectatorSession(session.id, config);
 
-        this.arena.setParticipants({
-            name: modelAName,
-            modelName: modelA,
-            temperature: temperature,
-            reasoningEffort: reasoningEffort,
-            systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptAInput?.value || systemPromptTemplate) : null
-        }, {
-            name: modelBName,
-            modelName: modelB,
-            temperature: temperature,
-            reasoningEffort: reasoningEffort,
-            systemPrompt: this.roleplayCheckbox?.checked ? (this.systemPromptBInput?.value || systemPromptTemplate) : null
-        });
-
-        // Set topic with token budget hint (models self-regulate, no hard cutoff)
-        this.arena.setTopic(topic, parsedTargetTokens);
-
-        this.arena.setTopic(topic);
-
-        // Clear messages and show conversation
-        if (this.messagesContainer) {
-            this.messagesContainer.innerHTML = '';
-        }
-
-        if (this.welcomeEl) {
-            this.welcomeEl.style.display = 'none';
-        }
-
-        if (this.footerEl) {
-            this.footerEl.style.display = 'block';
-        }
-
-        // Show continue button
-        if (this.continueBtn) {
-            const btn = this.continueBtn.querySelector('button');
-            if (btn) {
-                btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
+            if (this.messagesContainer) {
+                this.messagesContainer.innerHTML = '';
             }
-            this.continueBtn.style.display = 'inline-flex';
+            if (this.welcomeEl) {
+                this.welcomeEl.style.display = 'none';
+            }
+            if (this.footerEl) {
+                this.footerEl.style.display = 'block';
+            }
+            if (this.continueBtn) {
+                const btn = this.continueBtn.querySelector('button');
+                if (btn) {
+                    btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
+                }
+                this.continueBtn.style.display = 'inline-flex';
+            }
+            const app = document.querySelector('nui-app');
+            if (app) app.toggleSidebar('right', false);
+
+            this._renderMessage({ role: 'system', speaker: 'moderator', content: `Topic: ${topic}` });
+
+            this._attachArenaEvents(session.id);
+        } catch (err) {
+            this._showError(`Failed to start arena: ${err.message}`);
         }
-
-        // Hide sidebar on mobile
-        const app = document.querySelector('nui-app');
-        if (app) app.toggleSidebar('right', false);
-
-        // Add topic message
-        this._renderMessage({
-            role: 'system',
-            speaker: 'moderator',
-            content: `Topic: ${topic}`
-        });
-
-        this.arena.start();
-        this._startEmbedPoll();
     }
 
     _stopConversation() {
         this._stopEmbedPoll();
-        if (this.arena) {
-            this.arena.stop();
+        this._closeArenaEvents();
+        if (this.arena?.id) {
+            fetch(`/api/arena/${this.arena.id}/stop`, { method: 'POST' }).catch(() => {});
         }
     }
 
-    _sendPromptMessage() {
+    async _sendPromptMessage() {
         const text = this.promptInput?.value?.trim();
-        if (!text || !this.arena) return;
+        if (!text || !this.arena?.id) return;
 
-        // Add the prompt as a message from the moderator (to both models)
-        const messageEntry = {
-            role: 'system',
-            speaker: 'moderator',
-            content: text
-        };
-
-        this.arena.addModeratorMessage(text);
-        this._renderMessage(messageEntry);
+        this._renderMessage({ role: 'system', speaker: 'moderator', content: text });
         this.promptInput.value = '';
 
-        // Always advance after sending a prompt
-        this.arena.advanceAndRespond();
+        try {
+            await fetch(`/api/chats/${this.arena.id}/messages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role: 'system', speaker: 'moderator', content: text })
+            });
+            await fetch(`/api/arena/${this.arena.id}/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ maxTurns: this.arena.maxTurns + 1 })
+            });
+        } catch (err) {
+            this._showError(`Failed to send prompt: ${err.message}`);
+        }
     }
 
     // ============================================
@@ -1669,7 +1711,6 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             voiceCount: 2,
             storage,
             elements: {
-                endpoint: this.ttsEndpoint,
                 engineASelect: this.ttsEngineASelect,
                 engineBSelect: this.ttsEngineBSelect,
                 voiceASelect: this.ttsVoiceASelect,
@@ -1678,7 +1719,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
                 status: this.ttsStatus,
             },
             serverDefaults: {
-                endpoint: config.ttsEndpoint || '',
+                endpoint: (window.CHAT_CONFIG || {}).ttsEndpoint || config.ttsEndpoint || '',
                 voice: config.ttsVoiceA || '',
                 speed: config.ttsSpeed ?? 1.0,
             },
@@ -2389,36 +2430,23 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
     async _loadArena(id) {
         try {
-            const arena = await Arena.loadFromStorage(id);
-            if (!arena) {
-                this._showError('Arena not found');
-                return;
+            const res = await fetch(`/api/chats/${id}`);
+            if (!res.ok) throw new Error(`load ${res.status}`);
+            const data = await res.json();
+            const cfg = data.session?.arenaConfig || {};
+
+            this.arena = this._newSpectatorSession(id, cfg);
+            this.arena.messages = data.messages || [];
+
+            const topicMsg = this.arena.messages.find(m => m.role === 'system' && m.speaker === 'moderator');
+            if (this._restoreSettingsToUI) {
+                this._restoreSettingsToUI(cfg, {
+                    topic: topicMsg?.content?.replace('Topic: ', '') || cfg.topic || '',
+                    participants: [cfg.modelA, cfg.modelB],
+                    participantNames: [cfg.nameA, cfg.nameB]
+                });
             }
 
-            this.arena = arena;
-
-            // Set up callbacks for loaded arena
-            this.arena.onMessage = (msg) => this._renderMessage(msg);
-            this.arena.onStatusChange = (status) => this._updateStatus(status);
-            this.arena.onError = (err) => this._showError(err);
-            this.arena.onMaxTurnsReached = (maxTurns) => this._showExtendOption(maxTurns);
-            this.arena.onContextUpdate = (contextData) => this._updateContextDisplay(contextData);
-            this.arena.onSave = () => this._loadHistory();
-            this.arena.onProgress = (progress) => this._updateGenerationProgress(progress);
-            this.arena.onMessagePersisted = (msg) => this._onMessagePersisted(msg);
-
-            // Restore settings to UI
-            const topicMsg = arena.messages.find(m => m.role === 'system' && m.speaker === 'moderator');
-            this._restoreSettingsToUI(arena._importedSettings, {
-                topic: topicMsg?.content?.replace('Topic: ', '') || '',
-                participants: [arena.participantA?.modelName, arena.participantB?.modelName],
-                participantNames: [arena.participantA?.name, arena.participantB?.name]
-            });
-
-            // Update context display
-            this._updateContextDisplay(this.arena.getContextDisplayData());
-
-            // Show continue button so user can resume the conversation
             if (this.continueBtn) {
                 const btn = this.continueBtn.querySelector('button');
                 if (btn) {
@@ -2430,16 +2458,13 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             if (this.messagesContainer) {
                 this.messagesContainer.innerHTML = '';
             }
-
             if (this.welcomeEl) {
                 this.welcomeEl.style.display = 'none';
             }
-
             if (this.footerEl) {
                 this.footerEl.style.display = 'block';
             }
 
-            // Render existing messages
             for (const msg of this.arena.messages) {
                 this._renderMessage(msg);
             }
@@ -2447,10 +2472,11 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
             this._updateStatus({
                 isRunning: false,
                 activeSpeaker: null,
-                turn: this.arena.currentTurn
+                turn: this.arena.messages.filter(m => m.role === 'assistant').length
             });
+            this._updateContextDisplay(this.arena.getContextDisplayData());
 
-            this._startEmbedPoll();
+            this._attachArenaEvents(id);
             await this._loadHistory();
         } catch (err) {
             this._showError(`Failed to load arena: ${err.message}`);
@@ -2677,7 +2703,7 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
     _showSetupView() {
         // Reset arena
         if (this.arena) {
-            this.arena.close();
+            this._closeArenaEvents();
             this.arena = null;
         }
 
@@ -2788,18 +2814,15 @@ Speak naturally as if in a thoughtful conversation. Respond concisely but thorou
 
         // Resume if stopped â€” turn was already advanced when last message completed,
         // so just trigger the current activeSpeaker without advancing again
-        if (!this.arena.isRunning) {
-            this.arena.isRunning = true;
-            this.arena.isPaused = false;
-            
-            // Ensure activeSpeaker is set correctly
-            if (!this.arena.activeSpeaker) {
-                const isParticipantATurn = this.arena.currentTurn % 2 === 0;
-                this.arena.activeSpeaker = isParticipantATurn ? this.arena.participantA : this.arena.participantB;
-            }
+        try {
+            await fetch(`/api/arena/${this.arena.id}/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ maxTurns: this.arena.maxTurns })
+            });
+        } catch (err) {
+            this._showError(`Failed to continue: ${err.message}`);
         }
-        
-        this.arena._triggerResponse();
     }
 
     _restoreSettingsToUI(settings, data) {

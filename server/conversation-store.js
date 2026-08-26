@@ -91,6 +91,7 @@ function normalizeStoredMessage(msg = {}) {
     if (msg.usage) message.usage = msg.usage;
     if (msg.context) message.context = msg.context;
     if (msg.tool_calls) message.tool_calls = msg.tool_calls;
+    if (msg.error) message.error = true;
     if (Array.isArray(msg.versions)) {
         message.versions = msg.versions;
         message.currentVersion = msg.currentVersion !== undefined ? msg.currentVersion : msg.versions.length - 1;

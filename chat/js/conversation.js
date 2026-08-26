@@ -79,6 +79,7 @@ export function messagesToExchanges(messages) {
                     if (msg.model) target.model = msg.model;
                     if (msg.embedStatus) target.assistant.embedStatus = msg.embedStatus;
                     if (msg.embedError) target.assistant.embedError = msg.embedError;
+                    if (msg.error) target.assistant.error = true;
                     target.assistant.isComplete = true;
                     target.assistant.isStreaming = false;
                     if (Array.isArray(msg.versions) && msg.versions.length) {

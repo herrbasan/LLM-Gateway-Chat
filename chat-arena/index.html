@@ -100,19 +100,6 @@
                     <!-- Conversation Tab -->
                     <div>
                         <div class="sidebar-section">
-                            <label>Gateway URL</label>
-                            <nui-input id="arena-gateway-url">
-                                <input type="url" placeholder="http://localhost:3400" id="arena-gateway-url-input">
-                            </nui-input>
-                            <nui-input id="arena-gateway-api-key">
-                                <input type="password" placeholder="API Key" id="arena-gateway-api-key-input">
-                            </nui-input>
-                            <nui-button id="arena-gateway-connect-btn" style="margin-top: 0.5rem;">
-                                <button type="button">Connect</button>
-                            </nui-button>
-                        </div>
-                        
-                        <div class="sidebar-section">
                             <label>Topic</label>
                             <nui-textarea>
                                 <textarea id="topic-input" placeholder="Enter a topic for the conversation..." rows="2"></textarea>
@@ -213,13 +200,6 @@ Speak naturally as if in a thoughtful conversation.</textarea>
                     
                     <!-- TTS Tab -->
                     <div>
-                        <div class="sidebar-section">
-                            <label>Endpoint URL</label>
-                            <nui-input id="tts-endpoint">
-                                <input type="url" placeholder="http://localhost:2233">
-                            </nui-input>
-                        </div>
-                        
                         <div class="sidebar-section">
                             <label>Engine A</label>
                             <nui-select id="tts-engine-a-select" data-label="Select engine...">
@@ -330,7 +310,7 @@ Speak naturally as if in a thoughtful conversation.</textarea>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
 
     <!-- Arena App -->
-    <script type="module" src="js/arena.js"></script>
+    <script type="module" src="js/arena.js?v=2"></script>
 
     <script>
         // NUI specific interactions for app shell

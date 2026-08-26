@@ -288,7 +288,7 @@ const ARCHIVE_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'chat_archive_get_session',
-            description: `${SERVER_EXEC_NOTE}\\n\\nRetrieve a specific conversation session by ID.\\n\\nTo process session data with a forge tool: (1) call this tool to get session data, (2) call storage.write to persist it, (3) pass the storage URL as forge.call payload.\\n\\nWhen saveToStorage is true, this tool writes the full session JSON directly to workshop storage and returns ONLY the URL — use this when you need to pass large session data to a forge tool that would overflow the context window.`,
+            description: `${SERVER_EXEC_NOTE}\\n\\nRetrieve a specific conversation session by ID. Results over 32 KB are auto-CHUNKED like browser_fetch (returns bucketFile + chunk count; page with browser_fetch bucket_file/chunk and retire consumed chunks with context_retire) — a full session can be far larger than your context window, so never try to inline it whole.\\n\\nTo process session data with a forge tool: (1) call this tool to get session data, (2) call storage.write to persist it, (3) pass the storage URL as forge.call payload.\\n\\nWhen saveToStorage is true, this tool writes the full session JSON directly to workshop storage and returns ONLY the URL — use this when you need to pass large session data to a forge tool that would overflow the context window.`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -564,19 +564,27 @@ async function executeInternalTool(name, args, ctx) {
             }
 
             const paged = data.messages?.slice(offset, offset + limit) || [];
+            const text = JSON.stringify({
+                session: { ...pickSessionMeta(data.session), messageCount: data.messages?.length },
+                offset, limit,
+                returned: paged.length,
+                messages: paged.map(m => ({
+                    role: m.role, model: m.model, turnIndex: m.turnIndex,
+                    speaker: m.speaker,
+                    content: m.content
+                }))
+            }, null, 2);
+            // Bound the result: a full session can be 100s of KB — enough to
+            // blow a small model's context window in ONE tool message (gateway
+            // 400, run dead, 2026-08-25). Same auto-chunk pattern as
+            // browser_fetch: bucket the payload, page it in 16 KB chunks.
+            if (Buffer.byteLength(text, 'utf8') > CHUNK_THRESHOLD_BYTES) {
+                return chunkLargeText(Buffer.from(text, 'utf8'), 'application/json', dbInstance, 'archive_session');
+            }
             return {
                 content: [{
                     type: 'text',
-                    text: JSON.stringify({
-                        session: { ...pickSessionMeta(data.session), messageCount: data.messages?.length },
-                        offset, limit,
-                        returned: paged.length,
-                        messages: paged.map(m => ({
-                            role: m.role, model: m.model, turnIndex: m.turnIndex,
-                            speaker: m.speaker,
-                            content: m.content
-                        }))
-                    }, null, 2)
+                    text
                 }]
             };
         }
@@ -720,10 +728,10 @@ function splitChunks(text, chunkBytes) {
     return chunks;
 }
 
-function chunkLargeText(buffer, contentType, dbInstance) {
+function chunkLargeText(buffer, contentType, dbInstance, prefix = 'browser_fetch') {
     const text = buffer.toString('utf8');
     const chunkCount = Math.max(1, Math.ceil(text.length / CHUNK_BYTES));
-    const filename = `browser_fetch_${Date.now()}.txt`;
+    const filename = `${prefix}_${Date.now()}.txt`;
     const meta = dbInstance.db.storeFile('images', filename, buffer, contentType || 'text/plain');
     const bucketFile = `images:${meta._file.id}.${meta._file.ext}`;
     return {

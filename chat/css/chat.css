@@ -1042,6 +1042,12 @@ nui-code pre {
     font-size: 0.875rem;
 }
 
+/* Persisted run-failure bubble (runner error notes) */
+.chat-message.assistant.run-error .message-content {
+    border-left: 3px solid #ef4444;
+    padding-left: 0.75rem;
+}
+
 
 /* Mobile Styles */
 @media (max-width: 48rem) {

@@ -7,9 +7,13 @@
 //
 // Config source: the per-user settings doc (settings.mcpServers /
 // settings.mcpEnabledTools) — the browser's localStorage config moves here
-// (deep-dive G5). DEVIATION from the browser: tools default to ENABLED when
-// mcpEnabledTools is absent (the runner is the only tool user; the model
-// decides). UI hooks and the trace buffer are intentionally not ported.
+// (deep-dive G5). Tools default to ENABLED (2026-08-25, user direction): the
+// chat always advertises all MCP tools; mcpEnabledTools is an opt-OUT map
+// (false disables). The workshop dispatcher's ~24K-char description — the
+// thing that made small models roleplay the agent protocol (2026-08-25
+// incident) — is replaced with a compact one in getFormattedTools; the chat
+// prime directive (Agents_Prime_Chat.md) carries the tool catalog instead.
+// UI hooks and the trace buffer are not ported.
 // ============================================
 
 const TOOL_TIMEOUT_MS = 120000; // matches the browser client
@@ -218,6 +222,18 @@ function sseUrlBase(url) {
     return `${u.protocol}//${u.host}`;
 }
 
+// Compact replacement for the workshop dispatcher's ~24K-char description:
+// the chat prime directive (Agents_Prime_Chat.md) carries the tool catalog and
+// usage rules, so the schema only needs the mechanics. Keeps small-context
+// models viable with MCP tools always advertised (2026-08-25).
+const DISPATCHER_DESCRIPTION = 'Workshop unified dispatcher (MCP server: memory, storage, browser/research, vdb, git, llm, forge, vision). Call with {method: "agent.action", payload: {...}} — payload is ALWAYS a JSON object. Your system instructions contain the full tool catalog and usage rules. Response is wrapped: parse content[0].text (usually JSON); isError:true = failure — surface it.';
+
+function slimDescription(def) {
+    const d = def.description || '';
+    if (def.name === 'tools' && d.startsWith('WORKSHOP UNIFIED API')) return DISPATCHER_DESCRIPTION;
+    return d;
+}
+
 class UserPool {
     constructor(user, dbInstance, log) {
         this.user = user;
@@ -253,8 +269,13 @@ class UserPool {
     }
 
     isEnabled(serverId, toolName) {
+        // Default ENABLED (2026-08-25, user direction): the chat always has all
+        // MCP tools. Config is opt-OUT per tool (`false` disables). An
+        // enabledCfg keyed by a stale server id (the old browser-id trap:
+        // '1781102824474' vs migrated 'workshop') can no longer silence every
+        // tool — worst case it loses the ability to disable.
         const per = this.enabledCfg?.[serverId];
-        if (!per) return true; // default ENABLED server-side (see header note)
+        if (!per) return true;
         return per[toolName] !== false;
     }
 
@@ -269,9 +290,17 @@ class UserPool {
             if (srv.status !== 'connected' || !srv.tools) continue;
             for (const t of srv.tools) {
                 if (!this.isEnabled(srv.id, t.name)) continue;
+                // Always prefix with the server name: `workshop.tools` — the
+                // old-chat convention. A bare `tools` name reads as a category
+                // placeholder to models (they never called it — 2026-08-25
+                // parity test) and collides with the API's own `tools` key.
+                // `serverName__toolName` stays the disambiguation scheme for
+                // same-tool-name collisions across servers.
                 let llmName = t.name;
                 if (nameCounts.get(t.name) > 1) {
                     llmName = `${srv.name.replace(/[^a-zA-Z0-9_-]/g, '_')}__${t.name}`;
+                } else if (!llmName.includes('.')) {
+                    llmName = `${srv.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.${t.name}`;
                 }
                 this.registry.set(llmName, { server: srv, originalName: t.name, definition: t });
             }
@@ -286,7 +315,7 @@ class UserPool {
                 type: 'function',
                 function: {
                     name: llmName,
-                    description: rec.definition.description || '',
+                    description: slimDescription(rec.definition),
                     parameters: rec.definition.inputSchema || { type: 'object', properties: {} }
                 }
             });

@@ -10,6 +10,7 @@ const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
 const convStore = require('./conversation-store');
 const runner = require('./runner');
+const arenaRunner = require('./arena-runner');
 const mcpPool = require('./mcp-pool');
 
 // Load minimal .env natively
@@ -57,52 +58,30 @@ let embedAvailable = true;
 let embedFailCount = 0;
 
 // ============================================
-// Prime Directive (fetched fresh from workshop, platform-filtered)
+// Prime Directive (read fresh from MCP storage on every send)
 // ============================================
-// The canonical Agents_Prime.md in MCP storage is shared by VS Code (loads it
-// verbatim as an instruction file) and the chat app (fetches it through this
-// function). Platform-specific sections in the canonical are wrapped in
-// HTML-comment markers:
-//     <!-- PLATFORM: vscode:start --> ... <!-- PLATFORM: vscode:end -->
-// Blocks whose platform list excludes the target are stripped here, so the
-// chat app never receives IDE-only content (self-sync, AppData paths, git
-// working-copy rules, repo-doc conventions, runSubagent delegation).
-// Marker contract: no nesting, `all` = every platform, comma-separated lists.
+// The chat app has its own hand-maintained directive:
+// documentation/Workshop/Agents_Prime_Chat.md — sibling of the VS Code/agent
+// canonical (Agents_Prime.md), authored for chat (no IDE content, includes
+// the workshop tool catalog). The backend runs on the same machine as the MCP
+// storage box, so it reads the file directly from disk: no HTTP hop, no
+// timeout failure mode, and edits take effect on the next send. Only the YAML
+// frontmatter is stripped. Retired 2026-08-25: the automated PLATFORM-marker
+// extraction from the canonical (drift-prone, ~6.4K tokens every turn).
 
-function filterPlatformSections(md, target) {
-    const t = target.toLowerCase();
-    // Drop whole blocks whose platform list excludes the target.
-    md = md.replace(
-        /<!--\s*PLATFORM:\s*([^:]+?):start\s*-->[\s\S]*?<!--\s*PLATFORM:\s*[^:]+?:\s*end\s*-->/gi,
-        (match, list) => {
-            const platforms = list.split(',').map((s) => s.trim().toLowerCase());
-            return platforms.includes(t) || platforms.includes('all') ? match : '';
-        }
-    );
-    // Strip any markers that survived (blocks kept for this target).
-    md = md.replace(/<!--\s*PLATFORM:\s*[^:]+?:(?:start|end)\s*-->\s*/gi, '');
-    return md;
-}
+const PRIME_DIRECTIVE_PATH = 'D:\\MCP_Storage\\documentation\\Workshop\\Agents_Prime_Chat.md';
 
-async function fetchPrimeDirective(target = 'chat') {
+async function fetchPrimeDirective() {
     try {
-        const resp = await fetch('http://192.168.0.100:3100/storage/documentation/Workshop/Agents_Prime.md', {
-            signal: AbortSignal.timeout(3000)
-        });
-        if (!resp.ok) {
-            L().warn('Prime directive fetch failed', { status: resp.status }, 'Server');
-            return '';
-        }
-        let md = await resp.text();
+        let md = fs.readFileSync(PRIME_DIRECTIVE_PATH, 'utf8');
         // Strip YAML frontmatter (between first two --- lines)
         if (md.startsWith('---')) {
             const second = md.indexOf('---', 3);
             if (second !== -1) md = md.slice(second + 3).trimStart();
         }
-        // Strip IDE-only sections for the target platform (default: chat).
-        return filterPlatformSections(md, target);
+        return md;
     } catch (e) {
-        L().warn('Prime directive fetch failed', { error: e?.message }, 'Server');
+        L().warn('Prime directive read failed', { path: PRIME_DIRECTIVE_PATH, error: e?.message }, 'Server');
         return '';
     }
 }
@@ -481,7 +460,8 @@ runner.init({
     publicOrigin: process.env.CHAT_PUBLIC_ORIGIN || `http://localhost:${PORT}`,
     embedMessageAsync,
     log: L,
-    getInstructions: () => fetchPrimeDirective(),
+    getInstructions: async () => (await fetchPrimeDirective())
+        || 'You are a helpful, conversational AI assistant in LLM Gateway Chat. Respond naturally and directly to the user. Use the archive and memory tools (described below) when they help, otherwise just have a natural conversation.',
     idleMs: 10 * 60 * 1000,
     embedBatch,
     getEmbedAvailable: () => embedAvailable
@@ -489,6 +469,13 @@ runner.init({
 internalTools.init({ log: L });
 embedEvents.on('status', runner.handleEmbedStatus);
 mcpPool.init({ log: L });
+arenaRunner.init({
+    gatewayUrl: process.env.LLM_GATEWAY_URL || cfg.gatewayUrl || 'http://127.0.0.1:3400',
+    gatewayKey: process.env.GATEWAY_API_KEY || null,
+    embedMessageAsync,
+    log: L
+});
+embedEvents.on('status', arenaRunner.handleEmbedStatus);
 
 function parseCookies(req) {
     const list = {};
@@ -1740,8 +1727,12 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      const r = runner.getRunner(user, dbInstance, params.id);
-      r.attach(req, res); // do NOT json()/end — SSE stays open
+      const session = dbInstance.db.find('id', params.id).find(s => s._type === 'session');
+      if (session?.mode === 'arena') {
+        arenaRunner.getArenaRunner(user, dbInstance, params.id).attach(req, res);
+      } else {
+        runner.getRunner(user, dbInstance, params.id).attach(req, res); // do NOT json()/end — SSE stays open
+      }
     } catch (e) {
       json(res, { error: e.message }, 404, req);
     }
@@ -1756,6 +1747,39 @@ const routes = {
     try {
       const r = runner.getRunner(user, dbInstance, params.id);
       json(res, { aborted: r.abort() }, 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
+
+  // ---- ArenaRunner (Phase D): server-owned autonomous arena ----
+  // Start (or restart) the turn loop. Config is already on the session's
+  // arenaConfig (set at creation); the body is optional overrides.
+  'POST /api/arena/:id/start': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    const body = await readBody(req);
+    try {
+      const r = arenaRunner.getArenaRunner(user, dbInstance, params.id);
+      await r.start(body || {});
+      json(res, { started: true }, 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
+
+  // Stop the turn loop (aborts the in-flight turn).
+  'POST /api/arena/:id/stop': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    try {
+      const r = arenaRunner.getArenaRunner(user, dbInstance, params.id);
+      r.stop();
+      json(res, { stopped: true }, 200, req);
     } catch (e) {
       json(res, { error: e.message }, 404, req);
     }

@@ -184,14 +184,7 @@ const elements = {
     overallContextTooltip: document.getElementById('overall-context-tooltip'),
     stopButton: document.getElementById('stop-btn'), // Added safe fallback
 
-    // MCP Elements
-    mcpServerName: document.getElementById('mcp-server-name'),
-    mcpServerUrl: document.getElementById('mcp-server-url'),
-    mcpAddBtn: document.getElementById('mcp-add-btn'),
-    mcpServersList: document.getElementById('mcp-servers-list'),
-
     // TTS Elements
-    ttsEndpoint: document.getElementById('tts-endpoint'),
     ttsEngineSelect: document.getElementById('tts-engine-select'),
     ttsVoiceSelect: document.getElementById('tts-voice-select'),
     ttsSpeed: document.getElementById('tts-speed'),
@@ -398,6 +391,7 @@ function _runnerAssistant(chatId, msg) {
             ex.assistant.streamStats = msg.streamStats || null;
             ex.assistant.model = msg.model || ex.assistant.model || null;
             ex.assistant.embedStatus = msg.embedStatus || 'pending';
+            if (msg.error) ex.assistant.error = true;
             ex.assistant.isComplete = true;
             ex.assistant.isStreaming = false;
             ex._asstMsgId = msg.id || null;
@@ -423,6 +417,30 @@ function _runnerRunEnd(chatId, d) {
     s.exchangeId = null;
     renderHistoryList();
     if (d.finishReason !== 'tool_calls') _hideActivity();
+    // Reclaim finished background chats — their stream + hidden DOM would
+    // otherwise accumulate forever and exhaust the browser's 6-connection
+    // HTTP/1.1 pool (everything network then hangs; tab appears dead).
+    if (chatId !== currentChatId && d.finishReason !== 'tool_calls') {
+        _teardownView(chatId);
+    }
+}
+
+// Tear down a chat's view: close its SSE stream, drop its hidden DOM
+// container and cached conversation. The chat re-attaches cleanly (fresh
+// snapshot) the next time it is opened. Never tears down the visible chat.
+function _teardownView(chatId) {
+    if (chatId === currentChatId) return;
+    const v = runnerViews.get(chatId);
+    if (v?.es) { try { v.es.close(); } catch {} }
+    if (v?.streaming?.tickTimer) clearInterval(v.streaming.tickTimer);
+    runnerViews.delete(chatId);
+    activeConversations.delete(chatId);
+    const container = chatContainers.get(chatId);
+    if (container) {
+        _vsDeactivate(container);
+        container.remove();
+        chatContainers.delete(chatId);
+    }
 }
 
 function _runnerError(chatId, d) {
@@ -1157,9 +1175,8 @@ async function init() {
     initContainer.style.display = 'flex'; // show the active chat
     attachRunnerEvents(currentChatId);
 
-    // Init MCP (load config from storage)
+    // Load MCP config from storage (servers still back vision/preview features)
     await mcpClient.ready();
-    initMCP();
 
     // TTS controller initializes inside applyDefaultConfig() — no separate call needed
 }
@@ -1237,7 +1254,6 @@ async function applyDefaultConfig() {
         voiceCount: 1,
         storage,
         elements: {
-            endpoint: elements.ttsEndpoint,
             engineSelect: elements.ttsEngineSelect,
             voiceSelect: elements.ttsVoiceSelect,
             speed: elements.ttsSpeed,
@@ -1906,11 +1922,19 @@ async function sendMessage() {
 
     // Send — the runner appends the user message (broadcasts msg.user) and starts
     // the run (run.start / delta / msg.assistant); rendering is event-driven.
-    const res = await runnerClient.send(sendChatId, {
-        content,
-        attachments,
-        model: sendModel
-    });
+    // Forward the live generation params (temperature / max tokens / thinking
+    // effort) so the runner applies them to the gateway call.
+    const temperature = parseFloat(elements.temperature?.querySelector('input')?.value) || DEFAULT_TEMPERATURE;
+    const maxTokensRaw = elements.maxTokens?.querySelector('input')?.value?.trim();
+    const maxTokens = maxTokensRaw ? parseInt(maxTokensRaw) : null;
+    const effortSel = elements.thinkingEffortSelect;
+    const effort = effortSel?.getValue?.() ?? effortSel?.querySelector('select')?.value ?? 'none';
+
+    const sendBody = { content, attachments, model: sendModel, temperature };
+    if (maxTokens && !isNaN(maxTokens)) sendBody.max_tokens = maxTokens;
+    if (effort && effort !== 'none') sendBody.reasoning_effort = effort;
+
+    const res = await runnerClient.send(sendChatId, sendBody);
     if (!res.ok) {
         nui.components.dialog.alert('Send failed', res.data?.error || `send failed (${res.status})`);
     }
@@ -3408,6 +3432,8 @@ function showError(el, message) {
 // the global may point at a different chat if the user switched mid-tool.
 function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null, streamStats = null, conversationRef = null) {
     const convRef = conversationRef || conversation;
+    const ex = convRef?.getExchange?.(exchangeId);
+    if (ex?.assistant?.error) el.classList.add('run-error');
     el.dataset.isStreaming = 'false';
     // Remove waiting placeholder — the bubble is now complete or errored
     const waitingEl = el.querySelector('.assistant-waiting');
@@ -3748,6 +3774,15 @@ async function switchChat(targetChatId) {
         container.style.display = id === targetChatId ? 'flex' : 'none';
     }
 
+    // Reclaim idle background chats (connection pool + memory): keep only the
+    // visible chat and chats with a live run. A fresh snapshot re-attaches on
+    // the next visit, so nothing is lost.
+    for (const id of [...runnerViews.keys()]) {
+        if (id === targetChatId) continue;
+        if (runnerViews.get(id)?.streaming?.el) continue; // mid-run — keep
+        _teardownView(id);
+    }
+
     // 6. Activate virtual scroll after container is visible and web components settle
     if (targetContainer.children.length > 0 && !targetContainer.querySelector('.vs-stage')) {
         _vsActivateWhenReady(targetContainer);
@@ -3832,6 +3867,14 @@ async function deleteChat(chatId, e) {
 
     // Abort any ongoing run for this chat
     runnerClient.abort(chatId).catch(() => {});
+
+    // Close the chat's event stream and drop its view. _teardownView skips
+    // the visible chat, so close explicitly first — a leaked EventSource per
+    // deleted chat exhausts the browser's per-origin connection pool.
+    const v = runnerViews.get(chatId);
+    if (v?.es) { try { v.es.close(); } catch {} }
+    if (v?.streaming?.tickTimer) clearInterval(v.streaming.tickTimer);
+    runnerViews.delete(chatId);
 
     // Clean up multi-conversation state
     activeConversations.delete(chatId);
@@ -4963,232 +5006,6 @@ function isNearBottom(threshold = 100, container = null) {
     if (!target) return true;
     const { scrollTop, scrollHeight, clientHeight } = target;
     return scrollHeight - scrollTop - clientHeight < threshold;
-}
-
-// ============================================
-// PHASE-2: MCP Configuration UI Layer
-// ============================================
-
-function initMCP() {
-    // Set up global callback for MCP client to refresh UI when tools are loaded
-    window.refreshMCPServersUI = () => renderMCPServers();
-    
-    // 1. Initial render
-    renderMCPServers();
-
-    // 2. Wire up 'Add Server' button
-    if (elements.mcpAddBtn) {
-        elements.mcpAddBtn.addEventListener('click', async () => {
-            const nameInput = elements.mcpServerName.querySelector('input');
-            const urlInput = elements.mcpServerUrl.querySelector('input');
-            const name = nameInput.value.trim();
-            const url = urlInput.value.trim();
-            if (!name || !url) return alert('Name and URL are required');
-            
-            mcpClient.addServer(url, name);
-            nameInput.value = '';
-            urlInput.value = '';
-            renderMCPServers();
-            
-            // Auto connect the newly added one
-            const server = mcpClient.servers[mcpClient.servers.length - 1];
-            try {
-                await mcpClient.connectToServer(server);
-            } catch (e) {
-                console.error("Auto-connect failed", e);
-            }
-            renderMCPServers();
-        });
-    }
-
-    // 3. Connect existing offline servers on load
-    mcpClient.servers.forEach(async (server) => {
-        if (server.status === 'disconnected') {
-            try {
-                await mcpClient.connectToServer(server);
-                renderMCPServers();
-            } catch (e) {
-                renderMCPServers();
-            }
-        }
-    });
-
-}
-
-function renderMCPServers() {
-    if (!elements.mcpServersList) return;
-    elements.mcpServersList.innerHTML = ''; // basic clear
-
-    mcpClient.servers.forEach(server => {
-        const card = document.createElement('nui-card');
-        card.className = "mcp-server-card";
-        
-        let badgeVariant = '';
-          if (server.status === 'connected') badgeVariant = 'success';
-          if (server.status === 'error') badgeVariant = 'danger';
-          if (server.status === 'connecting...' || server.status === 'reconnecting') badgeVariant = 'warning';
-
-        const isConnected = server.status === 'connected';
-        const isTransitioning = server.status === 'connecting...' || server.status === 'reconnecting';
-        
-        const enabledToolsMap = mcpClient.enabledTools.get(server.id);
-        let activeCount = 0;
-        let totalCount = server.tools ? server.tools.length : 0;
-        if (server.tools && enabledToolsMap) {
-            server.tools.forEach(t => {
-                if (enabledToolsMap.get(t.name)) {
-                    activeCount++;
-                }
-            });
-        }
-
-        let html = `
-            <div class="mcp-server-inner">
-                <!-- Header: Title and Toggle -->
-                <div class="mcp-server-header">
-                    <h3 class="mcp-server-title">${server.name}</h3>
-                    <nui-checkbox variant="switch" title="Connect/Disconnect"><input type="checkbox" data-mcp-status-toggle="${server.id}" ${isConnected || isTransitioning ? 'checked' : ''} ${isTransitioning ? 'disabled' : ''}></nui-checkbox>
-                </div>
-
-                <!-- Status Badge -->
-                <div class="mcp-server-status-row">
-                    <nui-badge variant="${badgeVariant}" class="mcp-server-status-badge">
-                        <span class="mcp-server-status-dot">&#11044;</span> ${isConnected ? 'connected (' + activeCount + '/' + totalCount + ' active)' : server.status}
-                    </nui-badge>
-                  </div>
-
-                  <!-- Bottom Actions -->
-                <div class="mcp-server-actions">
-                    <nui-button variant="icon" title="Edit Server" data-mcp-edit="${server.id}">
-                        <button type="button" aria-label="Edit">
-                            <nui-icon name="edit"></nui-icon>
-                        </button>
-                    </nui-button>
-                    <nui-button variant="icon" title="Remove Server" data-mcp-remove="${server.id}">
-                        <button type="button" aria-label="Remove">
-                            <nui-icon name="delete"></nui-icon>
-                        </button>
-                    </nui-button>
-                </div>
-            </div>
-        `;
-
-        card.innerHTML = html;
-
-        // Wire Event Listeners
-        const removeBtn = card.querySelector('[data-mcp-remove]');
-        if(removeBtn) {
-            removeBtn.addEventListener('click', () => {
-                mcpClient.removeServer(server.id);
-                renderMCPServers();
-            });
-        }
-
-        const editBtn = card.querySelector('[data-mcp-edit]');
-        if (editBtn) {
-            editBtn.addEventListener('click', () => {
-                openMCPEditDialog(server);
-            });
-        }
-
-        const toggle = card.querySelector(`nui-checkbox`);
-        if (toggle) {
-            toggle.addEventListener('nui-change', (e) => {
-                if (e.detail.checked) {
-                    mcpClient.connectToServer(server).catch(err => {
-                        console.error("Connect failed", err);
-                        renderMCPServers();
-                    });
-                } else {
-                    mcpClient.disconnectServer(server.id);
-                }
-                renderMCPServers();
-            });
-        }
-
-        elements.mcpServersList.appendChild(card);
-    });
-}
-
-async function openMCPEditDialog(server) {
-    const template = document.getElementById('mcp-edit-template');
-    if (!template) return;
-    
-    // We clone the template content
-    const content = template.content.cloneNode(true);
-    
-    // Get inner elements
-    const urlInput = content.getElementById('mcp-edit-url');
-    if (urlInput) urlInput.value = server.url;
-    
-    const toolsContainer = content.getElementById('mcp-edit-tools-container');
-    if (!toolsContainer) return;
-    
-    toolsContainer.innerHTML = '';
-
-    if (!server.tools || server.tools.length === 0) {
-        toolsContainer.innerHTML = '<p class="mcp-empty-tools">No tools available. Connect the server to load tools.</p>';
-    } else {
-        server.tools.forEach(tool => {
-            const isEnabled = mcpClient.enabledTools.get(server.id)?.get(tool.name) ?? false;
-            const toolEl = document.createElement('label');
-            toolEl.style.cssText = 'display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid var(--color-shade2); cursor: pointer;';
-
-            const nuiCheckbox = document.createElement('nui-checkbox');
-            nuiCheckbox.innerHTML = `<input type="checkbox" data-mcp-toggle="${server.id}" data-mcp-tool="${tool.name}">`;
-            const input = nuiCheckbox.querySelector('input');
-            if (isEnabled) input.checked = true;
-
-            toolEl.appendChild(nuiCheckbox);
-            const textDiv = document.createElement('div');
-            textDiv.style.cssText = 'display: flex; flex-direction: column; gap: 0.25rem;';
-            textDiv.innerHTML = `
-                <span class="mcp-tool-name">${tool.name}</span>
-                <span class="mcp-tool-desc">${tool.description || 'No description available.'}</span>
-            `;
-            toolEl.appendChild(textDiv);
-            
-            toolsContainer.appendChild(toolEl);
-        });
-    }
-
-    const { dialog, main } = await nui.components.dialog.page(`Edit Server: ${server.name}`, '', {
-        contentScroll: true,
-        buttons: [
-            { label: 'Cancel', type: 'outline', value: 'cancel' },
-            { label: 'Save Changes', type: 'primary', value: 'save' }
-        ]
-    });
-    main.appendChild(content);
-
-    const toggleAllBtn = main.querySelector('#mcp-edit-toggle-all button');
-    if (toggleAllBtn) {
-        toggleAllBtn.addEventListener('click', () => {
-            const inputs = Array.from(main.querySelectorAll('#mcp-edit-tools-container input[type="checkbox"]'));
-            const allChecked = inputs.every(i => i.checked);
-            
-            inputs.forEach(input => {
-                input.checked = !allChecked;
-                const evt = new CustomEvent('change', { bubbles: true });
-                input.dispatchEvent(evt);
-            });
-        });
-    }
-
-    // Handle button clicks
-    dialog.addEventListener('nui-dialog-close', (e) => {
-        const action = e.detail?.returnValue;
-        if (action === 'save') {
-             const allCheckboxes = main.querySelectorAll('input[type="checkbox"]');
-             allCheckboxes.forEach(cb => {
-                 const toolName = cb.dataset.mcpTool;
-                 const isEnabled = cb.checked;
-                 mcpClient.setToolEnabled(server.id, toolName, isEnabled);
-             });
-             renderMCPServers();
-             nui.components.toast?.success?.('MCP Server capabilities updated');
-        }
-    });
 }
 
 function setupDialogEventListeners() {
