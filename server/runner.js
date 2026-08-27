@@ -210,6 +210,10 @@ class Runner {
     }
     broadcast(event, data) {
         for (const res of this.views) this.sendTo(res, event, data);
+        // Multiplex into the user-level stream (issue #19): the browser view
+        // listens on ONE shared /api/events SSE and routes by chatId, instead of
+        // holding one EventSource open per chat.
+        DEPS.emitUserEvent?.(this.user.id, this.conversationId, event, data);
     }
 
     // Progress indication: log + broadcast a phase transition so a view (and the

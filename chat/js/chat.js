@@ -40,7 +40,7 @@ const CONFIG = window.CHAT_CONFIG || {};
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
-const TTS_ENDPOINT = CONFIG.ttsEndpoint || '/api/tts'; // same-origin backend proxy → nSpeech
+const TTS_ENDPOINT = CONFIG.ttsEndpoint || 'http://localhost:2233';
 const TTS_VOICE = CONFIG.ttsVoice || '';
 const TTS_SPEED = CONFIG.ttsSpeed ?? 1.0;
 const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http://localhost:3500';
@@ -3683,13 +3683,19 @@ async function startNewChat() {
     const newChatId = await chatHistory.create();
     currentChatId = newChatId;
 
-    // Reset model selection for the new chat — user must explicitly choose
-    currentModel = '';
+    // Restore last-used model — pref is kept current on every selection
+    // (nui-change). Validate against the loaded list; fall back to first model
+    // (same semantics as the chat-switch path), empty only if no models loaded.
+    let restoreModel = await storage.getPref('default-model');
+    if (!restoreModel || !models.some(m => m.id === restoreModel)) {
+        restoreModel = models.length > 0 ? models[0].id : '';
+    }
+    currentModel = restoreModel;
     if (elements.modelSelect.setValue) {
-        elements.modelSelect.setValue('');
+        elements.modelSelect.setValue(restoreModel);
     } else {
         const select = elements.modelSelect?.querySelector('select');
-        if (select) select.value = '';
+        if (select) select.value = restoreModel;
     }
 
     // Cache the new conversation

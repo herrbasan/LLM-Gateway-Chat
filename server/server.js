@@ -3,7 +3,6 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const { Readable } = require('stream');
 const { EventEmitter } = require('events');
 
 const { Database: nDB } = require('../lib/ndb/napi');
@@ -465,7 +464,12 @@ runner.init({
         || 'You are a helpful, conversational AI assistant in LLM Gateway Chat. Respond naturally and directly to the user. Use the archive and memory tools (described below) when they help, otherwise just have a natural conversation.',
     idleMs: 10 * 60 * 1000,
     embedBatch,
-    getEmbedAvailable: () => embedAvailable
+    getEmbedAvailable: () => embedAvailable,
+    // Multiplexing (issue #19): forward every runner event into the user-level
+    // listEvents pipe as an `r.<event>` frame carrying chatId — one SSE per TAB
+    // instead of one per open chat (browser HTTP/1.1 cap is ~6 conns per host).
+    emitUserEvent: (userId, chatId, event, data) =>
+        listEvents.emit('event', { userId, event: 'r.' + event, data: { chatId, ...data } })
 });
 internalTools.init({ log: L });
 embedEvents.on('status', runner.handleEmbedStatus);
@@ -552,52 +556,6 @@ function requireAuth(req, res) {
 // ============================================
 // JSON Response Helper
 // ============================================
-
-// ============================================
-// nSpeech proxy helper — stream a request through to nSpeech.
-// GET: catalog calls (JSON). POST: speech synthesis — the request body is a
-// small JSON payload (buffered), the audio response is streamed to the client.
-// ============================================
-
-function ttsBase() {
-  return (process.env.TTS_ENDPOINT || cfg.ttsEndpoint || 'http://localhost:2233').replace(/\/+$/, '');
-}
-
-async function proxyTts(req, res, nspeechPath) {
-  const authResult = requireAuth(req, res);
-  if (!authResult) return;
-
-  const url = new URL(req.url, 'http://localhost');
-  const target = ttsBase() + nspeechPath + url.search;
-
-  const init = { method: req.method, headers: {} };
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    init.body = Buffer.concat(chunks);
-    if (req.headers['content-type']) init.headers['Content-Type'] = req.headers['content-type'];
-  }
-
-  let upstream;
-  try {
-    upstream = await fetch(target, init);
-  } catch (e) {
-    json(res, { error: `nSpeech unreachable: ${e.message}` }, 502, req);
-    return;
-  }
-
-  const outHeaders = {
-    'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream'
-  };
-  res.writeHead(upstream.status, outHeaders);
-  if (upstream.body) {
-    const stream = Readable.fromWeb(upstream.body);
-    stream.on('error', (e) => { logger?.error('TTS proxy stream failed', e, {}, 'TTS'); stream.destroy(); res.destroy(); });
-    stream.pipe(res);
-  } else {
-    res.end();
-  }
-}
 
 function json(res, data, status = 200, req = null) {
   const headers = {
@@ -1182,17 +1140,6 @@ const routes = {
       json(res, { error: e.message }, 502, req);
     }
   },
-
-  // ============================================
-  // nSpeech same-origin proxy (TTS)
-  //
-  // The view must not talk to nSpeech directly — nSpeech binds localhost on
-  // the server host, so remote clients can't reach it. All TTS traffic
-  // (engines/voices catalogs + binary speech streams) is proxied through the
-  // backend. Audio responses are PIPED chunk-by-chunk, never buffered.
-  'GET /api/tts/v1/voices': (req, res) => proxyTts(req, res, '/v1/voices'),
-  'GET /api/tts/v1/admin/engines': (req, res) => proxyTts(req, res, '/v1/admin/engines'),
-  'POST /api/tts/v1/audio/speech': (req, res) => proxyTts(req, res, '/v1/audio/speech'),
 
   // Frontend telemetry — receive client-side log events and forward to nLogger
   'POST /api/client-log': async (req, res) => {
@@ -1795,6 +1742,21 @@ const routes = {
       json(res, { error: e.message }, 404, req);
     }
   },
+
+  // Snapshot over REST — the multiplexed view (runner-client.js) fetches state
+  // here instead of holding a per-chat SSE open (issue #19). Arena keeps the
+  // per-chat /events stream above.
+  'GET /api/chats/:id/snapshot': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    try {
+      json(res, runner.getRunner(user, dbInstance, params.id).buildSnapshot(), 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
   
   // Abort the active run
   'POST /api/chats/:id/abort': async (req, res, params) => {
@@ -2144,7 +2106,7 @@ const server = http.createServer(async (req, res) => {
       defaultModel: process.env.UI_DEFAULT_MODEL || '',
       defaultTemperature: parseFloat(process.env.UI_DEFAULT_TEMP || 0.7),
       defaultMaxTokens: process.env.UI_DEFAULT_TOKENS ? parseInt(process.env.UI_DEFAULT_TOKENS) : null,
-      ttsEndpoint: '/api/tts', // same-origin proxy → nSpeech (see proxyTts); TTS_ENDPOINT env is the server-side nSpeech address
+      ttsEndpoint: process.env.TTS_ENDPOINT || 'http://localhost:2233',
       ttsVoice: process.env.TTS_VOICE || '',
       ttsSpeed: parseFloat(process.env.TTS_SPEED || 1.0),
       backendUrl: '',
