@@ -236,10 +236,10 @@ class UserPool {
         // The browser syncs its localStorage config into the kebab-case namespace
         // ('mcp-servers' / 'mcp-enabledTools'); the doc default uses camelCase.
         this.enabledCfg = s['mcp-enabledTools'] || s.mcpEnabledTools || null;
-        const list = (Array.isArray(s['mcp-servers']) && s['mcp-servers'].length)
+        const userList = (Array.isArray(s['mcp-servers']) && s['mcp-servers'].length)
             ? s['mcp-servers']
             : (Array.isArray(s.mcpServers) ? s.mcpServers : []);
-        this.servers = list.map(cfg => new ServerConn(cfg, this.log));
+        this.servers = (userList.length ? userList : DEFAULT_SERVERS).map(cfg => new ServerConn(cfg, this.log));
     }
 
     async ensureConnected() {
@@ -348,7 +348,14 @@ class UserPool {
 
 const pools = new Map(); // userId -> UserPool
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
-function init({ log }) { LOG = log; }
+// Backend-configured MCP servers (MCP_URL in .env / cfg.mcpUrl). Used when a
+// user has no own mcp-servers entry — the rework's target: server URLs are
+// backend config, not per-user data.
+let DEFAULT_SERVERS = [];
+function init({ log, defaultServers }) {
+    LOG = log;
+    DEFAULT_SERVERS = Array.isArray(defaultServers) ? defaultServers : [];
+}
 
 function getForUser(user, dbInstance) {
     let p = pools.get(user.id);

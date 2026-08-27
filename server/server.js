@@ -44,6 +44,9 @@ const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   
 const EMBED_MAX_TOKENS = parseInt(process.env.CHAT_EMBED_MAX_TOKENS || cfg.embedMaxTokens) || 30000;
 const EMBED_TOK_RATIO  = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
 const FILES_DIR       = process.env.CHAT_FILES_DIR     || cfg.filesDir           || path.join(path.dirname(path.resolve(USERS_DB_PATH)), 'files');
+// Workshop MCP server — backend-configured like gateway/TTS. The pool falls
+// back to this when a user has no own mcp-servers entry (the normal case).
+const MCP_URL         = process.env.MCP_URL            || cfg.mcpUrl             || null;
 
 const EMBED_API_KEY = process.env.GATEWAY_API_KEY || cfg.embedApiKey || null;
 
@@ -473,7 +476,10 @@ runner.init({
 });
 internalTools.init({ log: L });
 embedEvents.on('status', runner.handleEmbedStatus);
-mcpPool.init({ log: L });
+mcpPool.init({
+    log: L,
+    defaultServers: MCP_URL ? [{ id: 'workshop', name: 'workshop', url: MCP_URL }] : []
+});
 arenaRunner.init({
     gatewayUrl: process.env.LLM_GATEWAY_URL || cfg.gatewayUrl || 'http://127.0.0.1:3400',
     gatewayKey: process.env.GATEWAY_API_KEY || null,
