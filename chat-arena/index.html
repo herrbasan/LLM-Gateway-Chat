@@ -146,12 +146,18 @@
                         </div>
 
                         <div class="sidebar-section">
-                            <div class="checkbox-group">
-                                <nui-checkbox>
-                                    <input type="checkbox" id="thinking-checkbox">
-                                </nui-checkbox>
-                                <label for="thinking-checkbox">Enable Thinking/Reasoning</label>
-                            </div>
+                            <nui-input-group class="sidebar-section">
+                                <label for="thinking-effort-select">Thinking</label>
+                                <nui-select id="thinking-effort-select">
+                                    <select>
+                                        <option value="none">Off</option>
+                                        <option value="low">Low</option>
+                                        <option value="medium">Medium</option>
+                                        <option value="high">High</option>
+                                        <option value="max">Max</option>
+                                    </select>
+                                </nui-select>
+                            </nui-input-group>
                         </div>
 
                         <div class="sidebar-section">

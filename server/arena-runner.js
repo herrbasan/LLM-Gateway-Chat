@@ -272,12 +272,18 @@ class ArenaRunner {
             tools: [] // ISOLATION: arena models have no tool access, ever.
         };
         if (cfg.temperature !== undefined) body.temperature = cfg.temperature;
-        // Explicit thinking control — the local models default to enable_thinking
-        // true in config, which leaks reasoning tokens into the conversation and
-        // makes them loop. Disable unless the user asked for reasoning.
-        body.extra_body = { chat_template_kwargs: { enable_thinking: !!cfg.reasoningEffort } };
-        if (cfg.reasoningEffort) {
+        // Normalized thinking control. Two wire fields because the gateway
+        // splits by model class: API providers (DeepSeek/Kimi/GLM) honor
+        // reasoning_effort:'none' (validated against declared thinkingLevels);
+        // local llama.cpp models honor enable_thinking → chat_template_kwargs.
+        // Sending both covers both classes; the gateway drops what a model
+        // doesn't declare.
+        if (cfg.reasoningEffort === 'none') {
+            body.reasoning_effort = 'none';
+            body.enable_thinking = false;
+        } else if (cfg.reasoningEffort) {
             body.reasoning_effort = cfg.reasoningEffort;
+            body.enable_thinking = true;
         }
 
         this.resetStallTimer();

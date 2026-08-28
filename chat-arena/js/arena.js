@@ -1206,7 +1206,7 @@ class ArenaUI {
         this.maxTurnsInput = document.getElementById('max-turns');
         this.temperatureSlider = document.getElementById('temperature-slider');
         this.temperatureValue = document.getElementById('temperature-value');
-        this.thinkingCheckbox = document.getElementById('thinking-checkbox');
+        this.thinkingEffortSelect = document.getElementById('thinking-effort-select');
         this.autoAdvanceCheckbox = document.getElementById('auto-advance-checkbox');
         this.startButton = document.getElementById('start-btn');
         this.stopButton = document.getElementById('stop-btn');
@@ -1635,7 +1635,9 @@ class ArenaUI {
         const answer = parseThinking(s.content).answer || s.content || '';
         let html = '';
         if (s.reasoning) {
-            html += `<div class="thinking-block collapsed"><div class="thinking-header"><span class="thinking-title">Thoughts</span></div><div class="thinking-content">${this._escapeHtml(s.reasoning)}</div></div>`;
+            // Streaming: keep expanded so the user sees reasoning fill in live.
+            // Collapsed-only-after-finalize (when the full message replaces the bubble).
+            html += `<div class="thinking-block"><div class="thinking-header"><span class="thinking-title">Thoughts</span></div><div class="thinking-content">${this._escapeHtml(s.reasoning)}</div></div>`;
         }
         html += renderMarkdown(answer);
         contentEl.innerHTML = html;
@@ -1682,7 +1684,11 @@ class ArenaUI {
         const modelB = this._getSelectValue(this.modelBSelect);
         const maxTurns = parseInt(this.maxTurnsInput?.value) || 10;
         const temperature = parseFloat(this.temperatureSlider?.value) || 0.7;
-        const reasoningEffort = this.thinkingCheckbox?.checked ? 'medium' : null;
+        const effortSel = this.thinkingEffortSelect;
+        const effort = effortSel?.getValue?.() ?? effortSel?.querySelector('select')?.value ?? 'none';
+        // 'none' must reach the server — it maps to enable_thinking:false there.
+        // null/undefined would mean "gateway default" (thinking ON for local models).
+        const reasoningEffort = effort || 'none';
 
         if (!topic) {
             this._showError('Please enter a topic');
@@ -1742,13 +1748,13 @@ class ArenaUI {
                 if (btn) {
                     btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
                 }
-                this.continueBtn.style.display = 'inline-flex';
             }
             const app = document.querySelector('nui-app');
             if (app) app.toggleSidebar('right', false);
 
             this._renderMessage({ role: 'system', speaker: 'moderator', content: `Topic: ${topic}` });
 
+            this._setRunning(true);
             this._attachArenaEvents(session.id);
             await this._loadHistory(); // the new arena's tab appears immediately
         } catch (err) {
@@ -1759,6 +1765,7 @@ class ArenaUI {
     _stopConversation() {
         this._stopEmbedPoll();
         this._closeArenaEvents();
+        this._setRunning(false);
         if (this.arena?.id) {
             fetch(`/api/arena/${this.arena.id}/stop`, { method: 'POST' }).catch(() => {});
         }
@@ -2053,10 +2060,16 @@ class ArenaUI {
         this.scrollToBottomBtn.style.display = this._isNearBottom() ? 'none' : 'block';
     }
 
+    _setRunning(isRunning) {
+        if (this.stopButton) this.stopButton.style.display = isRunning ? 'inline-flex' : 'none';
+        if (this.continueBtn) this.continueBtn.style.display = isRunning ? 'none' : 'inline-flex';
+    }
+
     _updateStatus(status) {
         if (!this.turnInfo) return;
 
         this.turnInfo.textContent = `Turn ${status.turn}/${this.arena?.maxTurns || 10}`;
+        this._setRunning(status.isRunning);
 
         if (this.speakerIndicator) {
             if (status.activeSpeaker) {
@@ -2209,14 +2222,14 @@ class ArenaUI {
             // Update context display
             this._updateContextDisplay(this.arena.getContextDisplayData());
 
-            // Show continue button so user can resume the conversation
+            // Imported arena is stopped — Stop hidden, Continue shown.
             if (this.continueBtn) {
                 const btn = this.continueBtn.querySelector('button');
                 if (btn) {
                     btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
                 }
-                this.continueBtn.style.display = 'inline-flex';
             }
+            this._setRunning(false);
 
             if (this.messagesContainer) {
                 this.messagesContainer.innerHTML = '';
@@ -2538,8 +2551,8 @@ class ArenaUI {
                 if (btn) {
                     btn.innerHTML = '<nui-icon name="play"></nui-icon> Continue';
                 }
-                this.continueBtn.style.display = 'inline-flex';
             }
+            this._setRunning(false);
 
             if (this.messagesContainer) {
                 this.messagesContainer.innerHTML = '';
@@ -2946,9 +2959,16 @@ class ArenaUI {
             }
         }
 
-        // Restore thinking checkbox
-        if (this.thinkingCheckbox) {
-            this.thinkingCheckbox.checked = !!settings?.reasoningEffort;
+        // Restore thinking effort select ('none' = send nothing, gateway applies model default)
+        if (this.thinkingEffortSelect) {
+            const valid = ['none', 'low', 'medium', 'high', 'max'];
+            const effort = valid.includes(settings?.reasoningEffort) ? settings.reasoningEffort : 'none';
+            if (this.thinkingEffortSelect.setValue) {
+                this.thinkingEffortSelect.setValue(effort);
+            } else {
+                const sel = this.thinkingEffortSelect.querySelector('select');
+                if (sel) sel.value = effort;
+            }
         }
 
         // Restore auto-advance checkbox
