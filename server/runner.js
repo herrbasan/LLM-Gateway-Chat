@@ -454,8 +454,13 @@ class Runner {
             } catch (e) {
                 DEPS.log().warn('Model capability lookup failed', { chatId: this.conversationId, error: e.message }, 'Runner');
             }
-            const hasAutoVisionAnalysis = this.conv.messages.some(m => m.role === 'user' && typeof m.content === 'string' && m.content.includes('[Auto-vision:'));
-            tools = tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision, hasAutoVisionAnalysis }));
+            // Vision-tool gating on capability alone. The old [Auto-vision: marker
+            // sniff was dead — nothing has produced that marker since the rework
+            // (auto-vision never moved server-side), so hasAutoVisionAnalysis was
+            // permanently false. Vision model → sees images natively, vision tools
+            // are redundant indirection → filtered. Non-vision model → tools kept
+            // as the fallback path. (#21 / #18)
+            tools = tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision }));
             this._toolsAdvertised = tools.length > 0;
             this._mcpOrigin = mcpOrigin;
             this.resetStallTimer();

@@ -451,12 +451,13 @@ function isInternalTool(name) {
     return INTERNAL_TOOL_NAMES.has(name);
 }
 
-// Vision filter (PB-b): mirror of chat.js shouldFilterVisionTools. Server-side
-// simplification: the browser MCP-vision toggle does not exist here — when the
-// model supports vision it gets images directly, so vision tools are filtered;
-// when auto-vision already ran, they are filtered too.
-function filterVisionTools(tools, { modelSupportsVision = false, hasAutoVisionAnalysis = false } = {}) {
-    if (!modelSupportsVision && !hasAutoVisionAnalysis) return tools;
+// Vision filter (PB-b): when the model supports vision it receives images
+// natively (the runner/api-view always attach them), so the MCP vision tools
+// are redundant indirection — filtered out. Non-vision models keep them as the
+// fallback path. (The hasAutoVisionAnalysis content-sniff was dropped: nothing
+// has produced the [Auto-vision: marker since the rework — see runner runOnce.)
+function filterVisionTools(tools, { modelSupportsVision = false } = {}) {
+    if (!modelSupportsVision) return tools;
     return tools.filter(tool => {
         const toolName = tool.function?.name?.toLowerCase() || '';
         return !toolName.includes('vision.') && !toolName.includes('vision_');
