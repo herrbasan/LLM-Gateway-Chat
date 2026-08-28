@@ -50,21 +50,4 @@ function countApiMessages(apiMessages, model) {
     return total;
 }
 
-// Count the STORED message list (the runner's canonical conversation form) —
-// used to give the snapshot a fresh, honest context figure for an already-
-// loaded conversation whose persisted per-message context predates the real
-// counting (the gateway only ever counted m.content). Covers the same fields
-// as countApiMessages plus tool-result content (stored role:'tool' messages).
-function countStoredMessages(messages, model) {
-    let total = 3;
-    for (const m of messages) {
-        total += 4;
-        total += textOf(m.content, model);
-        if (m.reasoning_content) total += encode(m.reasoning_content, model);
-        if (m.tool_calls) total += encode(JSON.stringify(m.tool_calls), model);
-        if (m.role === 'tool' && m.toolArgs) total += encode(JSON.stringify(m.toolArgs), model);
-    }
-    return total;
-}
-
-module.exports = { countApiMessages, countStoredMessages, encode };
+module.exports = { countApiMessages, encode };

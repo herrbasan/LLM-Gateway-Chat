@@ -11,7 +11,7 @@
 const convStore = require('./conversation-store');
 const { buildApiMessages } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
-const { countApiMessages, countStoredMessages } = require('./token-count');
+const { countApiMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
 const internalTools = require('./internal-tools');
 
@@ -208,7 +208,9 @@ class Runner {
             'Connection': 'keep-alive'
         });
         res.write(':ok\n\n');
-        this.sendTo(res, 'snapshot', this.buildSnapshot());
+        // buildSnapshot is async (real payload count) — send when ready.
+        this.buildSnapshot().then(snap => this.sendTo(res, 'snapshot', snap))
+            .catch(e => DEPS.log().warn('Snapshot build failed', { chatId: this.conversationId, error: e.message }, 'Runner'));
         this.views.add(res);
         const ka = setInterval(() => { try { res.write(':ka\n\n'); } catch { /* view gone */ } }, 15000);
         req.on('close', () => { clearInterval(ka); this.views.delete(res); });
@@ -250,20 +252,29 @@ class Runner {
         return cloned;
     }
 
-    buildSnapshot() {
+    async buildSnapshot() {
         this.refresh();
         const lastAssistant = [...this.conv.messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
-        // Fresh, honest context for the pill: recount the FULL stored history
-        // (content + reasoning + tool_calls + tool results) instead of trusting
-        // the persisted per-message context, which predates real counting and is
-        // the gateway's content-only underestimate. This is what makes an
-        // already-loaded conversation show its true fill.
-        const realUsed = countStoredMessages(this.conv.messages || [], this.session.model);
-        const realContext = {
-            window_size: lastAssistant?.context?.window_size ?? null,
+        // Honest context: count the EXACT payload a turn would send (same assembly
+        // as runOnce — chunk-view dedup + retirements applied), not the raw stored
+        // history and not the gateway's content-only underestimate. Load and live
+        // now agree because they measure the same thing.
+        let realUsed = null;
+        let windowSize = lastAssistant?.context?.window_size ?? null;
+        try {
+            const { apiMessages } = await this._assemblePayload();
+            realUsed = countApiMessages(apiMessages, this.session.model);
+            if (windowSize == null) {
+                const models = await getModels();
+                windowSize = models.find(m => m.id === this.session.model)?.capabilities?.contextWindow ?? null;
+            }
+        } catch (e) {
+            DEPS.log().warn('Snapshot context count failed', { chatId: this.conversationId, error: e.message }, 'Runner');
+        }
+        const realContext = realUsed == null ? (lastAssistant?.context ?? null) : {
+            window_size: windowSize,
             used_tokens: realUsed,
-            available_tokens: lastAssistant?.context?.window_size != null
-                ? Math.max(0, lastAssistant.context.window_size - realUsed) : null,
+            available_tokens: windowSize != null ? Math.max(0, windowSize - realUsed) : null,
             strategy_applied: false,
             counted: 'runner'
         };
@@ -373,6 +384,37 @@ class Runner {
         }
     }
 
+    // Assemble the exact outgoing payload (system prompt + chunk-view/dedup/
+    // retirement transform + image resolution). Single source of truth shared by
+    // runOnce (the live turn) and buildSnapshot (the on-load context figure), so
+    // the pill counts the SAME thing whether the conversation is fresh-loaded or
+    // mid-stream — fixing the load-vs-live divergence (#10).
+    async _assemblePayload() {
+        const [instructions, chunkView] = await Promise.all([
+            DEPS.getInstructions(),
+            this.chunkView ? Promise.resolve(this.chunkView) : import('../chat/js/chunk-view.js').then(m => (this.chunkView = m))
+        ]);
+        const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        const mcpOrigin = pool.getStorageOrigin();
+        const systemPrompt = buildSystemPrompt({
+            instructions,
+            user: this.userProfile(),
+            sessionPrompt: this.session.systemPrompt || '',
+            archiveTools: { sessionId: this.conversationId, mcpOrigin, serverSide: true },
+            mcpResources: null,
+            memoryToolsAvailable: pool.hasToolPrefix('memory.')
+        });
+        return buildApiMessages(this.conv.messages, {
+            systemPrompt,
+            publicOrigin: DEPS.publicOrigin,
+            chunkTransform: this.session.chunkTransform === true,
+            retirements: this.session.retirements || {},
+            chunkView,
+            log: DEPS.log(),
+            readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
+        });
+    }
+
     async runOnce() {
         this.refresh();
         const model = this.session.model;
@@ -400,29 +442,7 @@ class Runner {
 
         let outcome = 'stop';
         try {
-            const [instructions, chunkView] = await Promise.all([
-                DEPS.getInstructions(),
-                this.chunkView ? Promise.resolve(this.chunkView) : import('../chat/js/chunk-view.js').then(m => (this.chunkView = m))
-            ]);
-            const pool = mcpPool.getForUser(this.user, this.dbInstance);
-            const mcpOrigin = pool.getStorageOrigin();
-            const systemPrompt = buildSystemPrompt({
-                instructions,
-                user: this.userProfile(),
-                sessionPrompt: this.session.systemPrompt || '',
-                archiveTools: { sessionId: this.conversationId, mcpOrigin, serverSide: true },
-                mcpResources: null,
-                memoryToolsAvailable: pool.hasToolPrefix('memory.')
-            });
-            const { messages: apiMessages, chunkTable } = buildApiMessages(this.conv.messages, {
-                systemPrompt,
-                publicOrigin: DEPS.publicOrigin,
-                chunkTransform: this.session.chunkTransform === true,
-                retirements: this.session.retirements || {},
-                chunkView,
-                log: DEPS.log(),
-                readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
-            });
+            const { apiMessages, chunkTable } = await this._assemblePayload();
             this._chunkTable = chunkTable;
 
             // Authoritative context count: the side holding the real payload does
@@ -799,7 +819,7 @@ class Runner {
                 conversationId: this.conversationId, messageId, content
             });
             this.refresh();
-            this.broadcast('snapshot', this.buildSnapshot());
+            this.broadcast('snapshot', await this.buildSnapshot());
             return { edited: true, messageId };
         }
 
@@ -809,7 +829,7 @@ class Runner {
         this.refresh();
         // Full snapshot: one edit + N removals is cleaner as a re-render than
         // N incremental events.
-        this.broadcast('snapshot', this.buildSnapshot());
+        this.broadcast('snapshot', await this.buildSnapshot());
         this.pendingSends++;
         this.kick();
         return { edited: true, messageId, removedCount };
