@@ -415,7 +415,7 @@ class Runner {
             log: DEPS.log(),
             readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
         });
-        return { apiMessages: messages, chunkTable };
+        return { apiMessages: messages, chunkTable, mcpOrigin };
     }
 
     async runOnce() {
@@ -445,7 +445,7 @@ class Runner {
 
         let outcome = 'stop';
         try {
-            const { apiMessages, chunkTable } = await this._assemblePayload();
+            const { apiMessages, chunkTable, mcpOrigin } = await this._assemblePayload();
             this._chunkTable = chunkTable;
             // Keep the exact payload for the run-end context count (the real
             // on-the-wire size — the limit-relevant number).
