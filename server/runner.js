@@ -11,7 +11,7 @@
 const convStore = require('./conversation-store');
 const { buildApiMessages } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
-const { countApiMessages } = require('./token-count');
+const { countApiMessages, countStoredMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
 const internalTools = require('./internal-tools');
 
@@ -247,6 +247,20 @@ class Runner {
     buildSnapshot() {
         this.refresh();
         const lastAssistant = [...this.conv.messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
+        // Fresh, honest context for the pill: recount the FULL stored history
+        // (content + reasoning + tool_calls + tool results) instead of trusting
+        // the persisted per-message context, which predates real counting and is
+        // the gateway's content-only underestimate. This is what makes an
+        // already-loaded conversation show its true fill.
+        const realUsed = countStoredMessages(this.conv.messages || [], this.session.model);
+        const realContext = {
+            window_size: lastAssistant?.context?.window_size ?? null,
+            used_tokens: realUsed,
+            available_tokens: lastAssistant?.context?.window_size != null
+                ? Math.max(0, lastAssistant.context.window_size - realUsed) : null,
+            strategy_applied: false,
+            counted: 'runner'
+        };
         return {
             meta: {
                 id: this.session.id,
@@ -262,7 +276,7 @@ class Runner {
             messages: this.conv.messages.map(m => this.viewMessage(m)),
             inFlight: this.inFlight ? this.inFlightView() : null,
             running: this.running,
-            lastRun: lastAssistant ? { usage: lastAssistant.usage ?? null, context: lastAssistant.context ?? null } : null
+            lastRun: lastAssistant ? { usage: lastAssistant.usage ?? null, context: realContext } : { usage: null, context: realContext }
         };
     }
 
