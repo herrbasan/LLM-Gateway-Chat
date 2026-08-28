@@ -2,7 +2,7 @@
 
 **Author:** deepseek-flash-chat survey (P−1)
 **Date:** 2026-08-23
-**Scope:** `D:\DEV\LLM-Gateway-Chat` (branch `bff-rework`)
+**Scope:** `D:\DEV\LLM-Gateway-Chat` (branch `bff-rework`) — written pre-ship; the branch merged to `master` 2026-08-28, so `D:\DEV` paths now read as `D:\SRV`. Line citations are a 2026-08-23 snapshot; retired channels are marked inline.
 **Purpose:** Test the six-channel hypothesis in `docs/plan-backend-routed-refactor.md` §1 against the actual code, inventory callsites and coupling, and correct spec §2.
 **Tracking:** LLM-Gateway-Chat issue #12.
 

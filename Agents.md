@@ -19,7 +19,7 @@
 
 Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM Gateway for chat streaming and embeddings; persistence in embedded Rust DBs (nDB documents, nVDB vectors).
 
-**The refactor:** today the browser orchestrates gateway, MCP, TTS, and persistence directly — eight browser→upstream channels (spec §1). Target: the ConversationRunner architecture — conversations are server-side sessions, the browser is a disposable attach/detach view, persistence is a side effect of the runner's traffic. **PC realign has LANDED (2026-08-24):** the existing `chat/` UI is now wired to the runner (`send` → `/send`, render ← `/events`); orchestration retires channel by channel. **Arena re-based on the server ArenaRunner (Phase D, landed e06f3dd, fix cluster 2026-08-26):** the arena conversation is a server-side autonomous session; `chat-arena/` is a spectator view. Remaining direct-gateway remnant there: summary generation + legacy import. Completed phase plans and session handovers are archived under `docs/_Archive/`.
+**The refactor SHIPPED 2026-08-28:** the ConversationRunner architecture runs live — conversations are server-side sessions, the browser is a disposable attach/detach view over `snapshot + events`, persistence is a side effect of the runner's traffic. The existing `chat/` UI is wired to the runner (`send` → `/send`, render ← `/events`); tools execute server-side; the arena conversation is a server-side autonomous session with `chat-arena/` as spectator view; TTS is proxied same-origin via `/api/tts/*` (f319393). Remaining direct-gateway remnant: arena summary generation + legacy import; dead browser orchestration (client-sdk/mcp-client/conversation state machine) awaits the PD cleanup pass. Completed phase plans and session handovers are archived under `docs/_Archive/`.
 
 ## Technology Stack
 
@@ -55,11 +55,11 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 |--------|------|
 | `chat/js/chat.js` | UI controller + runner event handlers (`_runner*`): rendering, login, presets, admin; send → `/send`, render ← `/events` |
 | `chat/js/runner-client.js` | same-origin SSE attach + REST (`send`/`abort`/`deleteMessage`/`editMessage`) + list-events sync (`attachListEvents`) — the view's only backend for a runner-owned conversation |
-| `chat/js/client-sdk.js` | `GatewayClient` — SSE-over-REST to gateway. **Retiring** (the runner owns the gateway call) |
+| `chat/js/client-sdk.js` | `GatewayClient` — SSE-over-REST to gateway. **Retired for chat** (the runner owns the gateway call); still used by arena summary generation — a PD remnant |
 | `chat/js/api-client.js` | `BackendClient` — same-origin REST (cookie auth, `/api/chats`, `/api/search`, `/api/auth/*`) |
-| `chat/js/conversation.js` | `messagesToExchanges` (stored→exchange projection). State machine / persistence / API formatting **retiring** |
+| `chat/js/conversation.js` | `messagesToExchanges` (stored→exchange projection). State machine / persistence / API formatting **retired** |
 | `chat/js/chat-history.js` | Multi-conversation management, backend CRUD, localStorage fallback |
-| `chat/js/mcp-client.js` | MCP SSE connections, tool registry. **Retiring** — tools run server-side in the runner |
+| `chat/js/mcp-client.js` | MCP SSE connections, tool registry. **Retired** — tools run server-side in the runner |
 | `chat/js/file-store.js` | Attachment upload → `/api/buckets/images/…`, returns lightweight URLs |
 | `chat/js/preview.js`, `preview-url.js`, `chunk-view.js` | Preview pane + chunk inspection |
 | `chat-arena/js/arena.js` | Arena **spectator view** over the server ArenaRunner (snapshot + events via `/api/chats/:id/events`, start/stop/extend via `/api/arena/:id/*`). Legacy `Participant`/`Arena` classes (lines ~40–1165) are dead orchestration except: summary generation (`summarize`, direct `GatewayClient`) and legacy import — **cutover remnants** |

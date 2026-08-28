@@ -1,9 +1,8 @@
 # Spec: Backend-Routed Refactor (BFF) + Multi-User Scoping
 
 **Date:** 2026-08-23 (specced during an nPort session; execution happens in THIS repo)
-**Status:** ARCHITECTURE PIVOT (2026-08-23) — the proxy-retrofit is replaced by the **ConversationRunner** architecture; [architecture-conversation-runner.md](architecture-conversation-runner.md) is the design authority. Survey: [codebase-survey-bff.md](codebase-survey-bff.md) (channel × callsite authority; §1/§2 corrected with its findings). Retrofit P0 design kept as input: [_Archive/plan-p0-stream-ownership.md](_Archive/plan-p0-stream-ownership.md). Phases re-scoped in §4. **PA FULLY SPECIFIED (2026-08-24):** [_Archive/pa-implementation-spec.md](_Archive/pa-implementation-spec.md) — frame schemas + helper extraction, approved.
-**Branch:** `bff-rework` (worktree `D:\DEV\LLM-Gateway-Chat`, dev port 8082)
-**Live:** `D:\SRV\LLM-Gateway-Chat` on `master`, port 8080 — must keep working throughout
+**Status:** **SHIPPED TO LIVE 2026-08-28** — the ConversationRunner architecture (PA–PC + arena Phase D) runs on `master` in `D:\SRV`, port 8080. Remaining: PD cutover remnants (dead browser orchestration: client-sdk/mcp-client/conversation state machine; arena summary + legacy import) → then P2/P3/P4. Design authority: [architecture-conversation-runner.md](architecture-conversation-runner.md). Survey: [codebase-survey-bff.md](codebase-survey-bff.md) (channel × callsite authority). Retrofit P0 design kept as input: [_Archive/plan-p0-stream-ownership.md](_Archive/plan-p0-stream-ownership.md).
+**Environment:** live-only — `D:\SRV\LLM-Gateway-Chat` on `master` (see §7). The `D:\DEV` worktree workflow is suspended.
 **Tracking:** LLM-Gateway-Chat issue #12
 **Revives:** `refactor-backend-routed-communication.md` (archived 2026-07-11 — "backend proxy concept may be revisited later"). This is that revisit.
 **Supersedes (direction only):** `plan-client-side-service-urls.md` (2026-07-11) — its localStorage URL config stays valid knowledge, but the end state makes per-service browser URLs obsolete: the browser talks same-origin only.
@@ -15,8 +14,8 @@
 - **Small steps.** Execute one phase (or sub-item) at a time; the user reviews between steps.
 - The user is not a backend engineer and runs at variable capacity. Explain changes in plain terms, one concept at a time.
 - He sometimes thinks aloud — confirm before acting on ambiguous directives (memory #1665).
-- Work ONLY in the worktree on `bff-rework`. Live hotfixes (rare) go to `master` in `D:\SRV`; merge `master` into `bff-rework` after each hotfix to prevent drift.
-- The executing session should load memory #1664 (session record) and read this file fully before touching code.
+- **Post-ship (2026-08-28):** work happens directly in `D:\SRV` on `master` — the live tree. The server runs under nPM; coordinate stop/start with the user around backend edits and restarts.
+- The executing session should read this file fully before touching code.
 
 ## 1. Why
 
@@ -160,7 +159,7 @@ Verify `/health` and `/v1/models` through the public domain before declaring don
 - Admin surface localhost-only; remote admin via SSH tunnel.
 - BFF rework and multi-user scoping are ONE plan — server-attached identity is what makes P3 enforceable.
 - Identity/data separation (nPort Agents.md §5): nPort owns WHO, services own WHAT keyed by usr_id.
-- Live service keeps running from `D:\SRV` on master; refactor merges when proven.
+- ~~Live service keeps running from `D:\SRV` on master; refactor merges when proven.~~ — **SHIPPED 2026-08-28:** `bff-rework` merged to `master`; `D:\SRV` master IS the refactored architecture.
 - **Single author:** the runner is the only writer of conversation state; clients never persist messages. (2026-08-23 pivot)
 - **Tool execution moves server-side.** The survey's "browser-bound tools" (H1) was a retrofit artifact — server-side reach is a superset (no CORS); preview becomes pure view.
 - **Strangler migration, not big-bang:** the nDB conversation format is the seam; the existing `chat/` UI is rewired to the runner channel by channel, retiring gateway/MCP orchestration as each moves server-side.
@@ -172,22 +171,17 @@ Verify `/health` and `/v1/models` through the public domain before declaring don
 - ~~Gateway WebSocket realtime path (`/v1/realtime`)~~ — dead: the gateway retired it, no code remains (survey-verified).
 - ~~Arena: merge into chat or keep as separate client?~~ — answered by the runner architecture: arena is a runner variant (same backend, spectator view).
 
-## 7. Environment & operations
+## 7. Environment & operations (post-ship, 2026-08-28)
 
-| | Live | Dev (this branch) |
-|---|---|---|
-| Folder | `D:\SRV\LLM-Gateway-Chat` | `D:\DEV\LLM-Gateway-Chat` |
-| Branch | `master` | `bff-rework` |
-| Port | 8080 | 8082 (via worktree `.env`) |
-| Data | own `server/data/` | own `server/data/` (starts empty) |
+| | Live (the only active tree) |
+|---|---|
+| Folder | `D:\SRV\LLM-Gateway-Chat` |
+| Branch | `master` |
+| Port | 8080 (managed via nPM) |
+| Data | own `server/data/` (gitignored) |
 
-- **First run:** copy the data snapshot while live is idle-ish:
-  `robocopy D:\SRV\LLM-Gateway-Chat\server\data D:\DEV\LLM-Gateway-Chat\server\data /E`
-  Snapshot semantics: live data keeps evolving; the dev copy is throwaway test material. Only CODE merges.
-- **Run dev:** `npm start` in the worktree → `http://localhost:8082`.
-- **Hotfix flow:** edit in `D:\SRV` (master) → commit → `git -C D:\DEV\LLM-Gateway-Chat merge master`.
-- **Ship:** merge `bff-rework` → master; in `D:\SRV`: `git pull` + restart the live service.
-- **Publish branch when ready:** `git push -u origin bff-rework`.
+- **Backend edits:** edit in `D:\SRV` → `node --check` → coordinate a managed-server stop/start with the user → verify (`/health`, never an SSE endpoint) → commit + push.
+- **Dev worktree:** suspended — `D:\DEV`'s git admin points at a stale `.old` worktree. Re-clone `D:\DEV\LLM-Gateway-Chat` if branch-based dev resumes (then: own port via `.env`, own `server/data/` snapshot copied while live is idle-ish — never point a dev instance at live's data dir).
 
 ## 8. References
 
