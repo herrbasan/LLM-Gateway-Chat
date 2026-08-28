@@ -1,6 +1,6 @@
-# LLM Gateway Chat — Agent Instructions (bff-rework)
+# LLM Gateway Chat — Agent Instructions
 
-> **You are on the BFF-refactor dev branch.** This file governs the worktree `D:\DEV\LLM-Gateway-Chat` (branch `bff-rework`, port 8082). Live runs from `D:\SRV\LLM-Gateway-Chat` on `master`, port 8080, and must keep working throughout. Do not port this file to master.
+> **This file governs the live repo** `D:\SRV\LLM-Gateway-Chat` on `master`, port 8080. The BFF refactor shipped 2026-08-28 (`bff-rework` merged into `master`); the old `D:\DEV` worktree workflow is suspended (its git admin points at a stale `.old` worktree — re-clone `D:\DEV` before resuming branch-based dev).
 
 ## Read First
 
@@ -9,13 +9,11 @@
 3. [docs/architecture-conversation-runner.md](docs/architecture-conversation-runner.md) — the target architecture (design authority). The conversation is a server-side session; the browser is an attach/detach view.
 4. `docs/codebase-survey-bff.md` — the channel × callsite map of the current client-centric code. Keep it updated as phases land; do not duplicate its call-shape tables into this file (snapshots drift, pointers don't).
 
-## Branch Rules
+## Operating Rules
 
-- Work only in this worktree, on `bff-rework`.
-- Dev data (`server/data/`) is a throwaway snapshot. Refresh from live while idle-ish: `robocopy D:\SRV\LLM-Gateway-Chat\server\data D:\DEV\LLM-Gateway-Chat\server\data /E`. Never point the dev server at live's data dir.
-- Hotfix flow: fix in `D:\SRV` (master) → commit → `git merge master` here.
-- Ship: merge `bff-rework` → master; in `D:\SRV`: `git pull` + restart.
-- Server does not auto-restart — restart manually after backend edits. A `Chat Backend running at …` log line means the process started, not that the command returned. Start servers in background; poll `/api/config` or `/health` for readiness (never an SSE endpoint — it hangs the request).
+- **Master IS live.** Work directly in `D:\SRV` on `master`; the server runs under nPM — coordinate stop/start with the user around backend edits and restarts.
+- **Submodules: check for updates at the start of every work session.** Fetch in each of `lib/ndb`, `lib/nvdb`, `lib/nlogger`, `lib/nui_wc2` and fast-forward to the remote default branch; commit the pointer bump separately. Windows gotcha: a running server keeps ndb's napi `.node` binary locked — stop the server before updating `lib/ndb`, and load-test after: `node -e "require('./lib/ndb/napi')"`.
+- Server does not auto-restart — restart after backend edits. A `Chat Backend running at …` log line means the process started, not that the command returned. Start servers in background; poll `/api/config` or `/health` for readiness (never an SSE endpoint — it hangs the request).
 
 ## Project Overview
 
@@ -95,7 +93,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 
 ## Visual Verification (UI changes)
 
-Reach the target UI state in the integrated browser (`http://localhost:8082/chat/`), save a cropped element screenshot under `_scratch/`, then launch a subagent on model `minimax-m3-chat (customendpoint)` with the PNG path + a precise checklist. Trust DOM geometry for numbers; use the subagent for appearance (clipping, overlap, alignment). It can produce false positives — confirm with the DOM before acting.
+Reach the target UI state in the integrated browser (`http://localhost:8080/chat/`), save a cropped element screenshot under `_scratch/`, then launch a subagent on model `minimax-m3-chat (customendpoint)` with the PNG path + a precise checklist. Trust DOM geometry for numbers; use the subagent for appearance (clipping, overlap, alignment). It can produce false positives — confirm with the DOM before acting.
 
 ## References
 
