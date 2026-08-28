@@ -457,6 +457,7 @@ class Runner {
                 const b = breakdownApiMessages(apiMessages, model);
                 const head = `[token-count] ${this.conversationId.slice(-8)} turn payload: ${b.total} tok ` +
                     `(content ${b.byField.content} + reasoning ${b.byField.reasoning} + toolCalls ${b.byField.toolCalls} + overhead ${b.byField.overhead}) across ${apiMessages.length} msgs`;
+                console.log(head); // stdout — visible in the nPM console, not just the JSON log
                 DEPS.log().info(head, null, 'Runner');
                 for (const row of b.messages) {
                     DEPS.log().info(`[token-count]   msg[${row.i}] ${row.role}: total=${row.total} (content=${row.content} reasoning=${row.reasoning} toolCalls=${row.toolCalls})`, null, 'Runner');
