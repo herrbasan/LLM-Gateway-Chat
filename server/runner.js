@@ -11,6 +11,7 @@
 const convStore = require('./conversation-store');
 const { buildApiMessages } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
+const { countApiMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
 const internalTools = require('./internal-tools');
 
@@ -398,6 +399,18 @@ class Runner {
             });
             this._chunkTable = chunkTable;
 
+            // Authoritative context count: the side holding the real payload does
+            // the counting. The gateway's context.used_tokens is a lossy heuristic
+            // (m.content only — misses reasoning_content + tool_calls), so we count
+            // the exact assembled list here and persist it instead.
+            this.inFlight.realUsedTokens = countApiMessages(apiMessages, model);
+            // Keep the model's true window for the denominator.
+            try {
+                const modelsForWindow = await getModels();
+                const win = modelsForWindow.find(m => m.id === model)?.capabilities?.contextWindow;
+                if (win) this.inFlight.realWindowSize = win;
+            } catch { /* window lookup is cosmetic — the count is the fix */ }
+
             // PB-b: internal tools (archive/browser_fetch/attachment_save,
             // retirement in chunkTransform chats) + the user's MCP tools
             // (pool auto-connects lazily), vision-filtered like the client.
@@ -646,6 +659,23 @@ class Runner {
             aborted: outcome === 'aborted'
         };
         const hasPayload = !!(f.content || f.reasoning_content || f.toolCalls.filter(Boolean).length > 0);
+
+        // Authoritative context: prefer the runner's own count of the real payload
+        // (content + reasoning + tool_calls) over the gateway's lossy estimate.
+        // Keep the gateway's window_size (or the model's contextWindow) for the
+        // denominator; the used_tokens is now the true payload size.
+        let context = f.context || null;
+        if (f.realUsedTokens != null) {
+            const windowSize = f.realWindowSize || context?.window_size || null;
+            context = {
+                window_size: windowSize,
+                used_tokens: f.realUsedTokens,
+                available_tokens: windowSize != null ? Math.max(0, windowSize - f.realUsedTokens) : null,
+                strategy_applied: context?.strategy_applied ?? false,
+                counted: 'runner' // provenance: this is the full-payload count
+            };
+        }
+
         if (outcome === 'error') {
             // FAIL LOUD, durably: persist the failure at the reserved slot so
             // every current AND future view sees where and why the run died.
@@ -671,7 +701,7 @@ class Runner {
                     thinking_signature: isAbort ? undefined : (f.thinkingSignature || undefined),
                     streamStats,
                     usage: f.usage || undefined,
-                    context: f.context || undefined,
+                    context: context || undefined,
                     tool_calls: toolCalls.length ? toolCalls : undefined
                 }
             });
@@ -679,7 +709,7 @@ class Runner {
         }
         this.broadcast('run.end', {
             finishReason: outcome,
-            usage: f.usage, context: f.context,
+            usage: f.usage, context,
             aborted: outcome === 'aborted',
             messageId: f.messageId
         });
