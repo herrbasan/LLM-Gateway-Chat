@@ -2982,29 +2982,41 @@ function updateUsageDisplay(el, contextData, usageData = null, streamStats = nul
 async function updateOverallContext(contextData = null) {
     if (!elements.overallContextProgressWrap) return;
 
-    if (!contextData) {
-        // Try to get from last conversation exchange
-        const lastEx = conversation.exchanges[conversation.exchanges.length - 1];
-        
-        let foundContext = lastEx?.assistant?.context;
-        let foundUsage = lastEx?.assistant?.usage;
+    // Authoritative-source guard: the last real gateway context reading for this
+    // chat. A real reading (from run.end / snapshot / a message's context) must
+    // never be overwritten by the char/4 estimate — the estimate ignores tool
+    // results and reasoning_content, so it's always lower and would clobber the
+    // true value. This was the freeze: a no-arg call after a real reading fell
+    // through to the estimate and painted a smaller number over the good one.
+    if (!window._lastRealContext) window._lastRealContext = new Map(); // chatId -> contextData
 
-        // Fallback to version data if loading from history and surface variables are missing
-        if (!foundContext && !foundUsage && lastEx?.assistant?.versions?.length > 0) {
-            const curVersion = lastEx.assistant.versions[lastEx.assistant.currentVersion || 0];
-            if (curVersion) {
-                foundContext = curVersion.context;
-                foundUsage = curVersion.usage;
+    if (!contextData) {
+        // Post-BFF source of truth: the live conversation in activeConversations.
+        // Find the LATEST exchange carrying a real gateway context (walk back —
+        // the last exchange may be a tool/pending one without context yet).
+        const conv = activeConversations.get(currentChatId) || conversation;
+        const exs = conv?.exchanges || [];
+        let foundContext = null;
+        for (let i = exs.length - 1; i >= 0 && !foundContext; i--) {
+            const a = exs[i]?.assistant;
+            if (a?.context) foundContext = a.context;
+            else if (a?.versions?.length) {
+                const v = a.versions[a.currentVersion || 0];
+                if (v?.context) foundContext = v.context;
             }
         }
 
         if (foundContext) {
             contextData = foundContext;
+        } else if (window._lastRealContext.has(currentChatId)) {
+            // No fresh real reading available — reuse the last real one rather
+            // than degrade to the lossy estimate.
+            contextData = window._lastRealContext.get(currentChatId);
         } else {
             // Rough estimation from the in-memory exchanges (no gateway/API call).
             let textLength = 0;
             const strip = (s) => (typeof s === 'string' ? s.replace(/<think>[\s\S]*?<\/think>/g, '') : '');
-            for (const ex of conversation.getAll()) {
+            for (const ex of (conv?.getAll ? conv.getAll() : exs)) {
                 textLength += strip(ex.user?.content).length + strip(ex.assistant?.content).length + strip(ex.tool?.content).length;
             }
             if (textLength > 0) {
@@ -3012,6 +3024,11 @@ async function updateOverallContext(contextData = null) {
                 contextData = { used_tokens: Math.ceil(textLength / 4), isEstimate: true };
             }
         }
+    }
+
+    // Record real readings so later no-arg/estimate calls can't regress the pill.
+    if (contextData && !contextData.isEstimate && contextData.used_tokens != null) {
+        window._lastRealContext.set(currentChatId, contextData);
     }
 
     // The wrapper is always visible via CSS, context-progress-wrap class handles display
