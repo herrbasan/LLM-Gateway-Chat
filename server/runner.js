@@ -288,7 +288,10 @@ class Runner {
                 chunkTransform: this.session.chunkTransform === true,
                 category: this.session.category ?? null,
                 summary: this.session.summary ?? null,
-                pinned: !!this.session.pinned
+                pinned: !!this.session.pinned,
+                // Active retirements ({ hash: { distill, at, label } }) so the view
+                // can show WHICH chunks the model retired + read each distillation.
+                retirements: this.session.retirements || {}
             },
             messages: this.conv.messages.map(m => this.viewMessage(m)),
             inFlight: this.inFlight ? this.inFlightView() : null,
@@ -404,7 +407,7 @@ class Runner {
             mcpResources: null,
             memoryToolsAvailable: pool.hasToolPrefix('memory.')
         });
-        return buildApiMessages(this.conv.messages, {
+        const { messages, chunkTable } = buildApiMessages(this.conv.messages, {
             systemPrompt,
             publicOrigin: DEPS.publicOrigin,
             chunkTransform: this.session.chunkTransform === true,
@@ -413,6 +416,7 @@ class Runner {
             log: DEPS.log(),
             readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
         });
+        return { apiMessages: messages, chunkTable };
     }
 
     async runOnce() {
@@ -607,6 +611,8 @@ class Runner {
                 this.session.retirements = map;
                 this.session.updatedAt = new Date().toISOString();
                 this.dbInstance.db.update(this.session._id, this.session);
+                // Let attached views update the retirement indicator live.
+                this.broadcast('retirements', { retirements: map });
             }
         };
     }
