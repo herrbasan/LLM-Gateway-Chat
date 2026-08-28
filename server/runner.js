@@ -11,7 +11,7 @@
 const convStore = require('./conversation-store');
 const { buildApiMessages } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
-const { countApiMessages } = require('./token-count');
+const { countApiMessages, breakdownApiMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
 const internalTools = require('./internal-tools');
 
@@ -255,10 +255,9 @@ class Runner {
     async buildSnapshot() {
         this.refresh();
         const lastAssistant = [...this.conv.messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
-        // Honest context: count the EXACT payload a turn would send (same assembly
-        // as runOnce — chunk-view dedup + retirements applied), not the raw stored
-        // history and not the gateway's content-only underestimate. Load and live
-        // now agree because they measure the same thing.
+        // The pill means "how close am I to the limit" — the on-the-wire payload
+        // (post chunk-view dedup + retirements), NOT the raw stored history. Run
+        // the same assembly a turn would, and count that, so load and live agree.
         let realUsed = null;
         let windowSize = lastAssistant?.context?.window_size ?? null;
         try {
@@ -448,13 +447,25 @@ class Runner {
         try {
             const { apiMessages, chunkTable } = await this._assemblePayload();
             this._chunkTable = chunkTable;
+            // Keep the exact payload for the run-end context count (the real
+            // on-the-wire size — the limit-relevant number).
+            this.inFlight.apiMessages = apiMessages;
 
-            // Authoritative context count: the side holding the real payload does
-            // the counting. The gateway's context.used_tokens is a lossy heuristic
-            // (m.content only — misses reasoning_content + tool_calls), so we count
-            // the exact assembled list here and persist it instead.
-            this.inFlight.realUsedTokens = countApiMessages(apiMessages, model);
-            // Keep the model's true window for the denominator.
+            // Verification log: the full token breakdown of what's actually sent,
+            // so the console shows exactly where the tokens are each turn.
+            {
+                const b = breakdownApiMessages(apiMessages, model);
+                const head = `[token-count] ${this.conversationId.slice(-8)} turn payload: ${b.total} tok ` +
+                    `(content ${b.byField.content} + reasoning ${b.byField.reasoning} + toolCalls ${b.byField.toolCalls} + overhead ${b.byField.overhead}) across ${apiMessages.length} msgs`;
+                DEPS.log().info(head, null, 'Runner');
+                for (const row of b.messages) {
+                    DEPS.log().info(`[token-count]   msg[${row.i}] ${row.role}: total=${row.total} (content=${row.content} reasoning=${row.reasoning} toolCalls=${row.toolCalls})`, null, 'Runner');
+                }
+            }
+
+            // Keep the model's true window for the context denominator. (The
+            // used_tokens figure is computed at run end from the full stored
+            // history — see endRun — not from this dedup'd request payload.)
             try {
                 const modelsForWindow = await getModels();
                 const win = modelsForWindow.find(m => m.id === model)?.capabilities?.contextWindow;
@@ -717,19 +728,20 @@ class Runner {
         };
         const hasPayload = !!(f.content || f.reasoning_content || f.toolCalls.filter(Boolean).length > 0);
 
-        // Authoritative context: prefer the runner's own count of the real payload
-        // (content + reasoning + tool_calls) over the gateway's lossy estimate.
-        // Keep the gateway's window_size (or the model's contextWindow) for the
-        // denominator; the used_tokens is now the true payload size.
+        // Authoritative context = the actual on-the-wire payload (what hits the
+        // context-window limit), counted from the exact apiMessages array sent.
+        // This is "how close am I to the limit" — the limit-relevant number.
+        // f.apiMessages was captured at assembly time in runOnce.
         let context = f.context || null;
-        if (f.realUsedTokens != null) {
+        if (f.apiMessages) {
             const windowSize = f.realWindowSize || context?.window_size || null;
+            const used = countApiMessages(f.apiMessages, f.model);
             context = {
                 window_size: windowSize,
-                used_tokens: f.realUsedTokens,
-                available_tokens: windowSize != null ? Math.max(0, windowSize - f.realUsedTokens) : null,
+                used_tokens: used,
+                available_tokens: windowSize != null ? Math.max(0, windowSize - used) : null,
                 strategy_applied: context?.strategy_applied ?? false,
-                counted: 'runner' // provenance: this is the full-payload count
+                counted: 'runner' // provenance: real on-the-wire payload count
             };
         }
 

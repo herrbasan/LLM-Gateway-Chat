@@ -50,4 +50,25 @@ function countApiMessages(apiMessages, model) {
     return total;
 }
 
-module.exports = { countApiMessages, encode };
+// Per-request breakdown: role/field token counts + a per-message table, so the
+// console shows EXACTLY what was sent and where the tokens are. Verification
+// tool for the context pill — answers "is this number real" by inspection.
+function breakdownApiMessages(apiMessages, model) {
+    const rows = [];
+    let content = 0, reasoning = 0, toolCalls = 0, overhead = 3;
+    apiMessages.forEach((m, i) => {
+        const c = textOf(m.content, model);
+        const r = m.reasoning_content ? encode(m.reasoning_content, model) : 0;
+        const t = m.tool_calls ? encode(JSON.stringify(m.tool_calls), model) : 0;
+        overhead += 4;
+        content += c; reasoning += r; toolCalls += t;
+        rows.push({ i, role: m.role, content: c, reasoning: r, toolCalls: t, total: c + r + t + 4 });
+    });
+    return {
+        total: 3 + overhead - 3 + content + reasoning + toolCalls,
+        byField: { content, reasoning, toolCalls, overhead },
+        messages: rows
+    };
+}
+
+module.exports = { countApiMessages, breakdownApiMessages, encode };
