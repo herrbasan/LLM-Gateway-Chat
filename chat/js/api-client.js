@@ -247,25 +247,6 @@ export class BackendClient {
         const data = await this._request('GET', '/api/arena');
         return data.data || [];
     }
-
-    // ============================================
-    // References
-    // ============================================
-
-    async findReferences(sessionId, direction = 'both') {
-        return this._request('POST', '/api/references', {
-            session_id: sessionId,
-            direction
-        });
-    }
-
-    // ============================================
-    // Import
-    // ============================================
-
-    async importData(data) {
-        return this._request('POST', '/api/import', data);
-    }
 }
 
 const CONFIG = window.CHAT_CONFIG || {};

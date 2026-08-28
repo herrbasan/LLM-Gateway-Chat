@@ -4,7 +4,7 @@
 
 import { Conversation, messagesToExchanges } from './conversation.js';
 import { renderMarkdown, parseThinking } from './markdown.js';
-import { imageStore } from './image-store.js';
+import { fileStore } from './file-store.js';
 import { mcpClient } from './mcp-client.js';
 import { chatHistory } from './chat-history.js';
 import { storage } from './storage.js';
@@ -1915,11 +1915,11 @@ async function sendMessage() {
     if (welcome) welcome.remove();
 
     // Upload attachments (base64 → bucket) client-side; the runner references the
-    // resulting bucket URLs. imageStore.save keeps the view's upload path (the
+    // resulting bucket URLs. fileStore.save keeps the view's upload path (the
     // runner's stored form expects bucket refs, not inline base64).
     let attachments = null;
     if (attachedImages.length > 0) {
-        const saved = (await imageStore.save('send-' + Date.now(), attachedImages)) || [];
+        const saved = (await fileStore.save('send-' + Date.now(), attachedImages)) || [];
         attachments = attachedImages.map((att, i) => ({
             name: att.name,
             type: att.type,
@@ -3898,11 +3898,11 @@ async function deleteChat(chatId, e) {
         return;
     }
 
-    // Delete images from imageStore for this chat
+    // Delete images from fileStore for this chat
     try {
         const exchanges = await storage.loadConversation(chatId);
         for (const ex of exchanges) {
-            await imageStore.delete(ex.id);
+            await fileStore.delete(ex.id);
         }
     } catch (err) {
         console.warn('[Chat] Failed to delete images for chat', chatId, err);
@@ -4066,7 +4066,7 @@ async function exportChatToFile(chatId) {
             const exportExchange = { ...ex };
 
             if (ex.user?.attachments?.some(att => att.hasImage)) {
-                const images = await imageStore.load(ex.id);
+                const images = await fileStore.load(ex.id);
                 exportExchange.user = {
                     ...ex.user,
                     attachments: await Promise.all(ex.user.attachments.map(async (att, idx) => {
@@ -4174,7 +4174,7 @@ async function handleChatImport(e) {
                     .filter(att => att.dataUrl)
                     .map(att => ({ dataUrl: att.dataUrl, name: att.name, type: att.type }));
                 if (attachmentImages.length > 0) {
-                    const savedFiles = await imageStore.save(ex.id, attachmentImages);
+                    const savedFiles = await fileStore.save(ex.id, attachmentImages);
                     savedAttachments = ex.user.attachments.map((att, idx) => ({
                         name: att.name,
                         type: att.type,

@@ -61,9 +61,15 @@ function handleEmbedStatus(evt) {
 // unaffected; only total silence for this window is treated as a stall.
 const STREAM_STALL_MS = 300000;
 
-// Cap on consecutive tool hops in a single run — a guard against an infinite
-// tool loop. 12 was too low: a legitimate archive job (write N files) needs more.
-const MAX_TOOL_HOPS = 50;
+// Two-tier tool-hop cap — a safety line against an infinite tool loop,
+// distinguished by whether anyone is attached. It must never trip in normal
+// operation; it exists to catch "walked away" / "forgot the tab", not to
+// bound supervised work. Steps, not time: a loop IS repeated hops, so hops
+// are the real failure signal (a wall-clock limit would punish slow-but-
+// correct work). Supersedes the flat MAX_TOOL_HOPS = 50 (too low for legit
+// archive jobs, and it bit even when a human was watching).
+const MAX_TOOL_HOPS_ATTENDED = 200;    // a client is attached (views.size > 0)
+const MAX_TOOL_HOPS_UNATTENDED = 100;  // headless — no view (the BFF case that bit us)
 
 // Pull a readable one-liner out of a gateway/provider error body. The gateway
 // wraps the provider's JSON inside its own message string (double-encoded), so
@@ -347,10 +353,16 @@ class Runner {
             const toolChain = await this.runOnce();
             if (toolChain) {
                 hops++;
-                if (hops >= MAX_TOOL_HOPS) {
-                    DEPS.log().warn('Runner tool-hop cap reached', { chatId: this.conversationId, hops }, 'Runner');
-                    this.broadcast('error', { code: 'tool-hop-cap', message: `Tool chain stopped after ${MAX_TOOL_HOPS} hops.` });
-                    await this._persistFailureNote(`Tool chain stopped after ${MAX_TOOL_HOPS} hops — send "continue" to resume.`);
+                // Dynamic per-hop comparison, NOT a reset: attaching mid-run
+                // (views.size goes non-zero) naturally raises the ceiling — at
+                // hop 20 unattended you open the session and the bar becomes the
+                // attended tier, so it keeps going. Detaching lowers it again.
+                const limit = this.views.size > 0 ? MAX_TOOL_HOPS_ATTENDED : MAX_TOOL_HOPS_UNATTENDED;
+                if (hops >= limit) {
+                    const tier = this.views.size > 0 ? 'attended' : 'unattended';
+                    DEPS.log().warn('Runner tool-hop cap reached', { chatId: this.conversationId, hops, tier, limit }, 'Runner');
+                    this.broadcast('error', { code: 'tool-hop-cap', message: `Tool chain stopped after ${limit} hops (${tier}).` });
+                    await this._persistFailureNote(`Tool chain stopped after ${limit} hops (${tier}) — send "continue" to resume.`);
                     break;
                 }
                 more = true;
