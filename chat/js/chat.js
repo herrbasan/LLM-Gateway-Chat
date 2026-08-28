@@ -291,7 +291,7 @@ function attachRunnerEvents(chatId) {
     if (runnerViews.has(chatId)) return; // idempotent — background chats keep their stream
 
     const container = getOrCreateContainer(chatId);
-    const view = { es: null, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '', toolBubbles: new Map(), phase: 'Working…', phaseStart: 0, tickTimer: null } };
+    const view = { es: null, running: false, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '', toolBubbles: new Map(), phase: 'Working…', phaseStart: 0, tickTimer: null } };
     runnerViews.set(chatId, view);
 
     view.es = runnerClient.attach(chatId, {
@@ -304,7 +304,11 @@ function attachRunnerEvents(chatId) {
             container.replaceChildren();
             buildHistoricalDomForChat(conv, container).then(() => _vsActivateWhenReady(container));
             if (snap.lastRun?.context) updateOverallContext(snap.lastRun.context);
+            // Authoritative run state — covers a run that started before attach.
+            view.running = !!snap.running;
+            if (snap.running) _showActivity('Working…');
             if (snap.inFlight) _runnerResumeInflight(chatId, snap.inFlight);
+            updateSendButton();
         },
         'run.start'(d) { _runnerRunStart(chatId, d); },
         delta(d) { _runnerDelta(chatId, d); },
@@ -315,6 +319,14 @@ function attachRunnerEvents(chatId) {
         'msg.deleted'(d) { _runnerDeleted(chatId, d); },
         'run.end'(d) { _runnerRunEnd(chatId, d); },
         'run.status'(d) { _runnerStatus(chatId, d); },
+        'run.state'(d) {
+            const view = runnerViews.get(chatId);
+            if (view) view.running = !!d.running;
+            const meta = chatHistory.conversations.find(c => c.id === chatId);
+            if (meta) meta.activeRun = d.running ? (meta.activeRun || { startedAt: new Date().toISOString() }) : null;
+            if (chatId === currentChatId) updateSendButton();
+            renderHistoryList();
+        },
         error(d) { _runnerError(chatId, d); },
         'embed.status'(d) { _runnerEmbed(chatId, d); }
     });
@@ -332,6 +344,8 @@ function _runnerUser(chatId, msg) {
 
 function _runnerRunStart(chatId, d) {
     const container = getOrCreateContainer(chatId);
+    const view = runnerViews.get(chatId);
+    if (view) view.running = true;
     const s = _runnerStreaming(chatId);
     if (s.exchangeId) {
         container.querySelector(`.chat-message.user[data-exchange-id="${s.exchangeId}"] .user-pending-indicator`)?.classList.remove('visible');
@@ -405,7 +419,12 @@ function _runnerAssistant(chatId, msg) {
 
 function _runnerRunEnd(chatId, d) {
     _stopWaitingTicker(chatId);
+    const view = runnerViews.get(chatId);
     const s = _runnerStreaming(chatId);
+    // Chain continues on tool_calls — stays running. Anything else drains the
+    // chain (a queued follow-up re-fires run.start, which re-sets the flag).
+    const chainDone = d.finishReason !== 'tool_calls';
+    if (view && chainDone) view.running = false;
     if (d.finishReason === 'aborted' && s.el) {
         showError(s.el, 'Stopped');
         forceFinalizeMarkdownStream(s.el, s.content, s.reasoningContent);
@@ -446,6 +465,9 @@ function _teardownView(chatId) {
 function _runnerError(chatId, d) {
     _stopWaitingTicker(chatId);
     _hideActivity();
+    const view = runnerViews.get(chatId);
+    if (view) view.running = false;
+    updateSendButton();
     const s = _runnerStreaming(chatId);
     if (s.el) {
         showError(s.el, d.message || 'error');
@@ -2917,11 +2939,12 @@ function updateUsageDisplay(el, contextData, usageData = null, streamStats = nul
         }
         text += ' Tokens';
 
-        if (streamStats && usageData && usageData.completion_tokens) {
-            const tps = (usageData.completion_tokens / streamStats.durationSecs).toFixed(1);
-            text += ` | ${streamStats.ttft}ms TTFT | ${tps} T/s`;
-        } else if (streamStats) {
-            text += ` | ${streamStats.ttft}ms TTFT`;
+        // Runner streamStats shape: { ttftMs, durationMs, approxTokens, aborted }.
+        if (streamStats && usageData && usageData.completion_tokens && streamStats.durationMs) {
+            const tps = (usageData.completion_tokens / (streamStats.durationMs / 1000)).toFixed(1);
+            text += ` | ${streamStats.ttftMs}ms TTFT | ${tps} T/s`;
+        } else if (streamStats && streamStats.ttftMs != null) {
+            text += ` | ${streamStats.ttftMs}ms TTFT`;
         }
 
         // Chunk-store: show what was actually sent after dedup (if the
@@ -4450,7 +4473,9 @@ function renderChatTabItem(chat) {
 
     // Indicators derived from state (nui-list recycles elements, so these are
     // re-applied on every render rather than toggled on a persistent DOM node).
-    if (runnerViews.get(chat.id)?.streaming?.el) item.classList.add('streaming');
+    // Active run: live view state, OR the durable server-side stamp (covers a
+    // headless run with no attached view — first load shows it immediately).
+    if (runnerViews.get(chat.id)?.running || chat.activeRun) item.classList.add('streaming');
     if (chatsWithNewContent.has(chat.id)) item.classList.add('new-content');
 
     return item;
@@ -4608,7 +4633,8 @@ async function openChatOptions(chatId) {
     if (categoryInput) categoryInput.value = chatMeta.category || '';
     if (pinToggle) pinToggle.checked = !!chatMeta.pinned;
     if (chunkToggle) chunkToggle.checked = !!chatMeta.chunkTransform;
-    if (createdDateSpan) createdDateSpan.textContent = new Date(chatMeta.timestamp).toLocaleString();
+    // chat-history maps server createdAt/updatedAt (ISO strings) to epoch ms
+    if (createdDateSpan) createdDateSpan.textContent = new Date(chatMeta.createdAt).toLocaleString();
     if (updatedDateSpan) updatedDateSpan.textContent = new Date(chatMeta.updatedAt).toLocaleString();
 
     // Button actions are handled centrally via data-action="chat-options:*" — see handleChatOptionsAction()
@@ -4624,17 +4650,13 @@ async function openChatOptions(chatId) {
     main.appendChild(content);
     main._dialog = dialog;  // expose for action handler (close on clone/delete)
 
-    // Async load message count
+    // Async load message count — count messages server-side (loadConversation
+    // is a retired stub; the runner owns the stored messages).
     if (msgCountSpan) msgCountSpan.textContent = 'Counting...';
-    storage.loadConversation(chatId).then(exchanges => {
-        if (!exchanges || !msgCountSpan) return;
-        let total = 0;
-        exchanges.forEach(ex => {
-            if (ex.user) total++;
-            if (ex.assistant) total++;
-            if (ex.tool) total++;
-        });
-        msgCountSpan.textContent = total.toString();
+    backendClient.getSession(chatId).then(data => {
+        if (!data || !msgCountSpan) return;
+        const msgs = data.messages || [];
+        msgCountSpan.textContent = msgs.length.toString();
     }).catch(() => {
         if (msgCountSpan) msgCountSpan.textContent = 'Error';
     });
@@ -4695,7 +4717,9 @@ async function openChatOptions(chatId) {
 function updateSendButton() {
     const btn = elements.sendBtn?.querySelector('button');
     if (btn) {
-        const chatIsStreaming = !!runnerViews.get(currentChatId)?.streaming?.el;
+        // Authoritative run state (event-driven), not DOM element presence —
+        // covers the pre-stream gap and tool-hop gaps where no bubble exists.
+        const chatIsStreaming = !!runnerViews.get(currentChatId)?.running;
         btn.innerHTML = chatIsStreaming
             ? '<nui-icon name="close"></nui-icon>'
             : '<nui-icon name="send"></nui-icon>';

@@ -144,6 +144,8 @@ class Runner {
         this.refresh();
         this.session.activeRun = { startedAt: new Date().toISOString() };
         this.dbInstance.db.update(this.session._id, this.session);
+        // Let attached views reflect in-flight state in the chat list (#23).
+        this.broadcast('run.state', { running: true });
     }
 
     _clearActiveRunStamp() {
@@ -151,6 +153,7 @@ class Runner {
         if (!this.session.activeRun) return;
         delete this.session.activeRun;
         this.dbInstance.db.update(this.session._id, this.session);
+        this.broadcast('run.state', { running: false });
     }
 
     // Persist a run failure as an assistant message (error flag) — the durable
@@ -257,6 +260,7 @@ class Runner {
             },
             messages: this.conv.messages.map(m => this.viewMessage(m)),
             inFlight: this.inFlight ? this.inFlightView() : null,
+            running: this.running,
             lastRun: lastAssistant ? { usage: lastAssistant.usage ?? null, context: lastAssistant.context ?? null } : null
         };
     }

@@ -70,6 +70,7 @@ export class ChatHistory {
                 createdAt: !isNaN(createdAt) ? createdAt : Date.now(),
                 updatedAt: !isNaN(updatedAt) ? updatedAt : Date.now(),
             messageCount: session.messageCount || 0,
+            activeRun: session.activeRun || null,
             model: session.model || '',
             systemPrompt: session.systemPrompt || '',
             category: session.category || '',
