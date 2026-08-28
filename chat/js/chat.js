@@ -40,7 +40,7 @@ const CONFIG = window.CHAT_CONFIG || {};
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
-const TTS_ENDPOINT = CONFIG.ttsEndpoint || 'http://localhost:2233';
+const TTS_ENDPOINT = CONFIG.ttsEndpoint || '/api/tts'; // same-origin backend proxy → nSpeech
 const TTS_VOICE = CONFIG.ttsVoice || '';
 const TTS_SPEED = CONFIG.ttsSpeed ?? 1.0;
 const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http://localhost:3500';
