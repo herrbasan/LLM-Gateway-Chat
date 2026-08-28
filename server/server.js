@@ -1816,7 +1816,7 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      json(res, runner.getRunner(user, dbInstance, params.id).buildSnapshot(), 200, req);
+      json(res, await runner.getRunner(user, dbInstance, params.id).buildSnapshot(), 200, req);
     } catch (e) {
       json(res, { error: e.message }, 404, req);
     }
