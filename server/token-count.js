@@ -38,13 +38,29 @@ function textOf(content, model) {
     return encode(String(content), model);
 }
 
+// Reasoning rides in two shapes: plain reasoning_content (openai-form) and
+// thinking blocks (anthropic-form — string or [{type:'thinking',thinking}]).
+// Count both — a policy-kept echo converted to blocks must not read as 0.
+function reasoningOf(m, model) {
+    let t = 0;
+    if (m.reasoning_content) t += encode(m.reasoning_content, model);
+    if (typeof m.thinking === 'string') t += encode(m.thinking, model);
+    else if (Array.isArray(m.thinking)) {
+        for (const b of m.thinking) {
+            if (typeof b === 'string') t += encode(b, model);
+            else if (b?.thinking) t += encode(b.thinking, model);
+        }
+    }
+    return t;
+}
+
 // Count the full assembled apiMessages array — every field that goes on the wire.
 function countApiMessages(apiMessages, model) {
     let total = 3; // request formatting overhead (matches gateway heuristic)
     for (const m of apiMessages) {
         total += 4; // per-message role/formatting overhead
         total += textOf(m.content, model);
-        if (m.reasoning_content) total += encode(m.reasoning_content, model);
+        total += reasoningOf(m, model);
         if (m.tool_calls) total += encode(JSON.stringify(m.tool_calls), model);
     }
     return total;
@@ -58,7 +74,7 @@ function breakdownApiMessages(apiMessages, model) {
     let content = 0, reasoning = 0, toolCalls = 0, overhead = 3;
     apiMessages.forEach((m, i) => {
         const c = textOf(m.content, model);
-        const r = m.reasoning_content ? encode(m.reasoning_content, model) : 0;
+        const r = reasoningOf(m, model);
         const t = m.tool_calls ? encode(JSON.stringify(m.tool_calls), model) : 0;
         overhead += 4;
         content += c; reasoning += r; toolCalls += t;

@@ -221,15 +221,17 @@ async function show(args) {
 // ============================================
 
 /**
- * Fetch a url and return its text content. Network is unpredictable — bounded
- * by FETCH_TIMEOUT_MS so a hanging server never leaves the tool stuck.
- * Fails loudly on non-2xx and on timeout.
+ * Fetch a url and return its text content. Goes through the same-origin
+ * backend proxy (/api/preview/fetch) — the MCP storage server binds localhost
+ * on the server host and is not reachable from remote browsers directly.
+ * Network is unpredictable — bounded by FETCH_TIMEOUT_MS so a hanging server
+ * never leaves the tool stuck. Fails loudly on non-2xx and on timeout.
  */
 async function _fetchUrlText(url) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-        const res = await fetch(url, { signal: controller.signal });
+        const res = await fetch(`/api/preview/fetch?url=${encodeURIComponent(url)}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`preview: fetch failed (${res.status} ${res.statusText}) for ${url}`);
         return await res.text();
     } catch (err) {

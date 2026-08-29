@@ -328,14 +328,17 @@ function buildApiMessages(messages, options = {}) {
                 retirementTools: true
             });
             const savedPct = stats.bytesIn ? Math.round((1 - stats.bytesOut / stats.bytesIn) * 100) : 0;
-            log?.info?.(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${savedPct}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes} retired=${stats.retired}`);
-            return { messages: tx, chunkTable: chunkTable || new Map() };
+            log?.info?.(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${savedPct}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes} retired=${stats.retired} dedupSaved=${(stats.dedupSavedBytes / 1000).toFixed(1)}K retiredSaved=${(stats.retiredSavedBytes / 1000).toFixed(1)}K`);
+            // rawMessages (pre-transform merged payload) rides along so the
+            // runner can count the no-measures number (§5a reporting) without
+            // re-running the projection.
+            return { messages: tx, chunkTable: chunkTable || new Map(), chunkStats: stats, rawMessages: merged };
         } catch (e) {
             log?.error?.('[chunk-view] transform failed, sending raw:', e);
         }
     }
 
-    return { messages: merged, chunkTable: new Map() };
+    return { messages: merged, chunkTable: new Map(), chunkStats: null, rawMessages: merged };
 }
 
 module.exports = { buildApiMessages, stripExtraTimestamps, sanitizeToolArgs, resolveImageUrl };

@@ -1,7 +1,7 @@
 # Context Cost & Reporting Refactor
 
 **Date:** 2026-08-29
-**Status:** §3 + §4 DONE (committed, pushed, live-verified). **Remaining: §5 (reporting).**
+**Status:** §3 + §4 DONE. §5a DONE (live-verified). §5b DONE (structured tooltip + pin panel). **Remaining: §5c (report view), commit.**
 **Supersedes/extends:** [docs/context-length-saga.md](context-length-saga.md) (the saga settles *measurement*; this settles *cost discipline* and *reporting*)
 **Tracks:** LLM-Gateway-Chat (view + reporting) · LLM-Gateway (per-provider reasoning policy)
 
@@ -335,3 +335,74 @@ being on the wire as a block. The 43-token reading is the plain-field path.
 
 **§3 COMPLETE.** Next: §5a (per-turn raw/wire + per-measure deltas in `run.end`
 context payload), then §5b/§5c (tooltip + report view).
+
+---
+
+### 2026-08-29 (cont.) — §5a per-turn reporting + §5b tooltip (IMPLEMENTED, uncommitted)
+
+**§5a landed:**
+- `chat/js/chunk-view.js`: stats gained `dedupSavedBytes` (exact+near dup refs) and
+  `retiredSavedBytes` (tombstone replacements) — byte-level savings split per measure.
+- `server/api-view.js`: `buildApiMessages` returns `rawMessages` (pre-transform merged
+  payload) + `chunkStats`; breakdown log line gained the savings split.
+- `server/token-count.js`: `reasoningOf()` counts BOTH reasoning forms —
+  `reasoning_content` and anthropic-form `thinking` blocks (the known gap closed).
+- `server/runner.js`: `_contextReport()` per turn — `rawTokens` (no-measures count),
+  `wireTokens` (reuses the existing breakdown — capture, not recompute),
+  `reasoningTokens`, savings split, `cacheHint`. Folded into the `run.end` context
+  payload (`raw_tokens`, `reasoning_tokens`, `savings{dedup_bytes, retired_bytes,
+  retired_count, chunks}`, `cache_hint`) + snapshot (`raw_tokens`) + `contextHistory`
+  ring buffer (last 50 turns, exposed in snapshot — the §5c data source).
+- `reasoningStripped` deliberately NOT reported: the strip is gateway-side (§3),
+  invisible to the runner. `reasoningTokens` (on the wire) is the honest number.
+
+**Cache-hint design bug caught mid-verification:** whole-prefix hash always reports
+"broken" — every turn appends, so the prefix legitimately grows. Fixed to per-message
+hashes compared at the same indices; append-only history → `stable`, a mutation →
+`broken at msg[i]` (reports WHERE). **Fix is in runner.js, needs a server restart,
+then two-turn verification (turn 2 must read `stable`).**
+
+**§5b landed (beyond spec):**
+- Structured rows in the nui-tooltip (`buildContextTooltipHtml`): Wire / Raw /
+  Reasoning on wire / Savings (dedup −X B · retired −Y B (n)) / Cache prefix —
+  rows render only when data exists. Native `title` debug dump removed.
+- Label contrast fix: `--color-shade4` is rgb(80,80,80) in dark mode (invisible on
+  the tooltip surface) → `--text-color` at 65% opacity.
+- **Click-to-pin persistent panel** (`#context-detail-pop`, manual popover): the
+  hover tooltip closes during generation because nui-tooltip hides on ANY captured
+  scroll event; the pinned panel has no scroll listener, updates in place on every
+  `updateOverallContext`, closes on second click or Esc. Verified live incl. scroll.
+
+**Side quest:** tool-bubble action name — workshop envelope nested (`args.method` =
+"agent.action", real action at `args.payload.method`); `formatToolDisplayName` prefers
+the nested field, legacy flat fallback. Verified live.
+
+**Live verification so far:** turn 1 on scratch chat `chat_1787986880250_phu1ku5j`
+(badkid-llama-chat, chunkTransform on): raw=wire=4014, cache_hint=null (first turn),
+context payload carries all new fields. **Pending:** restart → turn 2 `stable`,
+tool turn → dedup savings on wire, then delete scratch chat.
+
+**Uncommitted (7 files):** chunk-view.js, api-view.js, token-count.js, runner.js,
+chat.js, chat.css, index.html + this doc.
+
+**UPDATE — §5a LIVE-VERIFIED (server restarted ~07:20).** Scratch chat
+`chat_1787986880250_phu1ku5j` (badkid-llama-chat, chunkTransform on, deleted after):
+- Turn 2 post-restart: `cache_hint: null` — correct (new Runner instance after
+  restart = first report; `_lastMsgHashes` is per-instance runtime state).
+- Turn 3: **`cache_hint: "stable"`** — append-only history detected correctly.
+- Deleted turn 1 mid-history, turn 4: **`cache_hint: "broken at msg[1]"`** — exactly
+  right: msg[0] (system prompt) survived, the delete shifted everything from index 1.
+
+**§5a COMPLETE.** Remaining: §5c (report view — data source `contextHistory` ready),
+then commit all (§5a + §5b + preview rework + tool-name fix).
+
+**Preview rework (same session, verified live by user):** url-mode preview fetches
+went browser-direct to the MCP storage origin (`localhost:3100` — unreachable when
+MCP is down or from remote clients, plus CORS). Fixed BFF-style:
+- `GET /api/preview/fetch?url=…` (server.js): same-origin proxy, `/storage/...`
+  paths resolve against the user's MCP storage origin, absolute http(s) pass
+  through server-side (10s bound, text-only). Mirrors the TTS proxy pattern.
+- `preview.js _fetchUrlText` fetches through the proxy.
+- Auto-open restored: `_runnerToolStart` calls `preview.show(d.args)` on
+  `chat_preview_show` tool.start (the tool's effect is client-side; the server
+  only validates). The bubble reopen button stays for history reloads.

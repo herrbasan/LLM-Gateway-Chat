@@ -108,6 +108,10 @@ class Runner {
         this._stallTimer = null;
         this.chunkView = null; // lazy dynamic import (shared file, no port)
         this._chunkTable = new Map(); // last assembly's chunk labels → hashes (context_retire)
+        // §5a reporting: per-turn context records (raw/wire/savings/cache hint),
+        // ring buffer of the last N turns — the data source for the report view.
+        this.contextHistory = [];
+        this._lastMsgHashes = null;
         // Orphaned run? The previous process died mid-chain and left its stamp
         // behind — mark the conversation LOUDLY, then clear the stamp. Without
         // this a restart mid-run is a permanent silent stall (2026-08-25).
@@ -259,10 +263,12 @@ class Runner {
         // (post chunk-view dedup + retirements), NOT the raw stored history. Run
         // the same assembly a turn would, and count that, so load and live agree.
         let realUsed = null;
+        let rawUsed = null;
         let windowSize = lastAssistant?.context?.window_size ?? null;
         try {
-            const { apiMessages } = await this._assemblePayload();
+            const { apiMessages, rawMessages } = await this._assemblePayload();
             realUsed = countApiMessages(apiMessages, this.session.model);
+            rawUsed = countApiMessages(rawMessages, this.session.model);
             if (windowSize == null) {
                 const models = await getModels();
                 windowSize = models.find(m => m.id === this.session.model)?.capabilities?.contextWindow ?? null;
@@ -273,6 +279,7 @@ class Runner {
         const realContext = realUsed == null ? (lastAssistant?.context ?? null) : {
             window_size: windowSize,
             used_tokens: realUsed,
+            raw_tokens: rawUsed,
             available_tokens: windowSize != null ? Math.max(0, windowSize - realUsed) : null,
             strategy_applied: false,
             counted: 'runner'
@@ -295,6 +302,7 @@ class Runner {
             messages: this.conv.messages.map(m => this.viewMessage(m)),
             inFlight: this.inFlight ? this.inFlightView() : null,
             running: this.running,
+            contextHistory: this.contextHistory,
             lastRun: lastAssistant ? { usage: lastAssistant.usage ?? null, context: realContext } : { usage: null, context: realContext }
         };
     }
@@ -406,7 +414,7 @@ class Runner {
             mcpResources: null,
             memoryToolsAvailable: pool.hasToolPrefix('memory.')
         });
-        const { messages, chunkTable } = buildApiMessages(this.conv.messages, {
+        const { messages, chunkTable, chunkStats, rawMessages } = buildApiMessages(this.conv.messages, {
             systemPrompt,
             publicOrigin: DEPS.publicOrigin,
             chunkTransform: this.session.chunkTransform === true,
@@ -415,7 +423,51 @@ class Runner {
             log: DEPS.log(),
             readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
         });
-        return { apiMessages: messages, chunkTable, mcpOrigin };
+        return { apiMessages: messages, rawMessages, chunkStats, chunkTable, mcpOrigin };
+    }
+
+    // §5a: per-turn context report — the two numbers (raw = no-measures payload,
+    // wire = exact payload sent) + per-measure savings + a cache hint (did this
+    // turn's prefix survive from last turn). reasoningStripped is not reported
+    // here: the reasoning policy is gateway-side (§3) and invisible to the
+    // runner — reasoningTokens (what's ON the wire) is the honest number.
+    _contextReport({ apiMessages, rawMessages, chunkStats, breakdown, model }) {
+        const rawTokens = countApiMessages(rawMessages, model);
+        // Cache hint: per-message hashes compared against last turn at the same
+        // indices. Append-only history → all previous messages match → 'stable'.
+        // A mutation (retirement, edit, reasoning change) breaks at its index —
+        // report WHERE, not just that. (Whole-prefix hash can't work: every
+        // turn appends, so the prefix legitimately grows each turn.)
+        const mix = (h, s) => { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h; };
+        const hashes = apiMessages.map(m => {
+            let h = 0x811c9dc5;
+            h = mix(h, m.role);
+            h = mix(h, typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+            if (m.reasoning_content) h = mix(h, m.reasoning_content);
+            if (m.tool_calls) h = mix(h, JSON.stringify(m.tool_calls));
+            return h;
+        });
+        let cacheHint = null;
+        if (this._lastMsgHashes) {
+            const prev = this._lastMsgHashes;
+            let breakAt = -1;
+            for (let i = 0; i < prev.length; i++) {
+                if (i >= hashes.length || hashes[i] !== prev[i]) { breakAt = i; break; }
+            }
+            cacheHint = breakAt === -1 ? 'stable' : `broken at msg[${breakAt}]`;
+        }
+        this._lastMsgHashes = hashes;
+        return {
+            at: new Date().toISOString(),
+            rawTokens,
+            wireTokens: breakdown.total,
+            reasoningTokens: breakdown.byField.reasoning,
+            dedupSavedBytes: chunkStats?.dedupSavedBytes ?? 0,
+            retiredSavedBytes: chunkStats?.retiredSavedBytes ?? 0,
+            retiredCount: chunkStats?.retired ?? 0,
+            chunkCount: chunkStats?.chunks ?? 0,
+            cacheHint
+        };
     }
 
     async runOnce() {
@@ -445,7 +497,7 @@ class Runner {
 
         let outcome = 'stop';
         try {
-            const { apiMessages, chunkTable, mcpOrigin } = await this._assemblePayload();
+            const { apiMessages, rawMessages, chunkStats, chunkTable, mcpOrigin } = await this._assemblePayload();
             this._chunkTable = chunkTable;
             // Keep the exact payload for the run-end context count (the real
             // on-the-wire size — the limit-relevant number).
@@ -455,6 +507,7 @@ class Runner {
             // so the console shows exactly where the tokens are each turn.
             {
                 const b = breakdownApiMessages(apiMessages, model);
+                this.inFlight.contextReport = this._contextReport({ apiMessages, rawMessages, chunkStats, breakdown: b, model });
                 const head = `[token-count] ${this.conversationId.slice(-8)} turn payload: ${b.total} tok ` +
                     `(content ${b.byField.content} + reasoning ${b.byField.reasoning} + toolCalls ${b.byField.toolCalls} + overhead ${b.byField.overhead}) across ${apiMessages.length} msgs`;
                 console.log(head); // stdout — visible in the nPM console, not just the JSON log
@@ -744,6 +797,24 @@ class Runner {
                 strategy_applied: context?.strategy_applied ?? false,
                 counted: 'runner' // provenance: real on-the-wire payload count
             };
+            // §5a: fold the per-turn report into the context payload so views
+            // get raw/wire/savings/cache-hint with run.end — no second request.
+            if (f.contextReport) {
+                context.raw_tokens = f.contextReport.rawTokens;
+                context.reasoning_tokens = f.contextReport.reasoningTokens;
+                context.savings = {
+                    dedup_bytes: f.contextReport.dedupSavedBytes,
+                    retired_bytes: f.contextReport.retiredSavedBytes,
+                    retired_count: f.contextReport.retiredCount,
+                    chunks: f.contextReport.chunkCount
+                };
+                context.cache_hint = f.contextReport.cacheHint;
+            }
+        }
+        if (f.contextReport) {
+            f.contextReport.outcome = outcome;
+            this.contextHistory.push(f.contextReport);
+            if (this.contextHistory.length > 50) this.contextHistory.shift();
         }
 
         if (outcome === 'error') {

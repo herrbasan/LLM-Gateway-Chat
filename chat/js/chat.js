@@ -182,6 +182,7 @@ const elements = {
     overallContextProgressWrap: document.getElementById('overall-context-progress-wrap'),
     overallContextProgress: document.getElementById('overall-context-progress'),
     overallContextTooltip: document.getElementById('overall-context-tooltip'),
+    contextDetailPop: document.getElementById('context-detail-pop'),
     stopButton: document.getElementById('stop-btn'), // Added safe fallback
 
     // TTS Elements
@@ -527,6 +528,13 @@ function _runnerToolStart(chatId, d) {
     _vsAppendMessage(container, el);
     scrollToBottom(container);
 
+    // chat_preview_show's EFFECT is client-side (the server only validates):
+    // open the preview as the tool runs — no click needed. The reopen button
+    // on the bubble remains for history reloads.
+    if (d.name === 'chat_preview_show' && d.args) {
+        preview.show(d.args).catch(err => console.error('[preview] auto-open failed:', err));
+    }
+
     s.toolBubbles.set(d.toolCallId, { el, exchange });
     _setActivityPhase('Running tool…');
 }
@@ -707,7 +715,14 @@ async function buildHistoricalDomForChat(conv, container) {
 // Compact MCP servers (workshop /mcp/compact) expose ONE generic tool whose
 // real operation lives in the `method` field of the arguments. Display that
 // (storage.write, memory.recall) instead of the meaningless generic name.
+// 2026-08-29: the envelope nested one level — args.method is now the generic
+// "agent.action" and the real action moved to args.payload.method. Prefer the
+// nested field; fall back to the legacy flat one.
 function formatToolDisplayName(name, args) {
+    const nested = args && typeof args === 'object' && typeof args.payload?.method === 'string'
+        ? args.payload.method.trim()
+        : '';
+    if (nested) return nested;
     const method = args && typeof args === 'object' && typeof args.method === 'string'
         ? args.method.trim()
         : '';
@@ -1807,6 +1822,15 @@ function setupEventListeners() {
 
     // New chat
     elements.newChatBtn?.addEventListener('click', startNewChat);
+
+    // Context pill: click pins the persistent detail panel (hover tooltip
+    // alone closes on scroll during generation)
+    elements.overallContextProgressWrap?.addEventListener('click', toggleContextDetailPop);
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && elements.contextDetailPop?.matches(':popover-open')) {
+            elements.contextDetailPop.hidePopover();
+        }
+    });
     
     // Import chat
     elements.importChatBtn?.addEventListener('click', () => {
@@ -3063,15 +3087,8 @@ async function updateOverallContext(contextData = null) {
     }
 
     if (elements.overallContextProgressWrap) {
-        let debugText = [];
-        if (contextData) {
-            for (const [key, val] of Object.entries(contextData)) {
-                if (key !== 'isEstimate') {
-                    debugText.push(`${key}: ${val}`);
-                }
-            }
-        }
-        elements.overallContextProgressWrap.title = debugText.length > 0 ? debugText.join('\n') : '';
+        // No native title dump — the nui-tooltip carries the full picture.
+        elements.overallContextProgressWrap.title = '';
     }
 
     if (elements.overallContextProgress) {
@@ -3093,8 +3110,53 @@ async function updateOverallContext(contextData = null) {
     }
 
     if (elements.overallContextTooltip) {
-        elements.overallContextTooltip.textContent = text;
+        elements.overallContextTooltip.innerHTML = buildContextTooltipHtml(contextData, { text, pct, knownLimit });
     }
+
+    // Pinned detail panel (click the pill): same content, persistent — the
+    // hover tooltip closes on scroll during generation, the pin doesn't.
+    const pop = elements.contextDetailPop;
+    if (pop && pop.matches(':popover-open')) {
+        pop.innerHTML = buildContextTooltipHtml(contextData, { text, pct, knownLimit });
+    }
+}
+
+// Click the context pill → pin/unpin a persistent detail panel above it.
+// Positioned once on open; content refreshes on every updateOverallContext.
+function toggleContextDetailPop() {
+    const pop = elements.contextDetailPop;
+    const wrap = elements.overallContextProgressWrap;
+    if (!pop || !wrap) return;
+    if (pop.matches(':popover-open')) { pop.hidePopover(); return; }
+    pop.innerHTML = elements.overallContextTooltip?.innerHTML || '';
+    pop.showPopover();
+    const rect = wrap.getBoundingClientRect();
+    const pr = pop.getBoundingClientRect();
+    pop.style.left = Math.max(8, rect.left + rect.width / 2 - pr.width / 2) + 'px';
+    pop.style.top = Math.max(8, rect.top - pr.height - 10) + 'px';
+}
+
+// Pretty context tooltip (nui-tooltip rich content). Rows render only when the
+// data exists — an estimate-only reading shows just the headline.
+function buildContextTooltipHtml(contextData, { text, pct, knownLimit }) {
+    const fmtK = n => n >= 1000000 ? (Math.round(n / 100000) / 10) + 'M'
+        : n >= 1000 ? (Math.round(n / 100) / 10) + 'K' : String(Math.round(n));
+    const rows = [];
+    const row = (label, value) => rows.push(`<div class="ctx-tip-row"><span>${label}</span><b>${value}</b></div>`);
+    row('Wire (next request)', text.replace(' Tokens', ''));
+    if (contextData && !contextData.isEstimate) {
+        if (contextData.raw_tokens != null) row('Raw (no measures)', fmtK(contextData.raw_tokens));
+        if (contextData.reasoning_tokens != null && contextData.reasoning_tokens > 0) row('Reasoning on wire', fmtK(contextData.reasoning_tokens));
+        const s = contextData.savings;
+        if (s && (s.dedup_bytes > 0 || s.retired_bytes > 0)) {
+            const parts = [];
+            if (s.dedup_bytes > 0) parts.push(`dedup −${fmtK(s.dedup_bytes)}B`);
+            if (s.retired_bytes > 0) parts.push(`retired −${fmtK(s.retired_bytes)}B (${s.retired_count})`);
+            row('Savings', parts.join(' · '));
+        }
+        if (contextData.cache_hint) row('Cache prefix', contextData.cache_hint);
+    }
+    return `<div class="ctx-tip">${rows.join('')}</div>`;
 }
 
 

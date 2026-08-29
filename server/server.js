@@ -1205,6 +1205,35 @@ const routes = {
   'GET /api/tts/v1/admin/engines': (req, res) => proxyTts(req, res, '/v1/admin/engines'),
   'POST /api/tts/v1/audio/speech': (req, res) => proxyTts(req, res, '/v1/audio/speech'),
 
+  // Preview fetch proxy (same-origin, architecture §8): the view must not
+  // talk to the MCP server directly — it binds localhost on the server host,
+  // so remote clients (and any browser when MCP is down) can't reach it.
+  // /storage/... paths resolve against the user's MCP storage origin;
+  // absolute http(s) URLs pass through. Bounded (10s), text-only.
+  'GET /api/preview/fetch': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+    const raw = new URL(req.url, 'http://localhost').searchParams.get('url');
+    if (!raw) { json(res, { error: 'url query param required' }, 400, req); return; }
+    let target;
+    if (/^https?:\/\//i.test(raw)) {
+      target = raw;
+    } else {
+      const origin = mcpPool.getForUser(user, dbInstance).getStorageOrigin();
+      target = origin.replace(/\/+$/, '') + (raw.startsWith('/') ? raw : '/' + raw);
+    }
+    try {
+      const upstream = await fetch(target, { signal: AbortSignal.timeout(10000) });
+      if (!upstream.ok) { json(res, { error: `upstream ${upstream.status} for ${target}` }, 502, req); return; }
+      const text = await upstream.text();
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(text);
+    } catch (e) {
+      json(res, { error: `preview fetch failed: ${e.message}` }, 502, req);
+    }
+  },
+
   // Frontend telemetry — receive client-side log events and forward to nLogger
   'POST /api/client-log': async (req, res) => {
     const body = await readBody(req);

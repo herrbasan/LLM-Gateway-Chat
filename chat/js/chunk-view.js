@@ -418,7 +418,7 @@ export function buildChunkView(messages, options = {}) {
     const lineSets = [];         // { id, set } for near-dup scan
     const chains = new Map();    // diff mode only
     const chunkTable = new Map(); // chunkId -> content hash (label→hash resolution)
-    const stats = { chunks: 0, exactDupes: 0, nearDupes: 0, diffs: 0, rebases: 0, reorderFallbacks: 0, retired: 0, bytesIn: 0, bytesOut: 0, maxDepth: 0 };
+    const stats = { chunks: 0, exactDupes: 0, nearDupes: 0, diffs: 0, rebases: 0, reorderFallbacks: 0, retired: 0, bytesIn: 0, bytesOut: 0, retiredSavedBytes: 0, dedupSavedBytes: 0, maxDepth: 0 };
     let hasChunks = false;
 
     // Strip OUR OWN leading labels before fingerprinting — idempotence.
@@ -454,11 +454,15 @@ export function buildChunkView(messages, options = {}) {
         const r = retirements[hash];
         if (!r) return null;
         stats.retired++;
+        let tomb;
         if (r.label && /^chunk_[a-z0-9]+$/.test(r.label)) {
             chunkTable.set(r.label, hash);
-            return `[${r.label} RETIRED — distillation: "${r.distill}". Original intact in history; call context_unretire with ${r.label} to restore it.]`;
+            tomb = `[${r.label} RETIRED — distillation: "${r.distill}". Original intact in history; call context_unretire with ${r.label} to restore it.]`;
+        } else {
+            tomb = tombstoneText(r.distill);
         }
-        return tombstoneText(r.distill);
+        stats.retiredSavedBytes += Math.max(0, bare.length - tomb.length);
+        return tomb;
     }
 
     // Core: dedup first, then (optionally) diff-chain. Returns { text, emitted }.
@@ -477,7 +481,9 @@ export function buildChunkView(messages, options = {}) {
         if (hit) {
             stats.exactDupes++; stats.chunks++; hasChunks = true;
             chunkTable.set(hit.id, fp.hash);
-            return { text: `[${hit.id}]\n`, emitted: true };
+            const ref = `[${hit.id}]\n`;
+            stats.dedupSavedBytes += Math.max(0, bare.length - ref.length);
+            return { text: ref, emitted: true };
         }
         // 2) near-dup (same lines, reshuffled / counter-touched) — size-gated scan
         const set = fp.features;
@@ -489,7 +495,9 @@ export function buildChunkView(messages, options = {}) {
             if (jac >= NEARDUP_JACCARD) {
                 const id = register(bare, fp);
                 stats.nearDupes++;
-                return { text: `[${id} ≈ ${cand.id} (same content, minor differences)]`, emitted: true };
+                const ref = `[${id} ≈ ${cand.id} (same content, minor differences)]`;
+                stats.dedupSavedBytes += Math.max(0, bare.length - ref.length);
+                return { text: ref, emitted: true };
             }
         }
         // 3) diff-chain (parked)
