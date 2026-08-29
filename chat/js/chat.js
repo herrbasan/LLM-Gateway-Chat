@@ -145,7 +145,6 @@ let currentModel = '';
 let isStreaming = false;
 let currentExchangeId = null;
 let attachedImages = []; // Array of {dataUrl, name, type}
-let useVisionAnalysis = false; // Toggle for using vision tool instead of direct image upload
 
 // TTS State — managed by NSpeechController (instantiated after DOM elements are bound)
 let tts = null;
@@ -992,71 +991,6 @@ function buildExchangeElement(exchange) {
     return userEl;
 }
 
-// Create vision toggle container if not exists
-function ensureVisionToggleUI() {
-    if (!elements.attachmentPreview) return;
-    
-    let visionToggle = document.getElementById('vision-toggle-container');
-    if (!visionToggle) {
-        visionToggle = document.createElement('div');
-        visionToggle.id = 'vision-toggle-container';
-        visionToggle.className = 'vision-toggle-container';
-        visionToggle.style.display = 'none';
-        visionToggle.innerHTML = `
-            <nui-checkbox variant="switch" title="Use MCP vision tools to analyze images. When disabled, images are sent directly to vision-capable models.">
-                <input type="checkbox" id="vision-toggle-input">
-            </nui-checkbox>
-            <label for="vision-toggle-input">MCP Vision</label>
-            <span id="vision-mode-indicator" class="vision-mode-indicator"></span>
-        `;
-        
-        // Insert after attachment preview in the images row
-        const imagesRow = document.getElementById('images-row');
-        if (imagesRow) {
-            imagesRow.appendChild(visionToggle);
-        } else {
-            elements.attachmentPreview.parentNode?.insertBefore(visionToggle, elements.attachmentPreview);
-        }
-        
-        // Set initial state from saved preference
-        const checkbox = visionToggle.querySelector('input');
-        if (checkbox) {
-            checkbox.checked = useVisionAnalysis;
-        }
-
-        // Add event listener
-        checkbox?.addEventListener('change', (e) => {
-            useVisionAnalysis = e.target.checked;
-            storage.setPref('mcp-vision-enabled', useVisionAnalysis).catch(() => {});
-            updateVisionModeIndicator();
-        });
-
-        // Ensure indicator is updated on creation
-        updateVisionModeIndicator();
-    }
-}
-
-// Update the vision mode indicator badge
-function updateVisionModeIndicator() {
-    const indicator = document.getElementById('vision-mode-indicator');
-    if (!indicator) return;
-    
-    const modelSupportsVision = currentModelSupportsVision();
-    
-    if (useVisionAnalysis) {
-        indicator.textContent = 'MCP';
-        indicator.className = 'vision-mode-indicator mcp-mode';
-        indicator.title = 'Using MCP vision tools to analyze images';
-    } else if (modelSupportsVision) {
-        indicator.textContent = 'Direct';
-        indicator.className = 'vision-mode-indicator direct-mode';
-        indicator.title = 'Sending images directly to model';
-    } else {
-        indicator.textContent = '';
-        indicator.className = 'vision-mode-indicator';
-    }
-}
-
 // ============================================
 // Initialization
 // ============================================
@@ -1228,9 +1162,6 @@ async function init() {
         });
     }
 
-    // Create vision toggle UI
-    ensureVisionToggleUI();
-
     // Wait for NUI to be ready, then load models
     await waitForNUI();
     await setupPresets();
@@ -1285,23 +1216,11 @@ async function applyDefaultConfig() {
     const savedName = await storage.getPref('user-name');
     const savedLocation = await storage.getPref('user-location');
     const savedLanguage = await storage.getPref('user-language');
-    const savedMcpVision = await storage.getPref('mcp-vision-enabled');
 
     // Defaults: Herrbasan, Germany, English
     const name = savedName !== null ? savedName : 'Herrbasan';
     const location = savedLocation !== null ? savedLocation : 'Germany';
     const language = savedLanguage !== null ? savedLanguage : 'English';
-    
-    // Restore MCP vision toggle preference (default: OFF)
-    useVisionAnalysis = savedMcpVision !== null ? savedMcpVision : false;
-
-    // Sync checkbox state with restored preference and update indicator
-    const visionToggle = document.getElementById('vision-toggle-container');
-    const checkbox = visionToggle?.querySelector('input');
-    if (checkbox) {
-        checkbox.checked = useVisionAnalysis;
-    }
-    updateVisionModeIndicator();
 
     if (elements.userName) {
         const input = elements.userName.querySelector('input');
@@ -1597,9 +1516,6 @@ async function populateModelSelect() {
         modelToSelect = chatModels[0].id;
     }
 
-    // Model selection affects vision toggle indicator
-    updateVisionModeIndicator();
-
     // Build items array for NUI setItems API
     const items = [{ value: '', label: 'Select model...' }];
     
@@ -1639,7 +1555,6 @@ async function populateModelSelect() {
             currentModel = (e.detail?.values?.[0]) || e.detail?.value || '';
             storage.setPref('default-model', currentModel).catch(() => {});
             updateOverallContext();
-            updateVisionToggleVisibility();
         });
     } else {
         // Fallback if NUI not loaded yet
@@ -1686,7 +1601,6 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
     select.addEventListener('change', (e) => {
         currentModel = e.target.value;
         updateOverallContext();
-        updateVisionToggleVisibility();
     });
 }
 
@@ -1995,7 +1909,6 @@ async function sendMessage() {
     editor.setMarkdown('');
     sessionStorage.removeItem('chat-draft');
     clearAttachments();
-    updateVisionToggleVisibility();
 
     // Send — the runner appends the user message (broadcasts msg.user) and starts
     // the run (run.start / delta / msg.assistant); rendering is event-driven.
@@ -2015,36 +1928,6 @@ async function sendMessage() {
     if (!res.ok) {
         nui.components.dialog.alert('Send failed', res.data?.error || `send failed (${res.status})`);
     }
-}
-
-// ============================================
-// Vision Tool Integration
-// ============================================
-
-// Note: The vision workflow:
-// - autoCreateVisionSessions() does the FULL pipeline: create session + analyze image
-// - Analysis text is injected as a preamble into the assistant's response
-// - The LLM never needs to call vision_analyze - it sees the analysis directly
-// - Vision tools are filtered out of the LLM's tools array when auto-vision is active
-
-// The workshop MCP server (compact mode) exposes a single generic "tools"
-// dispatcher tool. Vision operations (vision.session_create / vision.analyze)
-// are METHODS of that tool, not separate tools. Return the registry key of the
-// dispatcher when it advertises vision methods, else null.
-function getVisionToolName() {
-    for (const [llmName, record] of mcpClient.toolRegistry.entries()) {
-        if (record.originalName === 'tools') {
-            const desc = (record.definition?.description || '').toLowerCase();
-            if (desc.includes('vision.session_create') && desc.includes('vision.analyze')) {
-                return llmName;
-            }
-        }
-    }
-    return null;
-}
-
-function areVisionToolsAvailable() {
-    return getVisionToolName() !== null;
 }
 
 
@@ -4926,53 +4809,6 @@ function currentModelSupportsVision() {
     return supportsVision;
 }
 
-function updateVisionToggleVisibility() {
-    const visionToggle = document.getElementById('vision-toggle-container');
-    if (!visionToggle) return;
-    
-    const hasImages = attachedImages.length > 0;
-    const visionToolsAvailable = areVisionToolsAvailable();
-    const modelSupportsVision = currentModelSupportsVision();
-    
-    // Show toggle when:
-    // - Images are attached AND
-    // - Either vision tools are available OR model supports vision
-    if (hasImages) {
-        if (visionToolsAvailable || modelSupportsVision) {
-            visionToggle.style.display = 'flex';
-            
-            const checkbox = visionToggle.querySelector('nui-checkbox');
-            const input = visionToggle.querySelector('input');
-            
-            if (visionToolsAvailable && modelSupportsVision) {
-                // Both available - user can choose
-                input.disabled = false;
-                checkbox.title = 'OFF: Send images directly to model | ON: Use MCP vision tools to pre-analyze images';
-            } else if (modelSupportsVision) {
-                // Only model supports vision - disable MCP vision (force OFF)
-                input.disabled = true;
-                input.checked = false;
-                useVisionAnalysis = false;
-                checkbox.title = 'Model supports vision - images will be sent directly';
-            } else if (visionToolsAvailable) {
-                // Only MCP vision available - force ON (model can't process images directly)
-                input.disabled = true;
-                input.checked = true;
-                useVisionAnalysis = true;
-                checkbox.title = 'Model does not support vision - MCP vision tools will analyze images';
-            }
-            
-            // Update mode indicator
-            updateVisionModeIndicator();
-        } else {
-            // No vision support at all
-            visionToggle.style.display = 'none';
-        }
-    } else {
-        visionToggle.style.display = 'none';
-    }
-}
-
 function addAttachmentPreview(dataUrl, name) {
     const item = document.createElement('div');
     item.className = 'attachment-item';
@@ -4988,7 +4824,6 @@ function addAttachmentPreview(dataUrl, name) {
         const idx = attachedImages.findIndex(img => img.dataUrl === dataUrl);
         if (idx > -1) attachedImages.splice(idx, 1);
         item.remove();
-        updateVisionToggleVisibility();
     });
     
     // Lightbox click - open full image
@@ -4999,16 +4834,13 @@ function addAttachmentPreview(dataUrl, name) {
     });
     
     elements.attachmentPreview?.appendChild(item);
-    updateVisionToggleVisibility();
 }
 
 function clearAttachments() {
     attachedImages = [];
-    useVisionAnalysis = false;
     if (elements.attachmentPreview) {
         elements.attachmentPreview.innerHTML = '';
     }
-    updateVisionToggleVisibility();
 }
 
 // ============================================
