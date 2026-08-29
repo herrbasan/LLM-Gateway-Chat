@@ -203,6 +203,36 @@ const elements = {
 // ============================================
 const runnerViews = new Map(); // chatId -> { es, streaming: { exchangeId, el, content, reasoningContent } }
 
+// ============================================
+// §5c context report data — per-chat turn history + active retirements,
+// stashed from the runner snapshot and appended live on run.end.
+// ============================================
+const _contextReports = new Map(); // chatId -> { history: [], retirements: {} }
+
+function _stashContextReport(chatId, { history, retirements }) {
+    const entry = _contextReports.get(chatId) || { history: [], retirements: {} };
+    if (history) entry.history = history;
+    if (retirements) entry.retirements = retirements;
+    _contextReports.set(chatId, entry);
+}
+
+function _appendContextTurn(chatId, context) {
+    if (!context || context.raw_tokens == null) return;
+    const entry = _contextReports.get(chatId) || { history: [], retirements: {} };
+    entry.history.push({
+        at: new Date().toISOString(),
+        rawTokens: context.raw_tokens,
+        wireTokens: context.used_tokens,
+        reasoningTokens: context.reasoning_tokens ?? 0,
+        dedupSavedBytes: context.savings?.dedup_bytes ?? 0,
+        retiredSavedBytes: context.savings?.retired_bytes ?? 0,
+        retiredCount: context.savings?.retired_count ?? 0,
+        cacheHint: context.cache_hint ?? null
+    });
+    if (entry.history.length > 50) entry.history.shift();
+    _contextReports.set(chatId, entry);
+}
+
 function _runnerStreaming(chatId) {
     return runnerViews.get(chatId).streaming;
 }
@@ -305,6 +335,7 @@ function attachRunnerEvents(chatId) {
             container.replaceChildren();
             buildHistoricalDomForChat(conv, container).then(() => _vsActivateWhenReady(container));
             if (snap.lastRun?.context) updateOverallContext(snap.lastRun.context);
+            _stashContextReport(chatId, { history: snap.contextHistory || [], retirements: snap.meta?.retirements || {} });
             // Authoritative run state — covers a run that started before attach.
             view.running = !!snap.running;
             if (snap.running) _showActivity('Working…');
@@ -430,7 +461,7 @@ function _runnerRunEnd(chatId, d) {
         showError(s.el, 'Stopped');
         forceFinalizeMarkdownStream(s.el, s.content, s.reasoningContent);
     }
-    if (d.context) updateOverallContext(d.context);
+    if (d.context) { updateOverallContext(d.context); _appendContextTurn(chatId, d.context); }
     markChatAsStreaming(chatId, false);
     updateSendButton();
     s.el = null;
@@ -3113,27 +3144,75 @@ async function updateOverallContext(contextData = null) {
         elements.overallContextTooltip.innerHTML = buildContextTooltipHtml(contextData, { text, pct, knownLimit });
     }
 
-    // Pinned detail panel (click the pill): same content, persistent — the
-    // hover tooltip closes on scroll during generation, the pin doesn't.
+    // Pinned detail panel (click the pill): the §5c report view — headline
+    // rows + wire-vs-raw sparkline + savings + active retirements.
     const pop = elements.contextDetailPop;
     if (pop && pop.matches(':popover-open')) {
-        pop.innerHTML = buildContextTooltipHtml(contextData, { text, pct, knownLimit });
+        pop.innerHTML = buildContextDetailHtml(contextData, { text, pct, knownLimit });
     }
 }
 
-// Click the context pill → pin/unpin a persistent detail panel above it.
+// Click the context pill → pin/unpin the §5c report panel above it.
 // Positioned once on open; content refreshes on every updateOverallContext.
 function toggleContextDetailPop() {
     const pop = elements.contextDetailPop;
     const wrap = elements.overallContextProgressWrap;
     if (!pop || !wrap) return;
     if (pop.matches(':popover-open')) { pop.hidePopover(); return; }
-    pop.innerHTML = elements.overallContextTooltip?.innerHTML || '';
+    pop.innerHTML = buildContextDetailHtml(window._lastRealContext?.get(currentChatId) || null, { text: elements.overallContextTooltip?.textContent || '', pct: 0, knownLimit: false });
     pop.showPopover();
     const rect = wrap.getBoundingClientRect();
     const pr = pop.getBoundingClientRect();
     pop.style.left = Math.max(8, rect.left + rect.width / 2 - pr.width / 2) + 'px';
     pop.style.top = Math.max(8, rect.top - pr.height - 10) + 'px';
+}
+
+// §5c report view: headline rows + turn sparkline + savings + retirements.
+function buildContextDetailHtml(contextData, { text, pct, knownLimit }) {
+    const fmtK = n => n >= 1000000 ? (Math.round(n / 100000) / 10) + 'M'
+        : n >= 1000 ? (Math.round(n / 100) / 10) + 'K' : String(Math.round(n));
+    let html = buildContextTooltipHtml(contextData, { text, pct, knownLimit });
+
+    const entry = _contextReports.get(currentChatId);
+    const history = entry?.history || [];
+
+    // Sparkline: wire (accent) vs raw (dim) over the last ~30 turns.
+    if (history.length >= 2) {
+        const turns = history.slice(-30);
+        const W = 240, H = 48;
+        const max = Math.max(...turns.map(t => Math.max(t.rawTokens || 0, t.wireTokens || 0)), 1);
+        const px = i => (i / (turns.length - 1)) * W;
+        const py = v => H - (v / max) * (H - 4) - 2;
+        const line = key => turns.map((t, i) => `${px(i).toFixed(1)},${py(t[key] || 0).toFixed(1)}`).join(' ');
+        html += `<div class="ctx-section"><div class="ctx-section-title">Turns — wire vs raw</div>` +
+            `<svg class="ctx-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+            `<polyline points="${line('rawTokens')}" class="ctx-spark-raw"/>` +
+            `<polyline points="${line('wireTokens')}" class="ctx-spark-wire"/>` +
+            `</svg>` +
+            `<div class="ctx-spark-legend"><span class="ctx-leg-wire">wire</span><span class="ctx-leg-raw">raw</span><span class="ctx-leg-n">${turns.length} turns</span></div></div>`;
+    }
+
+    // Latest turn savings breakdown.
+    const last = history[history.length - 1];
+    if (last && (last.dedupSavedBytes > 0 || last.retiredSavedBytes > 0)) {
+        html += `<div class="ctx-section"><div class="ctx-section-title">Savings (latest turn)</div>` +
+            `<div class="ctx-tip-row"><span>dedup</span><b>−${fmtK(last.dedupSavedBytes)}B</b></div>` +
+            `<div class="ctx-tip-row"><span>retired</span><b>−${fmtK(last.retiredSavedBytes)}B (${last.retiredCount})</b></div></div>`;
+    }
+
+    // Active retirements (tombstones) with their distillations.
+    const retirements = entry?.retirements || {};
+    const rList = Object.values(retirements);
+    if (rList.length > 0) {
+        const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const rows = rList.map(r => {
+            const when = r.at ? new Date(r.at).toLocaleDateString() : '';
+            return `<div class="ctx-retire-row"><b>${esc(r.label || 'chunk')}</b><span>${esc(r.distill)}</span><i>${esc(when)}</i></div>`;
+        }).join('');
+        html += `<div class="ctx-section"><div class="ctx-section-title">Retired chunks (${rList.length})</div>${rows}</div>`;
+    }
+
+    return `<div class="ctx-detail">${html}</div>`;
 }
 
 // Pretty context tooltip (nui-tooltip rich content). Rows render only when the

@@ -1,7 +1,7 @@
 # Context Cost & Reporting Refactor
 
 **Date:** 2026-08-29
-**Status:** §3 + §4 DONE. §5a DONE (live-verified). §5b DONE (structured tooltip + pin panel). **Remaining: §5c (report view), commit.**
+**Status:** §3 + §4 + §5a + §5b + §5c — **ALL DONE** (committed, live-verified). Plan complete.
 **Supersedes/extends:** [docs/context-length-saga.md](context-length-saga.md) (the saga settles *measurement*; this settles *cost discipline* and *reporting*)
 **Tracks:** LLM-Gateway-Chat (view + reporting) · LLM-Gateway (per-provider reasoning policy)
 
@@ -406,3 +406,22 @@ MCP is down or from remote clients, plus CORS). Fixed BFF-style:
 - Auto-open restored: `_runnerToolStart` calls `preview.show(d.args)` on
   `chat_preview_show` tool.start (the tool's effect is client-side; the server
   only validates). The bubble reopen button stays for history reloads.
+
+**UPDATE — §5c report view (IMPLEMENTED + LIVE-VERIFIED).** The pinned panel
+(click the pill) is now the full §5c report:
+- Data: `_contextReports` per-chat map — `contextHistory` + `meta.retirements`
+  stashed from the snapshot, turns appended live from each `run.end` context
+  payload (module scope — first attempt landed inside `attachRunnerEvents`,
+  `_contextReports is not defined`; moved next to `runnerViews`).
+- Renders: headline rows (same builder as the tooltip) + wire-vs-raw SVG
+  sparkline (last 30 turns, wire=accent/raw=dim, legend+count) + latest-turn
+  savings breakdown + active retirements list (label, distillation, date).
+  Sections render conditionally; panel scrolls at 60vh.
+- Verified on `chat_1787985868110_45sja5r0` (21 turns, wire<raw gap visible) and
+  `chat_1787906168732_6hlifjf3` (22 turns, raw ~600K vs wire ~180K early —
+  dedup+retirement impact visible at a glance; savings line `retired −281.8KB
+  (26)`; all 26 tombstones listed with legacy numeric labels + distillations).
+
+**PLAN COMPLETE.** §3 (gateway reasoning policy) · §4 (content-derived chunk IDs)
+· §5a (per-turn raw/wire/savings/cache-hint) · §5b (structured tooltip + pin)
+· §5c (report view).
