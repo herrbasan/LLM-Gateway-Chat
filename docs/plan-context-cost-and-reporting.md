@@ -304,9 +304,14 @@ payload), then §5b/§5c (tooltip + report view).
 `thinking_signature` through verbatim; the global strip is gone. Verified: unsigned
 reasoning now reaches the payload.
 
-**⚠️ REQUIRED before live traffic:** the running gateway's config.json must declare
-`priorReasoning` per model, e.g. deepseek-chat: `'required-with-tools'`, grok-*:
-`'required'`, gpt-chat: `'ignored'`, kimi-k3-chat: `'required'`. Unset = keep (safe),
-so rolling out config without the fields is harmless but misses the DeepSeek no-tools
-strip and the OpenAI strip. Also: gateway commits need pushing + gateway restart; chat
-server needs restart for the api-view change.
+**⚠️ REQUIRED before live traffic:** ~~the running gateway's config.json must declare
+`priorReasoning` per model~~ **DONE 2026-08-29:** live `D:\DEV\LLM Gateway\config.json`
+updated — deepseek-*: `required-with-tools`, grok-*: `required`, kimi-*: `required`,
+gpt-chat: `ignored`, glm5-*: `required` + `clearThinkingSupport: true` (z.AI's
+`thinking.clear_thinking` defaults true = server discards prior reasoning even when
+echoed; `358f04a` adds the `clear_thinking:false` injection for that case).
+Gateway commits **pushed** (`8c3d183`, `1724ee8`, `358f04a`); chat commits pushed
+(`cd6aff3` → `852008e`). **Both servers await user restart** (gateway for code+config,
+chat for api-view). After restart, verify: a DeepSeek tool chat keeps reasoning on the
+wire (check the runner's per-turn payload log for reasoning_content presence) and
+OpenAI/xAI chats behave as before.
