@@ -497,7 +497,13 @@ class Runner {
                     b64 = att.dataUrl.slice(comma + 1);
                 }
                 const created = await callVision('vision.session_create', { image_data: b64, image_mime_type: mime });
-                visionSession = created.obj?.sessionId || created.obj?.session_id || created.obj?.id || null;
+                // session_create answers PROSE ("Session created: img_……. …"),
+                // not JSON — take the structured id when present, else extract
+                // it from the text.
+                visionSession = created.obj?.sessionId || created.obj?.session_id || created.obj?.id
+                    || (String(created.text).match(/Session created:\s*([A-Za-z0-9_-]+)/)?.[1])
+                    || (String(created.text).match(/\b(img_[A-Za-z0-9_-]+)\b/)?.[1])
+                    || null;
                 if (!visionSession) throw new Error('vision session_create returned no session id: ' + String(created.text).slice(0, 200));
 
                 const analyzed = await callVision('vision.analyze', {
