@@ -1,7 +1,7 @@
 # Context Cost & Reporting Refactor
 
 **Date:** 2026-08-29
-**Status:** Agreed direction, not started
+**Status:** §3 + §4 DONE (committed, pushed, live-verified). **Remaining: §5 (reporting).**
 **Supersedes/extends:** [docs/context-length-saga.md](context-length-saga.md) (the saga settles *measurement*; this settles *cost discipline* and *reporting*)
 **Tracks:** LLM-Gateway-Chat (view + reporting) · LLM-Gateway (per-provider reasoning policy)
 
@@ -54,14 +54,14 @@ and breaks build-to-build stability for unretire. **Fix: content-derived IDs (§
 
 ---
 
-## 3. Per-provider reasoning policy (gateway)
+## 3. Per-provider reasoning policy (gateway) — ✅ DONE 2026-08-29
 
-The strip decision belongs in the gateway — the only place that knows the provider *and*
-whether `tools` are on the request. Add a per-model field (top-level, not inside
-`capabilities` — this is enforced behavior, not client-visible metadata):
+**As implemented** (supersedes the earlier `reasoningRetention` top-level sketch):
+the field is `capabilities.priorReasoning` per model (a provider fact inside
+capabilities — the adapter derives behavior, the client never acts on it):
 
 ```
-reasoningRetention: 'keep' | 'strip' | 'keep-with-tools'   // default: 'keep'
+priorReasoning: 'required' | 'required-with-tools' | 'ignored'   // unset = keep (cache-safe)
 ```
 
 | Provider | Value | Why |
@@ -81,16 +81,22 @@ GPT-5.6+, reasoning-field-is-ignored note); `provider_zai.md` gained the
 `clear_thinking` ↔ cache-continuity note. The saga doc's "OpenAI hard-rejects" claim is
 **superseded** — it ignores, doesn't reject.
 
-Enforcement: shared helper in the adapter base, per-adapter default overridable per model.
-The chat-app's strip in [server/api-view.js](../server/api-view.js) stays only as the
-Anthropic-signature guard (poison-payload protection), not as a global strip.
+Enforcement (as built): `applyReasoningHistoryPolicy` in the **openai adapter**
+(single payload choke point, strips or injects empty `reasoning_content` on tool-call
+messages) + the poison guard in the **anthropic adapter** (unsigned thinking dropped +
+warn on native Anthropic only; kept for third-party like Kimi). GLM additionally gets
+`thinking.clear_thinking: false` via `capabilities.clearThinkingSupport` (z.AI clears
+server-side by default). The chat-app strip in [server/api-view.js](../server/api-view.js)
+was **removed** — reasoning passes through verbatim now. Live config set for all 13
+models; gateway commits `8c3d183`/`1724ee8`/`358f04a`, chat `a510a6f`. Live-verified:
+DeepSeek tool chain 400-free, reasoning on wire.
 
 **Cost note:** this directly serves alignment goal 1 — for DeepSeek tool chats we stop
 invalidating the cache every turn, and stop breaking tool chains.
 
 ---
 
-## 4. Content-derived chunk IDs (chat app, chunk-view.js)
+## 4. Content-derived chunk IDs (chat app, chunk-view.js) — ✅ DONE 2026-08-29
 
 Replace the position counter with a content hash:
 
@@ -163,13 +169,17 @@ Data source: the per-turn records from §5a, kept in the conversation's runtime 
 
 ## 6. Sequencing
 
-1. **§3 gateway reasoning policy** — prerequisite for the Question B alignment experiment
-   (can't A/B reasoning-retention until retention is controllable). Also the biggest
-   cache-cost fix (DeepSeek tool chats currently recompute everything, every turn).
-2. **§4 content-derived chunk IDs** — independent; do with a round-trip replay test
-   (stored chat → old vs new transform → diff outputs).
-3. **§5a per-turn data** — small; the stats already exist, this wires them through.
+1. ~~§3 gateway reasoning policy~~ — **DONE** (live-verified 2026-08-29).
+2. ~~§4 content-derived chunk IDs~~ — **DONE** (committed `cd6aff3`, live-verified).
+3. **§5a per-turn data** — NEXT. Small; the stats already exist, this wires them through.
 4. **§5b tooltip + §5c report view** — UI, depends on §5a.
+
+**Start here next session: §5a.** Wire `rawTokens`/`wireTokens`/per-measure deltas/
+`cacheHint` into the runner's `run.end` context payload (the token-count breakdown
+already runs per turn — capture, don't recompute). One known gap to fold in: the
+breakdown only counts plain `reasoning_content`; via the anthropic adapter reasoning
+converts to `thinking` blocks, so policy-kept reasoning can read `reasoning=0` while
+present on the wire as a block — the raw/wire computation must count both forms.
 
 ## 7. Out of scope (deliberately)
 
