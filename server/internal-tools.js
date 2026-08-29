@@ -418,7 +418,7 @@ const RETIREMENT_TOOL_DEFS = [
             parameters: {
                 type: 'object',
                 properties: {
-                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to retire, e.g. ["chunk_4", "chunk_9"]. Batch multiple ids in one call.' },
+                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to retire, e.g. ["chunk_2x4f8k1a9z3q", "chunk_7hm2p9w1x4vb"]. Batch multiple ids in one call.' },
                     distill: { type: 'string', description: 'Your distillation of what to keep from these chunks: key facts, decisions, open items — written for your future self.' }
                 },
                 required: ['chunk_ids', 'distill']
@@ -433,7 +433,7 @@ const RETIREMENT_TOOL_DEFS = [
             parameters: {
                 type: 'object',
                 properties: {
-                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to restore, e.g. ["chunk_4"].' }
+                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to restore, e.g. ["chunk_2x4f8k1a9z3q"].' }
                 },
                 required: ['chunk_ids']
             }

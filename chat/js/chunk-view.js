@@ -280,20 +280,22 @@ export function applyDiff(baseText, diffText) {
 
 export const CHUNK_CONVENTION_PARAGRAPH =
     'This conversation uses content-addressed chunks. Large contents are ' +
-    'labeled [chunk_N] — the label may prefix a message body OR appear inside ' +
-    'a tool call\'s arguments. Labels persist: when chunk content is written ' +
-    'to a file, the label is stored with it, so a file may legitimately begin ' +
-    'with a [chunk_N] line — that is normal, not a bug, and not a reference. ' +
-    'If a later message would repeat a chunk you have already seen, it is ' +
-    'replaced by a one-line reference: [chunk_M = chunk_N] means byte-identical ' +
-    'content; [chunk_M ≈ chunk_N (same content, minor differences)] means the ' +
-    'same content with small edits or reordering. In both cases you ALREADY ' +
-    'HAVE the full content at the referenced label — treat the reference as ' +
-    'that content. A label [chunk_N, diff of chunk_M] contains a unified diff: ' +
-    'apply it mentally to chunk_M for the full content. ' +
+    'labeled [chunk_X] where X is a stable content hash — the same content ' +
+    'always has the same label, on every turn. The label may prefix a message ' +
+    'body OR appear inside a tool call\'s arguments. Labels persist: when ' +
+    'chunk content is written to a file, the label is stored with it, so a ' +
+    'file may legitimately begin with a [chunk_X] line — that is normal, not ' +
+    'a bug, and not a reference. If a later message would repeat a chunk you ' +
+    'have already seen, it collapses to the bare label: [chunk_X] alone means ' +
+    'you ALREADY HAVE the full content under that label earlier in this ' +
+    'conversation — treat the label as that content. A near-duplicate appears ' +
+    'as [chunk_Y ≈ chunk_X (same content, minor differences)]: the same ' +
+    'content with small edits or reordering; your copy at chunk_X applies. ' +
+    'A label [chunk_Y, diff of chunk_X] contains a unified diff: apply it ' +
+    'mentally to chunk_X for the full content. ' +
     'These labels are produced by a deterministic transform, not by you. If ' +
-    'one looks wrong — a reference to a chunk you cannot find, a doubled ' +
-    'label, a reference where content should be — say so explicitly in your ' +
+    'one looks wrong — a label whose content you cannot find, a doubled ' +
+    'label, a bare label where content should be — say so explicitly in your ' +
     'reply instead of working around it. You are the only observer who sees ' +
     'the transformed view; malformed labels are bugs worth reporting.';
 
@@ -325,7 +327,8 @@ const MAX_DIFF_LINES = 8000;    // diff mode: LCS guard
 const NEARDUP_JACCARD = 0.85;   // dedup: at/above this line-set overlap → reference
 const ENABLE_DIFFS = false;     // parked: sequential-edit chains (see plan)
 
-// Fast content fingerprint: exact hash (FNV-1a, enough for identity) +
+// Fast content fingerprint: exact hash (FNV-1a 32-bit, identity key for
+// `seen`/`retirements` — PERSISTED in retirement maps, do not change) +
 // line-set for near-dup detection.
 function fnv1a(str) {
     let h = 0x811c9dc5;
@@ -334,6 +337,23 @@ function fnv1a(str) {
         h = Math.imul(h, 0x01000193);
     }
     return (h >>> 0).toString(36);
+}
+
+// 64-bit FNV-1a (two independent 32-bit halves) — chunk LABELS. Position-
+// derived labels (chunk_N counters) renumber on any mid-history edit and
+// silently change meaning turn-to-turn; content-derived labels are true
+// names: the same label always denotes the same content, and a repeat can
+// collapse to the bare label (the label IS the reference). 64 bits to keep
+// birthday collisions negligible at realistic chunk counts (~1% at 32 bits
+// around 600 chunks).
+function fnv1a64(str) {
+    let h1 = 0x811c9dc5, h2 = 0x811c9dc5 ^ 0x9e3779b9;
+    for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ c, 0x01000193);
+        h2 = Math.imul(h2 ^ c, 0x1000193 ^ 0x5bd1e995);
+    }
+    return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36);
 }
 
 // Shape-aware fingerprint. MCP/JSON-RPC tool responses carry their payload
@@ -399,33 +419,43 @@ export function buildChunkView(messages, options = {}) {
     const chains = new Map();    // diff mode only
     const chunkTable = new Map(); // chunkId -> content hash (label→hash resolution)
     const stats = { chunks: 0, exactDupes: 0, nearDupes: 0, diffs: 0, rebases: 0, reorderFallbacks: 0, retired: 0, bytesIn: 0, bytesOut: 0, maxDepth: 0 };
-    let chunkCounter = 0;
     let hasChunks = false;
 
     // Strip OUR OWN leading labels before fingerprinting — idempotence.
     // A labeled chunk stored to disk (the model writes the label into file
-    // content) comes back wearing [chunk_N]; without stripping, it reads as
+    // content) comes back wearing [chunk_…]; without stripping, it reads as
     // new content and gets a second label stamped on top. Repeatedly.
+    // Matches legacy numeric labels and current hash labels alike.
     function stripOwnLabels(content) {
-        return content.replace(/^(\[chunk_\d+[^\]\n]*\]\n?)+/, '');
+        return content.replace(/^(\[chunk_[a-z0-9]+[^\]\n]*\]\n?)+/, '');
+    }
+
+    // Register a content-derived label for bare content. The label is a pure
+    // function of content — same bare text, same label, on every build.
+    function register(bare, fp) {
+        const id = `chunk_${fnv1a64(bare)}`;
+        if (!seen.has(fp.hash)) {
+            seen.set(fp.hash, { id, text: bare });
+            lineSets.push({ id, set: fp.features });
+        }
+        chunkTable.set(id, fp.hash);
+        stats.chunks++; hasChunks = true;
+        return id;
     }
 
     // Retirement check: if this content's hash is retired, emit the tombstone
     // instead of any label/ref/full text. Checked on the BARE content (labels
     // never affect identity). The tombstone KEEPS the original label (stored
-    // in the retirements map at retire time) and re-registers it in the
-    // chunkTable — otherwise the model could never name the chunk to
-    // context_unretire (the label vanished with the content). The counter is
-    // pushed past the label so later chunks keep stable numbering.
+    // in the retirements map at retire time — legacy numeric or hash format)
+    // and re-registers it in the chunkTable — otherwise the model could never
+    // name the chunk to context_unretire (the label vanished with the content).
     function retiredTombstone(bare) {
         const hash = fingerprint(bare).hash;
         const r = retirements[hash];
         if (!r) return null;
         stats.retired++;
-        if (r.label && /^chunk_\d+$/.test(r.label)) {
+        if (r.label && /^chunk_[a-z0-9]+$/.test(r.label)) {
             chunkTable.set(r.label, hash);
-            const n = parseInt(r.label.slice(6), 10);
-            if (Number.isFinite(n) && n > chunkCounter) chunkCounter = n;
             return `[${r.label} RETIRED — distillation: "${r.distill}". Original intact in history; call context_unretire with ${r.label} to restore it.]`;
         }
         return tombstoneText(r.distill);
@@ -439,14 +469,15 @@ export function buildChunkView(messages, options = {}) {
         // 0) retirement — tombstone replaces everything (label, ref, body)
         const tomb = retiredTombstone(bare);
         if (tomb !== null) return { text: tomb, emitted: true };
-        // 1) exact dedup (on the BARE content — labels don't affect identity)
+        // 1) exact dedup (on the BARE content — labels don't affect identity).
+        // The repeat collapses to the BARE label: the label is content-derived,
+        // so it names its own full text earlier in the prefix — the label IS
+        // the reference, no '= chunk_X' suffix needed.
         const hit = seen.get(fp.hash);
         if (hit) {
-            chunkCounter++;
-            const id = `chunk_${chunkCounter}`;
-            chunkTable.set(id, fp.hash);
             stats.exactDupes++; stats.chunks++; hasChunks = true;
-            return { text: `[${id} = ${hit.id}]`, emitted: true };
+            chunkTable.set(hit.id, fp.hash);
+            return { text: `[${hit.id}]\n`, emitted: true };
         }
         // 2) near-dup (same lines, reshuffled / counter-touched) — size-gated scan
         const set = fp.features;
@@ -456,10 +487,8 @@ export function buildChunkView(messages, options = {}) {
             for (const x of set) if (cand.set.has(x)) inter++;
             const jac = inter / (set.size + cand.set.size - inter);
             if (jac >= NEARDUP_JACCARD) {
-                chunkCounter++;
-                const id = `chunk_${chunkCounter}`;
-                chunkTable.set(id, fp.hash);
-                stats.nearDupes++; stats.chunks++; hasChunks = true;
+                const id = register(bare, fp);
+                stats.nearDupes++;
                 return { text: `[${id} ≈ ${cand.id} (same content, minor differences)]`, emitted: true };
             }
         }
@@ -472,52 +501,46 @@ export function buildChunkView(messages, options = {}) {
                 if (!tooBig && overlap >= REBASE_JACCARD) {
                     const diff = computeDiff(chain.lastText, content);
                     if (diff.length < content.length) {
-                        chunkCounter++;
-                        const id = `chunk_${chunkCounter}`;
-                        chunkTable.set(id, fp.hash);
+                        const chainBaseId = chain.lastChunkId;
+                        const fpD = fingerprint(content);
+                        const id = register(content, fpD);
                         chain.depth++;
                         stats.maxDepth = Math.max(stats.maxDepth, chain.depth);
-                        stats.diffs++; stats.chunks++; hasChunks = true;
+                        stats.diffs++;
                         chain.lastChunkId = id;
                         chain.lastText = content;
-                        seen.set(fp.hash, { id, text: content });
-                        lineSets.push({ id, set });
-                        return { text: `[${id}, diff of ${chain.lastChunkId}]\n${diff}`, emitted: true };
+                        return { text: `[${id}, diff of ${chainBaseId}]\n${diff}`, emitted: true };
                     }
                     stats.reorderFallbacks++;
                 } else {
                     stats.rebases++;
                 }
             }
-            const id0 = `chunk_${++chunkCounter}`;
-            chunkTable.set(id0, fp.hash);
+            const id0 = register(content, fingerprint(content));
             chains.set(key, { lastChunkId: id0, lastText: content, depth: 0 });
             // base rides full, labeled so diffs/refs have a target
-            seen.set(fp.hash, { id: id0, text: content });
-            lineSets.push({ id: id0, set });
-            stats.chunks++; hasChunks = true;
             return { text: `[${id0}]\n${content}`, emitted: true };
         }
         // 4) first sight (dedup mode): register + label so later refs resolve.
         // If the content ALREADY wears our label (stored earlier, now re-sent),
-        // don't stamp a second one — register the bare content so future
-        // unlabeled copies still dedup against it, and pass it through as-is.
+        // don't stamp a second one — the pass-through label must MATCH the
+        // content-derived id (same bare → same hash). Legacy numeric labels
+        // pass through under their own name and are registered for refs.
         if (hadLabel) {
-            const existing = content.match(/^\[chunk_(\d+)/);
+            if (!bare) return { text: content, emitted: true }; // bare REF line stored as-is — nothing to register
+            const existing = content.match(/^\[chunk_([a-z0-9]+)/);
             const keepId = existing ? `chunk_${existing[1]}` : null;
             if (keepId) {
-                seen.set(fp.hash, { id: keepId, text: bare });
-                lineSets.push({ id: keepId, set });
+                if (!seen.has(fp.hash)) {
+                    seen.set(fp.hash, { id: keepId, text: bare });
+                    lineSets.push({ id: keepId, set: fp.features });
+                }
                 chunkTable.set(keepId, fp.hash);
                 stats.chunks++; hasChunks = true;
             }
             return { text: content, emitted: true };
         }
-        const id = `chunk_${++chunkCounter}`;
-        chunkTable.set(id, fp.hash);
-        seen.set(fp.hash, { id, text: bare });
-        lineSets.push({ id, set });
-        stats.chunks++; hasChunks = true;
+        const id = register(bare, fp);
         return { text: `[${id}]\n${content}`, emitted: true };
     }
 
