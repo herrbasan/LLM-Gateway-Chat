@@ -311,7 +311,17 @@ gpt-chat: `ignored`, glm5-*: `required` + `clearThinkingSupport: true` (z.AI's
 `thinking.clear_thinking` defaults true = server discards prior reasoning even when
 echoed; `358f04a` adds the `clear_thinking:false` injection for that case).
 Gateway commits **pushed** (`8c3d183`, `1724ee8`, `358f04a`); chat commits pushed
-(`cd6aff3` → `852008e`). **Both servers await user restart** (gateway for code+config,
-chat for api-view). After restart, verify: a DeepSeek tool chat keeps reasoning on the
-wire (check the runner's per-turn payload log for reasoning_content presence) and
-OpenAI/xAI chats behave as before.
+(`cd6aff3` → `bd172bf`). **Both servers restarted 2026-08-29 ~08:32.**
+
+**LIVE E2E PASSED** (scratch chat `chat_1787985163748_qz7ezk1h`, deepseek-chat,
+chunkTransform on — deleted after): browser_fetch tool chain completed **without a
+400** (the strict-history injection works: empty `reasoning_content:""` was injected on
+the tool-call turn), and after a real thinking turn the next request carried
+`reasoning=43` tokens on the wire (msg[6] in the `[token-count]` breakdown) — prior
+reasoning flows to DeepSeek instead of being stripped. Note: the token-count breakdown
+only counts plain `reasoning_content`; via the anthropic adapter the reasoning converts
+to `thinking` blocks, so policy-kept reasoning can show as `reasoning=0` while still
+being on the wire as a block. The 43-token reading is the plain-field path.
+
+**§3 COMPLETE.** Next: §5a (per-turn raw/wire + per-measure deltas in `run.end`
+context payload), then §5b/§5c (tooltip + report view).
