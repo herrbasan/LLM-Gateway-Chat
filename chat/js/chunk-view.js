@@ -356,12 +356,19 @@ function fnv1a64(str) {
     return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36);
 }
 
-// Shape-aware fingerprint. MCP/JSON-RPC tool responses carry their payload
-// as ONE giant escaped string line ("body": "...") — raw-line fingerprints
-// see '1 of 10 lines changed' and miss 99.9% content identity. For those,
-// fingerprint the PARSED string fields (recursively) instead of raw lines.
-// Returns { hash, features: Set } — features feed the near-dup Jaccard.
+// Shape-aware fingerprint. The IDENTITY hash is byte-exact (fnv1a of the full
+// content) — it keys `seen` (exact dedup) and `retirements`, and both must
+// never map byte-different content to the same entry (issue #22: a changed
+// title/messageCount inside a JSON tool result collided with the old chunk
+// because identity hashed only string fields >200 chars — numbers and short
+// strings were invisible). The shape-aware line-set (parsed string fields for
+// JSON payloads, raw lines otherwise) feeds ONLY the near-dup Jaccard scan,
+// where approximate matching is the declared intent.
+// PERSISTED in retirement maps — changed 2026-08-29 from shape-hash to
+// byte-hash; retirements stored under the old shape-hash simply stop matching
+// (their chunks reappear in full, fail-visible, no silent corruption).
 function fingerprint(content) {
+    const hash = fnv1a(content);
     let parsed = null;
     const t = content.trim();
     if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
@@ -377,7 +384,7 @@ function fingerprint(content) {
         walk(parsed);
         const big = strings.filter(s => s.length > 200);
         if (big.length > 0) {
-            const joined = big.join('\u0001');
+
             const set = new Set();
             for (const s of big) {
                 for (const line of s.split('\n')) {
@@ -385,11 +392,11 @@ function fingerprint(content) {
                     if (x.length > 0) set.add(x);
                 }
             }
-            return { hash: fnv1a(joined), features: set };
+            return { hash, features: set };
         }
     }
     // plain text path: line-based
-    return { hash: fnv1a(content), features: lineHashSet(content) };
+    return { hash, features: lineHashSet(content) };
 }
 
 // messages: OpenAI-style array (system/user/assistant/tool).
