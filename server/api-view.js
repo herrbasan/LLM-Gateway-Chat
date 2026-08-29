@@ -200,6 +200,16 @@ function buildApiMessages(messages, options = {}) {
                         ).join(' ');
                         fullText = (cleanUserContent ? cleanUserContent + '\n' : '') + manifestStr;
                     }
+                    // Auto-vision (runner-produced, stored on the attachment):
+                    // a non-vision model receives the MCP vision analysis as
+                    // text — real image understanding, not a false claim.
+                    const analysisStr = validAttachments
+                        .map((att, idx) => att.visionAnalysis
+                            ? `[Auto-vision analysis of attachment ${idx} (name="${att.name || 'unnamed'}"): ${att.visionAnalysis}]`
+                            : null)
+                        .filter(e => e !== null)
+                        .join('\n');
+                    if (analysisStr) fullText = (fullText ? fullText + '\n' : '') + analysisStr;
                     rawMessages.push({
                         role: 'user',
                         content: [
@@ -341,4 +351,4 @@ function buildApiMessages(messages, options = {}) {
     return { messages: merged, chunkTable: new Map(), chunkStats: null, rawMessages: merged };
 }
 
-module.exports = { buildApiMessages, stripExtraTimestamps, sanitizeToolArgs, resolveImageUrl };
+module.exports = { buildApiMessages, stripExtraTimestamps, sanitizeToolArgs, resolveImageUrl, parseFileRef };

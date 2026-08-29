@@ -9,7 +9,7 @@
 // ============================================
 
 const convStore = require('./conversation-store');
-const { buildApiMessages } = require('./api-view');
+const { buildApiMessages, parseFileRef } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
 const { countApiMessages, breakdownApiMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
@@ -426,6 +426,109 @@ class Runner {
         return { apiMessages: messages, rawMessages, chunkStats, chunkTable, mcpOrigin };
     }
 
+    // Auto-vision (restored server-side 2026-08-29; the pre-BFF client-side
+    // workflow was dropped in 4367b54 and never re-homed): a non-vision model
+    // can't see attached images natively, so run the MCP vision pipeline
+    // (session_create → analyze → session_close) over each NEW image
+    // attachment and store the analysis ON the attachment. api-view injects it
+    // into the payload text — the model receives real image understanding with
+    // the request instead of a bare manifest. Vision models never enter here
+    // (native path). The analysis persists, so later turns keep it as context.
+    async _ensureVisionAnalysis(modelSupportsVision) {
+        if (modelSupportsVision) return;
+        this.refresh();
+        const msgs = this.conv.messages;
+        // Only TRAILING user messages (since the last assistant reply) — new,
+        // unprocessed sends. History must not re-analyze on a model switch.
+        let start = msgs.length - 1;
+        while (start >= 0 && msgs[start].role !== 'assistant') start--;
+        const pending = [];
+        for (let i = start + 1; i < msgs.length; i++) {
+            const m = msgs[i];
+            if (m.role !== 'user' || !Array.isArray(m.attachments)) continue;
+            for (const att of m.attachments) {
+                if (!att || typeof att !== 'object') continue;
+                if (att.visionAnalysis || att.visionAnalysisError) continue;
+                const ref = parseFileRef(att._file);
+                if (!ref && !(typeof att.dataUrl === 'string' && att.dataUrl.startsWith('data:'))) continue;
+                pending.push({ msg: m, att, ref });
+            }
+        }
+        if (pending.length === 0) return;
+
+        const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        await pool.ensureConnected();
+        // The workshop MCP server (mcp/compact, sse/compact) exposes a SINGLE
+        // dispatcher tool named 'tools' — vision.session_create / vision.analyze
+        // are agent.action METHODS routed through it, not individual tools.
+        let dispatcher = null;
+        for (const name of pool.registry.keys()) {
+            if (name === 'tools' || name.endsWith('__tools')) { dispatcher = name; break; }
+        }
+        if (!dispatcher) {
+            // Boundary tolerance WITH a trace: attachments ride as manifest only.
+            DEPS.log().warn('Auto-vision: MCP dispatcher tool unavailable — attachments ride as manifest only', { chatId: this.conversationId }, 'Runner');
+            return;
+        }
+        const callVision = async (method, payload) => {
+            const result = await pool.callTool(dispatcher, { method, payload });
+            const text = this.extractToolResult(result).text;
+            let obj = null;
+            try { obj = JSON.parse(text); } catch { obj = null; }
+            return { obj, text };
+        };
+
+        const EXT_MIME_LOCAL = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' };
+        let dirty = false;
+        for (const { msg, att, ref } of pending) {
+            this._status('vision', `Analyzing attached image "${att.name || 'image'}" (model has no native vision)…`);
+            this.broadcast('vision.start', { messageId: msg.id, name: att.name || null });
+            let visionSession = null;
+            try {
+                let b64, mime;
+                if (ref) {
+                    const buffer = this.dbInstance.db.getFile(ref.bucket, ref.id, ref.ext);
+                    if (!buffer) throw new Error(`bucket read empty for ${att._file}`);
+                    b64 = Buffer.from(buffer).toString('base64');
+                    mime = att.type || EXT_MIME_LOCAL[ref.ext] || 'application/octet-stream';
+                } else {
+                    const comma = att.dataUrl.indexOf(',');
+                    mime = att.type || att.dataUrl.slice(5, comma).split(';')[0] || 'image/png';
+                    b64 = att.dataUrl.slice(comma + 1);
+                }
+                const created = await callVision('vision.session_create', { image_data: b64, image_mime_type: mime });
+                visionSession = created.obj?.sessionId || created.obj?.session_id || created.obj?.id || null;
+                if (!visionSession) throw new Error('vision session_create returned no session id: ' + String(created.text).slice(0, 200));
+
+                const analyzed = await callVision('vision.analyze', {
+                    session_id: visionSession,
+                    query: 'Describe this image in detail for a text-only model that cannot see it: any visible text (verbatim), objects, people, layout, colors, and anything needed to answer questions about it.'
+                });
+                const analysis = (typeof analyzed.obj === 'string' ? analyzed.obj : null)
+                    || analyzed.obj?.analysis || analyzed.obj?.text || analyzed.obj?.result
+                    || (typeof analyzed.text === 'string' ? analyzed.text.trim() : '');
+                if (!analysis) throw new Error('vision analyze returned no text');
+                att.visionAnalysis = analysis;
+                att.visionAnalyzedAt = new Date().toISOString();
+                dirty = true;
+                this.broadcast('vision.end', { messageId: msg.id, name: att.name || null, status: 'success', analysis });
+                DEPS.log().info('Auto-vision analysis stored', { chatId: this.conversationId, messageId: msg.id, name: att.name || null, analysisLen: analysis.length }, 'Runner');
+            } catch (e) {
+                att.visionAnalysisError = e.message;
+                dirty = true; // persist the error marker — no silent retry-loop every turn
+                this.broadcast('vision.end', { messageId: msg.id, name: att.name || null, status: 'error', error: e.message });
+                DEPS.log().warn('Auto-vision analysis failed', { chatId: this.conversationId, messageId: msg.id, name: att.name || null, error: e.message }, 'Runner');
+            } finally {
+                if (visionSession) {
+                    try { await callVision('vision.session_close', { session_id: visionSession }); } catch { /* session hygiene — the vision server times sessions out itself */ }
+                }
+            }
+        }
+        if (dirty) {
+            this.dbInstance.db.set(this.conv._id, 'messages', msgs);
+        }
+    }
+
     // §5a: per-turn context report — the two numbers (raw = no-measures payload,
     // wire = exact payload sent) + per-measure savings + a cache hint (did this
     // turn's prefix survive from last turn). reasoningStripped is not reported
@@ -497,6 +600,18 @@ class Runner {
 
         let outcome = 'stop';
         try {
+            // Vision capability BEFORE assembly: for non-vision models the
+            // auto-vision step below produces + persists the analysis that
+            // api-view then injects into the payload.
+            let modelSupportsVision = false;
+            try {
+                const models = await getModels();
+                modelSupportsVision = models.find(m => m.id === model)?.capabilities?.vision === true;
+            } catch (e) {
+                DEPS.log().warn('Model capability lookup failed', { chatId: this.conversationId, error: e.message }, 'Runner');
+            }
+            await this._ensureVisionAnalysis(modelSupportsVision);
+
             const { apiMessages, rawMessages, chunkStats, chunkTable, mcpOrigin } = await this._assemblePayload();
             this._chunkTable = chunkTable;
             // Keep the exact payload for the run-end context count (the real
@@ -529,6 +644,11 @@ class Runner {
             // PB-b: internal tools (archive/browser_fetch/attachment_save,
             // retirement in chunkTransform chats) + the user's MCP tools
             // (pool auto-connects lazily), vision-filtered like the client.
+            // pool must be defined HERE — the _assemblePayload extraction
+            // (394f965) moved the original declaration away and 04a415d fixed
+            // mcpOrigin but left this dangling: every turn since logged
+            // "MCP pool unavailable: pool is not defined" and ran tool-less.
+            const pool = mcpPool.getForUser(this.user, this.dbInstance);
             let tools = internalTools.getToolDefs({ chunkTransform: this.session.chunkTransform === true });
             let mcpTools = [];
             try {
@@ -536,19 +656,12 @@ class Runner {
             } catch (e) {
                 DEPS.log().warn('MCP pool unavailable', { chatId: this.conversationId, error: e.message }, 'Runner');
             }
-            let modelSupportsVision = false;
-            try {
-                const models = await getModels();
-                modelSupportsVision = models.find(m => m.id === model)?.capabilities?.vision === true;
-            } catch (e) {
-                DEPS.log().warn('Model capability lookup failed', { chatId: this.conversationId, error: e.message }, 'Runner');
-            }
-            // Vision-tool gating on capability alone. The old [Auto-vision: marker
-            // sniff was dead — nothing has produced that marker since the rework
-            // (auto-vision never moved server-side), so hasAutoVisionAnalysis was
-            // permanently false. Vision model → sees images natively, vision tools
-            // are redundant indirection → filtered. Non-vision model → tools kept
-            // as the fallback path. (#21 / #18)
+            // Vision-tool gating on capability alone (lookup done above, before
+            // assembly). The old [Auto-vision: marker sniff was dead — nothing
+            // produced that marker between the rework and the server-side
+            // auto-vision restore (2026-08-29). Vision model → sees images
+            // natively, vision tools are redundant indirection → filtered.
+            // Non-vision model → tools kept as the fallback path. (#21 / #18)
             tools = tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision }));
             this._toolsAdvertised = tools.length > 0;
             this._mcpOrigin = mcpOrigin;
