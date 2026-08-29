@@ -67,10 +67,19 @@ reasoningRetention: 'keep' | 'strip' | 'keep-with-tools'   // default: 'keep'
 | Provider | Value | Why |
 |---|---|---|
 | DeepSeek | `keep-with-tools` | No-tools: prior reasoning ignored → strip is free. With tools: omitting it → API 400. |
-| OpenAI | `strip` | Hard-rejects unknown fields. Continuity via `previous_response_id`. |
-| xAI (Grok) | `keep` | Omitting prior reasoning is the documented #1 cache-miss cause. |
-| Anthropic | `keep` | Structured thinking blocks with signatures must round-trip during tool use. |
+| OpenAI | `strip` | **Silently IGNORED, not rejected** (corrected 2026-08-29 via openai/codex #24500 — unknown fields are dropped, no 400). Strip anyway: ignored content is pure token waste and breaks prefix canonicality for no benefit. Continuity via `previous_response_id` / Responses items. |
+| xAI (Grok) | `keep` | Omitting prior reasoning is the **documented #1 cache-miss cause** (verified 2026-08-29, docs.x.ai prompt-caching/multi-turn). Not a 400 — a silent full-price recompute every turn. |
+| Anthropic | `keep` | Structured thinking blocks with signatures must round-trip verbatim during tool use (400 otherwise). |
+| Kimi (K2.7-code) | `keep` | `reasoning_content` always present and must be echoed every turn. |
+| z.AI (GLM) | `keep` (with `clear_thinking: false`) | `thinking.clear_thinking` defaults to `true` = server-side clear; retaining reasoning keeps the prefix append-only for the automatic cache. |
 | unknown | `keep` | Cache-safe default. |
+
+**Doc updates made 2026-08-29 (storage `documentation/LLM APIs/`):** `provider_xai.md`
+gained §6.5 Prompt Caching (append-only rule, reasoning-echo requirement); `provider_openai.md`
+gained §8 Prompt Caching (automatic, minimums, `prompt_cache_key`, 1.25× write premium on
+GPT-5.6+, reasoning-field-is-ignored note); `provider_zai.md` gained the
+`clear_thinking` ↔ cache-continuity note. The saga doc's "OpenAI hard-rejects" claim is
+**superseded** — it ignores, doesn't reject.
 
 Enforcement: shared helper in the adapter base, per-adapter default overridable per model.
 The chat-app's strip in [server/api-view.js](../server/api-view.js) stays only as the

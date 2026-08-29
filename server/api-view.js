@@ -222,12 +222,15 @@ function buildApiMessages(messages, options = {}) {
                 const cleanAssistantContent = msg.content ? stripExtraTimestamps(msg.content).trim() : '';
                 if (cleanAssistantContent || msg.reasoning_content || msg.tool_calls) {
                     const out = { role: 'assistant', content: cleanAssistantContent || null };
-                    // Thinking-mode contract (anthropic-adapter 400: "content[].thinking
-                    // must be passed back"): reasoning_content without its signature is
-                    // POISON in the payload. Only include reasoning when the signature
-                    // exists to satisfy the contract. (Aborted-during-thinking messages
-                    // have reasoning but no signature — E2E queue+abort, 2026-08-24.)
-                    if (msg.reasoning_content && msg.thinking_signature) out.reasoning_content = msg.reasoning_content;
+                // Prior-reasoning policy is GATEWAY-side now (2026-08-29,
+                // capabilities.priorReasoning in LLM-Gateway): the view passes
+                // reasoning_content + thinking_signature through verbatim and the
+                // provider's adapter decides keep/strip (DeepSeek requires the echo
+                // on tool chains, xAI needs it for cache hits, OpenAI ignores it,
+                // native Anthropic drops unsigned thinking with a warn). The former
+                // global strip-reasoning-without-signature guard broke exactly the
+                // providers that needed the echo.
+                if (msg.reasoning_content) out.reasoning_content = msg.reasoning_content;
                     if (msg.thinking_signature) out.thinking_signature = msg.thinking_signature;
                     if (msg.tool_calls) {
                         out.tool_calls = msg.tool_calls.map(tc => {
