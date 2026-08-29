@@ -273,3 +273,40 @@ model tokens; the replay already covered the identical path. Then commit
 LLM-Gateway repo — file the issue there first (architecture-repo rule), then implement.
 Then §5a (per-turn raw/wire + per-measure deltas in the runner's `run.end` context
 payload), then §5b/§5c (tooltip + report view).
+
+---
+
+### 2026-08-29 (cont.) — §3 per-provider reasoning policy (IMPLEMENTED, gateway commits local)
+
+**Research first (docs updated in storage `documentation/LLM APIs/`):**
+- `provider_openai.md` gained §8 Prompt Caching (automatic, 1024/2048 minimums,
+  `prompt_cache_key`, 1.25× write premium on GPT-5.6+, reasoning_content **silently
+  ignored not rejected** — supersedes the saga's hard-reject claim).
+- `provider_xai.md` gained §6.5 Prompt Caching (append-only rule; omitting prior
+  reasoning_content = documented #1 cache-miss cause — cache issue, not a 400).
+- `provider_zai.md` gained the `clear_thinking` ↔ cache-continuity note (default true
+  actively breaks prefix stability on reasoning models).
+
+**Gateway (D:\DEV\LLM Gateway, local commits on main, NOT PUSHED):**
+- `8c3d183` — openai adapter: `applyReasoningHistoryPolicy` at the single payload
+  choke point. `capabilities.priorReasoning`: `required` (xAI/Kimi) / `required-with-tools`
+  (DeepSeek: keep iff tools advertised) / `ignored` (OpenAI: strip — pure token waste) /
+  unset = keep (cache-safe). Legacy `reasoningContent: true` kept working as alias.
+  Schema-registered (fail-fast), documented in config.example.json, 7 unit tests pass
+  (`tests/reasoning-policy.test.js`).
+- `1724ee8` — anthropic adapter: unsigned-thinking poison guard moved gateway-side and
+  scoped to native Anthropic (`anthropicVersion` set): drop + warn. Third-party
+  (Kimi) keeps the echo. `priorReasoning: 'ignored'` strips. **Incidental fix:
+  `countMessageTokens` called async `formatMessages` without `await`** — was sending a
+  serialized Promise to count_tokens.
+
+**Chat side (this repo, `a510a6f`):** api-view.js passes `reasoning_content` /
+`thinking_signature` through verbatim; the global strip is gone. Verified: unsigned
+reasoning now reaches the payload.
+
+**⚠️ REQUIRED before live traffic:** the running gateway's config.json must declare
+`priorReasoning` per model, e.g. deepseek-chat: `'required-with-tools'`, grok-*:
+`'required'`, gpt-chat: `'ignored'`, kimi-k3-chat: `'required'`. Unset = keep (safe),
+so rolling out config without the fields is harmless but misses the DeepSeek no-tools
+strip and the OpenAI strip. Also: gateway commits need pushing + gateway restart; chat
+server needs restart for the api-view change.
