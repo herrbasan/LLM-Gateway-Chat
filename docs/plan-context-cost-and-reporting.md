@@ -248,3 +248,19 @@ Verification (live server, restarted 2026-08-29 ~06:02):
 Remaining (optional): a live turn to see labels flow over SSE + runner log — costs
 model tokens; the replay already covered the identical path. Then commit
 (chunk-view.js + internal-tools.js + this doc + scratch test).
+
+**UPDATE — §4 COMPLETE and committed (`cd6aff3`).** Live-turn E2E done:
+- Scratch chat `chunk-id-e2e-scratch` (chunkTransform:true, model `badkid-llama-chat` —
+  local, zero cost), sent a message forcing a `storage_read` of Agents.md. First send
+  short-circuited ("No model selected") — the chat needed a model PATCH before the run
+  would execute; worth remembering for future E2E.
+- Tool call ran; runner breakdown showed `chunks=1` created server-side.
+- Offline replay of the *stored* scratch conversation through `buildApiMessages`:
+  tool result carries `[chunk_1j9ia1vlur852]`; two builds → identical label,
+  byte-identical payload (determinism proof on live-turn data).
+- Scratch chat deleted. `_scratch/chunk-id-replay.test.js` is gitignored (stays local).
+
+**Next session starts at §3 (gateway per-provider reasoning policy)** in the
+LLM-Gateway repo — file the issue there first (architecture-repo rule), then implement.
+Then §5a (per-turn raw/wire + per-measure deltas in the runner's `run.end` context
+payload), then §5b/§5c (tooltip + report view).
