@@ -1190,11 +1190,13 @@ async function applyDefaultConfig() {
         }
     }
 
-    // Set default thinking effort ('none' = send nothing, gateway applies model default)
+    // Set default thinking effort. 'default' sends nothing (gateway applies
+    // model default); 'none' sends explicit off → gateway normalizes per model
+    // (true off where declared, lowest thinking otherwise).
     if (elements.thinkingEffortSelect) {
         const savedEffort = await storage.getPref('default-effort');
-        const valid = ['none', 'low', 'medium', 'high', 'max'];
-        const effort = valid.includes(savedEffort) ? savedEffort : 'none';
+        const valid = ['default', 'none', 'low', 'medium', 'high', 'max'];
+        const effort = valid.includes(savedEffort) ? savedEffort : 'default';
         if (elements.thinkingEffortSelect.setValue) {
             elements.thinkingEffortSelect.setValue(effort);
         } else {
@@ -1632,7 +1634,7 @@ function setupEventListeners() {
     });
 
     elements.thinkingEffortSelect?.addEventListener('nui-change', (e) => {
-        const effort = e.detail?.values?.[0] ?? e.detail?.value ?? 'none';
+        const effort = e.detail?.values?.[0] ?? e.detail?.value ?? 'default';
         storage.setPref('default-effort', effort).catch(() => {});
     });
     
@@ -1918,11 +1920,11 @@ async function sendMessage() {
     const maxTokensRaw = elements.maxTokens?.querySelector('input')?.value?.trim();
     const maxTokens = maxTokensRaw ? parseInt(maxTokensRaw) : null;
     const effortSel = elements.thinkingEffortSelect;
-    const effort = effortSel?.getValue?.() ?? effortSel?.querySelector('select')?.value ?? 'none';
+    const effort = effortSel?.getValue?.() ?? effortSel?.querySelector('select')?.value ?? 'default';
 
     const sendBody = { content, attachments, model: sendModel, temperature };
     if (maxTokens && !isNaN(maxTokens)) sendBody.max_tokens = maxTokens;
-    if (effort && effort !== 'none') sendBody.reasoning_effort = effort;
+    if (effort && effort !== 'default') sendBody.reasoning_effort = effort;
 
     const res = await runnerClient.send(sendChatId, sendBody);
     if (!res.ok) {

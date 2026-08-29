@@ -101,6 +101,10 @@ class Runner {
         this.conv = convStore.findOrCreateConversation(db, this.session, user);
         this.views = new Set();
         this.inFlight = null;
+        // Model captured per send (first-wins per batch run): a later send
+        // from another view must not retcon an already-queued run (#27).
+        // session.model stays as "last used" — the default for new views.
+        this.pendingModel = null;
         this.running = false;
         this.pendingSends = 0;
         this.abortRequested = false;
@@ -329,6 +333,7 @@ class Runner {
             attachments: body.attachments,
             model: body.model || this.session.model || null
         });
+        if (!this.pendingModel) this.pendingModel = message.model || null;
         if (body.model && body.model !== this.session.model) {
             this.session.model = body.model;
             this.dbInstance.db.set(this.session._id, 'model', body.model);
@@ -581,7 +586,10 @@ class Runner {
 
     async runOnce() {
         this.refresh();
-        const model = this.session.model;
+        // Per-send capture: the model the FIRST queued send chose, not whatever
+        // session.model says now (a second view may have switched it mid-queue).
+        const model = this.pendingModel || this.session.model;
+        this.pendingModel = null;
         if (!model) {
             this.broadcast('error', { code: 'no-model', message: 'No model selected for this conversation.' });
             await this._persistFailureNote('No model selected for this conversation — pick a model and resend.');
