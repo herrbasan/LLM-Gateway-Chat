@@ -3,7 +3,7 @@
 **Author:** deepseek-flash-chat survey (P−1)
 **Date:** 2026-08-23
 **Scope:** `D:\DEV\LLM-Gateway-Chat` (branch `bff-rework`) — written pre-ship; the branch merged to `master` 2026-08-28, so `D:\DEV` paths now read as `D:\SRV`. Line citations are a 2026-08-23 snapshot; retired channels are marked inline.
-**Purpose:** Test the six-channel hypothesis in `docs/plan-backend-routed-refactor.md` §1 against the actual code, inventory callsites and coupling, and correct spec §2.
+**Purpose:** Test the six-channel hypothesis in `docs/_Archive/plan-backend-routed-refactor.md` §1 against the actual code, inventory callsites and coupling, and correct spec §2.
 **Tracking:** LLM-Gateway-Chat issue #12.
 
 Every claim carries a `file:line` citation. Speculation is marked **[SPECULATION]**.
@@ -267,4 +267,4 @@ Every claim the code contradicts or sharpens:
 - **Tab-kill today:** no client signal; the fetch connection just dies. The server (once it proxies) would see `req.on('close')`. **Nothing currently persists the partial assistant stream** — the server's message writes are client-initiated append-only (`POST /api/chats/:id/messages`), and a mid-stream tab-kill drops the in-flight assistant text entirely.
 - **What must be built for P0's acceptance ("killing the tab mid-stream loses nothing"):** a proxy route that (a) forwards `POST /v1/chat/completions` SSE to the gateway, (b) buffers the token stream server-side keyed by `{user, conversation, exchange}` as it flows, (c) writes the assistant message to the conversation doc **when the stream completes** (even if the browser disconnected), and (d) lets a re-attaching client resume from an offset. The distinguishing signal for abort-vs-kill needs an explicit client header on abort (the connection-close alone is ambiguous). The `embed-events` relay (server.js:852–882) + the embed `pendingQueue`/reconciliation pattern (server.js:220–290, 352–445) are the closest existing server-side models for durable, restart-safe state.
 
-*End of survey. Amend `docs/plan-backend-routed-refactor.md` §2 with section 5 corrections, then mark P−1 complete.*
+*End of survey. Amend `docs/_Archive/plan-backend-routed-refactor.md` §2 with section 5 corrections, then mark P−1 complete.*

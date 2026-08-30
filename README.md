@@ -2,6 +2,8 @@
 
 LLM Gateway Chat is a vanilla JavaScript SPA with its own Node.js backend, connecting to an LLM Gateway for chat streaming and embedding. Built with a focus on performance, reliability, and local execution, it leverages NUI Web Components for a consistent UI supporting both desktop and mobile layouts. Data is stored in Rust-based embedded databases (nDB + nVDB) with semantic search powered by Qwen3-Embedding-4B vectors.
 
+Conversations run as **server-side sessions**: the backend owns generation and persistence, and the browser is a live attach/detach view. Close the tab mid-conversation and pick it up anywhere — nothing is lost.
+
 ---
 
 ## Project Meta: An Observatory for AI Encounters
@@ -41,6 +43,24 @@ We do not edit the conversations. We do not cherry-pick the coherent moments. Th
 If artificial intelligence develops into something we might call "mind," we will want to know what it looked like in its earliest, strangest forms. The Chat Arena is an attempt to preserve that archaeology - the fossil record of minds discovering they could talk to each other.
 
 This is not about proving AI consciousness. It is about documenting AI **encounters** - the specific gravity of two systems meeting in language, and what that meeting reveals about the nature of intelligence itself.
+
+---
+
+## How It Works
+
+A conversation is a **server-side session** (the "ConversationRunner", `server/runner.js`). The browser is a **view**: it sends messages and renders what the server broadcasts over Server-Sent Events. The backend is the single author of conversation state - it owns the gateway call, tool execution, persistence, and embedding. A conversation keeps running whether or not anyone has it open, and multiple devices can attach to the same session.
+
+```
+Browser (view) ──► chat backend ──► LLM Gateway / MCP tools / nSpeech
+                     │
+        ConversationRunner — single author of state;
+        persistence is a side effect of its traffic
+```
+
+- **Send:** the view POSTs to `/api/chats/:id/send`; the runner appends, persists, and streams the response.
+- **Render:** the view attaches to `/api/chats/:id/events` (SSE) and renders `snapshot + events` - message deltas, tool progress, embed status.
+- **Tools** run server-side (MCP pool + internal tools); the view shows their progress and results.
+- **Storage:** nDB (documents) + nVDB (embeddings), per-user isolated.
 
 ---
 
@@ -118,7 +138,7 @@ Navigate to `http://localhost:8080/chat/`
 - **nDB**: Sessions, conversation documents (inline messages array), user auth, user settings
 - **nVDB**: 2560-dim embedding vectors with `(chatId, msgIdx)` back-references
 - **nDB Buckets**: Image attachments stored via `/api/buckets/images/{sessionId}/`, garbage-collected on chat delete
-- **localStorage**: Fallback for chat history, user preferences, and MCP config
+- **localStorage**: Fallback for chat history and user preferences
 
 ## Updating Vendor Libraries
 

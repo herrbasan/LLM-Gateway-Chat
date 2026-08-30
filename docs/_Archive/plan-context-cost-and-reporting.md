@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-29
 **Status:** §3 + §4 + §5a + §5b + §5c — **ALL DONE** (committed, live-verified). Plan complete.
-**Supersedes/extends:** [docs/context-length-saga.md](context-length-saga.md) (the saga settles *measurement*; this settles *cost discipline* and *reporting*)
+**Supersedes/extends:** [context-length-saga.md](context-length-saga.md) (the saga settles *measurement*; this settles *cost discipline* and *reporting*)
 **Tracks:** LLM-Gateway-Chat (view + reporting) · LLM-Gateway (per-provider reasoning policy)
 
 ---

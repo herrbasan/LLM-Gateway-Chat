@@ -1,8 +1,8 @@
 # Architecture: The Conversation Runner
 
-**Date:** 2026-08-23 · **Status:** LANDED — runs live on `master` since 2026-08-28 (PA–PC + arena Phase D; cutover remnants tracked in the spec's §4)
+**Date:** 2026-08-23 · **Status:** LANDED — runs live on `master` since 2026-08-28 (PA–PC + arena Phase D). **This doc is the living design authority** for how the system works today.
 **Supersedes:** the proxy-retrofit P0 design ([_Archive/plan-p0-stream-ownership.md](_Archive/plan-p0-stream-ownership.md), kept as design input)
-**Governing spec:** [plan-backend-routed-refactor.md](plan-backend-routed-refactor.md) · **Map:** [codebase-survey-bff.md](codebase-survey-bff.md)
+**Governing spec (archived, shipped 2026-08-28):** [_Archive/plan-backend-routed-refactor.md](_Archive/plan-backend-routed-refactor.md) · **Map:** [codebase-survey-bff.md](codebase-survey-bff.md)
 
 ---
 

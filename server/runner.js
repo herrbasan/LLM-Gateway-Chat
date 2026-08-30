@@ -4,7 +4,7 @@
 // The runner is the ONLY author of conversation state (single-author principle).
 // Views attach over SSE: snapshot + live events. Connection state carries no
 // semantics — abort is an explicit API call; a closed view is one less listener.
-// Design: docs/architecture-conversation-runner.md · frames: docs/pa-implementation-spec.md
+// Design: docs/architecture-conversation-runner.md · frames: docs/_Archive/pa-implementation-spec.md
 // PA scope: TOOLS DISABLED (no tools advertised; tool_calls finish persists as-is).
 // ============================================
 
