@@ -1944,7 +1944,7 @@ class ArenaUI {
             ${contentHtml}
             ${!msg.isStreaming && msg.speaker !== 'moderator' ? `
             <div class="message-actions">
-                <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="volume"></nui-icon></button></nui-button>
+                <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="headphones"></nui-icon></button></nui-button>
                 <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
             </div>
             ` : (!msg.isStreaming ? `

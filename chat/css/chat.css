@@ -371,14 +371,74 @@ nui-code pre {
 
 .preview-content {
     flex: 1 1 auto;
-    overflow: auto;
+    overflow: hidden;
+    overflow-y: auto;
     padding: var(--nui-space);
     min-height: 0;
 }
 
-/* Desktop-only for v1. Below 60rem viewport, hide the pane entirely. */
+/* Markdown text should wrap, not force a horizontal scrollbar. The preview
+   pane is narrow (382px on a 390px phone) and long inline paths/code words
+   in lists otherwise push scrollWidth past clientWidth. pre/code/nui-code
+   keep their own internal horizontal scroll for code blocks. */
+.preview-content :where(p, li, td, th, a, strong, em, h1, h2, h3, h4, h5, h6) {
+    overflow-wrap: break-word;
+    word-break: break-word;
+}
+
+/* Mobile: preview docks ABOVE the composer so the user can keep typing while
+   the preview is open. chat-main is flex-row (no room side-by-side), so the
+   pane overlays the message area but stops at --composer-height (tracked by
+   chat.js). The resizer is a desktop-only drag affordance — no drag-resize on
+   a docked pane. z-index: the pane (20) sits above the messages, the composer
+   (25) and TTS player (100) float above it. */
 @media (max-width: 60rem) {
-    .preview-pane, .preview-resizer { display: none !important; }
+    .preview-pane {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: var(--composer-height, 6rem);
+        z-index: 20;
+        flex: none;
+        min-width: 0;
+        width: 100%;
+        max-width: none;
+        border-left: none;
+    }
+    .preview-pane[hidden] { display: none; }
+    .preview-pane:not([hidden]) { display: flex; }
+    .preview-resizer { display: none !important; }
+    /* Composer always draws above the preview, even if --composer-height
+       momentarily lags behind a growth (e.g. images just attached).
+       Scoped to .chat-main to beat the base .chat-input-area z-index:10. */
+    .chat-main .chat-input-area { z-index: 25; }
+}
+
+/* On narrow phones, drop the provenance label to give the item dropdown
+   room — it ellipsis-truncates and crowds the speak/close buttons. */
+@media (max-width: 40rem) {
+    .preview-source { display: none; }
+}
+
+/* Mobile: the activity indicator overflows the cramped header (its 182px
+   pill + the chunk pill in slot=center push the right-side controls past the
+   viewport). Pull it out of the header flex flow and dock it as a small,
+   centered pill just below the header — it stays visible during a run without
+   stealing header space. (Absolute ancors to the positioned nui-app-header.) */
+@media (max-width: 60rem) {
+    #activity-indicator {
+        position: absolute;
+        top: calc(100% + var(--nui-space-half));
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 250;
+        max-width: calc(100% - var(--nui-space));
+        box-shadow: 0 0.25rem 1rem color-mix(in srgb, var(--shadow-color, #000) 22%, transparent);
+    }
+    /* The chunk-savings pill is secondary and transient — hide it on mobile so
+       it can't re-introduce header overflow the way the activity pill did. */
+    #chunk-savings-pill { display: none !important; }
 }
 
 /* Mobile Sidebar Toggle */
@@ -713,6 +773,9 @@ nui-code pre {
     flex-shrink: 0;
     border-top: thin solid var(--border-shade2);
     padding: 0.75rem 1.5rem;
+    /* Inline padding the composer introduces — sections that want a full-width
+       divider bleed past it: margin-inline: -var + padding-inline: var. */
+    --composer-pad-inline: 1.5rem;
     background: var(--color-shade1);
     box-sizing: border-box;
     width: 100%;
@@ -733,11 +796,15 @@ nui-code pre {
     margin-bottom: 0.5rem;
 }
 
-/* Hide images row when empty */
+/* Hide images row when empty — collapse fully (no margin/padding leftover).
+   Relies on the JS-toggled .has-attachments class (robust across browsers)
+   plus :empty as a native fallback. */
 .images-row:empty,
-.images-row:not(:has(.attachment-item)) {
+.images-row:not(.has-attachments) {
     display: none;
     margin-bottom: 0;
+    padding: 0;
+    min-height: 0;
 }
 
 .attachment-preview {
@@ -801,6 +868,19 @@ nui-code pre {
     align-items: center;
     width: 100%;
     box-sizing: border-box;
+}
+
+/* The input row is its own section — give it a full-width top divider when it
+   follows another section (attachments or the TTS player). Bleeds past the
+   composer padding so the hairline reaches the viewport edges, matching the
+   container's top border and the player's divider. (No nested :has() — a
+   stylesheet parser rejects it and would drop the whole rule.) */
+.chat-input-area:has(.tts-player:not([hidden])) .input-row,
+.chat-input-area:has(.images-row.has-attachments) .input-row {
+    border-top: thin solid var(--border-shade2);
+    width: calc(100% + (2 * var(--composer-pad-inline, 1.5rem)));
+    margin-inline: calc(-1 * var(--composer-pad-inline, 1.5rem));
+    padding-inline: var(--composer-pad-inline, 1.5rem);
 }
 
 .chat-input {
@@ -1495,6 +1575,7 @@ nui-app:not(.nui-ready) { display: none; }
     .message-timestamp { display: none; }
     .chat-input-area {
         padding: 0.5rem;
+        --composer-pad-inline: 0.5rem;
     }
     .chat-input-area .input-row .context-progress-wrap{
         display: none;
@@ -1618,38 +1699,38 @@ nui-app:not(.nui-ready) { display: none; }
 }
 
 /* ============================================
-   TTS floating player — top-right on #messages
-   Outside virtual-scroll stage. Idle = hidden.
-   Collapsed: shrink-wrap to chip (no 22rem ghost box).
-   Pretty = negative space, one accent on fill.
+   TTS player — in-flow section in the composer
+   (below the attachments row, above the input).
+   Idle = hidden; shown as a full-width control bar
+   only while audio is active. No collapse/float —
+   it sits in the bottom container, never overlaps
+   the preview or the messages.
    ============================================ */
 
 .tts-player {
-    position: absolute;
-    top: var(--nui-space-half);
-    right: var(--nui-space);
-    z-index: 30;
-    width: min(20rem, calc(100% - var(--nui-space)));
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    pointer-events: none;
+    box-sizing: border-box;
+    /* No background — the section reads as a divider, not a card. Bleed the
+       box past the composer padding so any top border reaches the viewport
+       edges, while padding insets the control content to match the input row.
+       border-top is applied only when an attachments section renders above
+       (see .images-row.has-attachments ~ rule) — otherwise the composer's own
+       top border is the single divider toward the messages. */
+    width: calc(100% + (2 * var(--composer-pad-inline, 1.5rem)));
+    padding: 0 var(--composer-pad-inline, 1.5rem);
+    margin-inline: calc(-1 * var(--composer-pad-inline, 1.5rem));
+    background: transparent;
 }
 
-/* Collapsed chip must not keep the expanded panel width — that left a
-   wide invisible box and made the mini control sit mid-text awkwardly. */
-.tts-player.is-collapsed {
-    width: auto;
-    max-width: calc(100% - var(--nui-space));
+/* Player divider only between attachments and the player — if the attachments
+   row is empty (collapsed, no .has-attachments), the player is the first
+   section and must NOT repeat the composer's top border. Sibling combinator,
+   no :has(). */
+.images-row.has-attachments ~ .tts-player-mount .tts-player {
+    border-top: thin solid var(--border-shade2);
 }
 
 .tts-player[hidden] {
     display: none !important;
-}
-
-.tts-player-panel,
-.tts-player-chip {
-    pointer-events: auto;
 }
 
 .tts-player-panel {
@@ -1657,68 +1738,6 @@ nui-app:not(.nui-ready) { display: none; }
     flex-direction: column;
     gap: var(--nui-space-half);
     width: 100%;
-    padding: var(--nui-space-half) var(--nui-space);
-    background: color-mix(in srgb, var(--color-shade1) 92%, var(--color-base));
-    border: thin solid var(--border-shade2);
-    border-radius: var(--border-radius2);
-    box-shadow: 0 0.25rem 1rem color-mix(in srgb, var(--shadow-color, #000) 22%, transparent);
-    backdrop-filter: blur(10px);
-}
-
-.tts-player.is-collapsed .tts-player-panel {
-    display: none;
-}
-
-.tts-player-chip {
-    display: none;
-    align-items: center;
-    gap: var(--nui-space-half);
-    width: fit-content;
-    max-width: 9rem;
-    padding: var(--nui-space-quarter) var(--nui-space-half);
-    background: color-mix(in srgb, var(--color-shade1) 92%, var(--color-base));
-    border: thin solid var(--border-shade2);
-    border-radius: var(--border-radius3);
-    box-shadow: 0 0.25rem 1rem color-mix(in srgb, var(--shadow-color, #000) 22%, transparent);
-    backdrop-filter: blur(10px);
-    cursor: pointer;
-    color: var(--text-color-dim);
-}
-
-.tts-player.is-collapsed .tts-player-chip {
-    display: inline-flex;
-}
-
-.tts-player-chip:hover {
-    border-color: var(--color-highlight);
-    color: var(--text-color);
-}
-
-.tts-player-chip-icon {
-    width: var(--icon-size);
-    height: var(--icon-size);
-    flex-shrink: 0;
-}
-
-.tts-player.is-loading .tts-player-chip-icon {
-    animation: tts-spin 0.8s linear infinite;
-    color: var(--color-highlight);
-}
-
-.tts-player-chip-bar {
-    display: block;
-    width: 3.5rem;
-    height: 0.2rem;
-    border-radius: var(--border-radius1);
-    background: var(--color-shade3);
-    overflow: hidden;
-}
-
-.tts-player-chip-fill {
-    display: block;
-    height: 100%;
-    width: 0%;
-    background: var(--color-highlight);
 }
 
 .tts-player-row {
@@ -1751,12 +1770,10 @@ nui-app:not(.nui-ready) { display: none; }
     opacity: 0.6;
 }
 
-.tts-player-collapse-icon {
-    transform: rotate(-90deg);
-}
-
 .tts-player-scrub-row {
-    padding-bottom: var(--nui-space-quarter);
+    /* Inset the scrub slider from the content edges and give it breathing
+       room before the input row below. */
+    padding: 0 var(--nui-space-half) var(--nui-space);
 }
 
 nui-slider.tts-player-scrub {
@@ -1810,16 +1827,6 @@ nui-slider.tts-player-scrub .tts-player-scrub-buffer {
 .tts-player.is-loading .tts-player-icon-play {
     animation: tts-spin 0.8s linear infinite;
     color: var(--color-highlight);
-}
-
-@media (max-width: 40rem) {
-    .tts-player {
-        width: min(18rem, calc(100% - var(--nui-space)));
-    }
-
-    .tts-player.is-collapsed {
-        width: auto;
-    }
 }
 
 /* Progress Status */

@@ -1131,6 +1131,24 @@ async function init() {
     // Initialize preview pane (needs DOM ready + NUI loaded for enableDrag)
     preview.init();
 
+    // Track the composer (bottom container) height so the mobile preview and
+    // TTS player can dock above it. The composer grows when images attach or
+    // the input wraps — a hardcoded value would let the preview/player cover
+    // it. This var is read by chat.css at max-width:60rem / 40rem.
+    const chatMainEl = document.querySelector('.chat-main');
+    const composerEl = document.querySelector('.chat-input-area');
+    if (chatMainEl && composerEl) {
+        const trackComposerHeight = () => {
+            chatMainEl.style.setProperty('--composer-height', composerEl.offsetHeight + 'px');
+        };
+        trackComposerHeight();
+        if (typeof ResizeObserver === 'function') {
+            new ResizeObserver(trackComposerHeight).observe(composerEl);
+        } else {
+            window.addEventListener('resize', trackComposerHeight);
+        }
+    }
+
     // URL-fetch mode needs the MCP server origin to resolve relative /storage/...
     // paths. Topology belongs to the client — chat.js owns getMcpServerOrigin.
     preview.setMcpOriginResolver(getMcpServerOrigin);
@@ -1151,14 +1169,23 @@ async function init() {
     if (previewSpeakBtn) {
         previewSpeakBtn.classList.add('speaker');
         const previewHeader = document.querySelector('.preview-header');
-        previewSpeakBtn.addEventListener('click', () => {
+        previewSpeakBtn.addEventListener('click', (e) => {
             if (!tts) return;
             const text = preview.getActivePlainText(getPlainText);
             if (!text) return;
-            // Use the controller's toggle() — handles same-item pause/resume/cancel
-            // and different-item new-speak, same as chat messages.
-            tts.toggle(text, previewHeader);
+            // Preview playback isn't tied to a message exchange — clear the
+            // bubble's exchange tracking so a later bubble click re-speaks
+            // instead of mis-toggling a stale target.
+            currentTtsExchangeId = null;
             ttsPlayer?.reveal();
+            // toggle() handles same-item pause/resume/cancel and new-speak.
+            // Shift-click → re-render from the start (new request, e.g. voice).
+            if (e.shiftKey) {
+                tts.stop();
+                tts.speak(text, previewHeader);
+            } else {
+                tts.toggle(text, previewHeader);
+            }
         });
     }
 
@@ -1253,11 +1280,11 @@ async function applyDefaultConfig() {
         serverDefaults: { endpoint: TTS_ENDPOINT, voice: TTS_VOICE, speed: TTS_SPEED },
     });
 
-    // Floating player host — sibling of conversation containers inside #messages
-    // (outside virtual-scroll stage). One global active playback.
-    const messagesMount = elements.messages || document.getElementById('messages');
-    if (messagesMount) {
-        ttsPlayer = new TtsPlayerHost({ controller: tts, mount: messagesMount });
+    // Player host — in-flow section in the composer footer, below the
+    // attachments row (id="tts-player-mount"). One global active playback.
+    const ttsMount = document.getElementById('tts-player-mount');
+    if (ttsMount) {
+        ttsPlayer = new TtsPlayerHost({ controller: tts, mount: ttsMount });
         ttsPlayer.attach();
         tts.on('state', ({ state }) => {
             if (state === 'idle') currentTtsExchangeId = null;
@@ -2828,7 +2855,7 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
             </div>
         </div>
         <div class="message-actions">
-            <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="volume"></nui-icon></button></nui-button>
+            <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="headphones"></nui-icon></button></nui-button>
             <div class="spacer"></div>
             <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
             <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
@@ -2836,8 +2863,9 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
         </div>
     `;
 
-    // Bind action buttons
-    el.querySelector('.speaker')?.addEventListener('click', () => toggleTts(exchangeId, el));
+    // Bind action buttons — speaker toggles play/pause/resume; shift-click
+    // re-renders from the start (new request, e.g. changed voice).
+    el.querySelector('.speaker')?.addEventListener('click', (e) => toggleTts(exchangeId, el, { shift: e.shiftKey }));
     el.querySelector('.copy-message')?.addEventListener('click', (e) => copyMessageToClipboard(exchangeId, e.currentTarget));
     el.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchangeId, 'assistant'));
     el.querySelector('.delete-message')?.addEventListener('click', () => {
@@ -3582,8 +3610,22 @@ function stopTts() {
     currentTtsExchangeId = null;
 }
 
-function toggleTts(exchangeId, el) {
+function toggleTts(exchangeId, el, opts = {}) {
     if (!tts) return;
+    ttsPlayer?.reveal();
+
+    const text = getAssistantPlainText(exchangeId);
+    if (!text) return;
+
+    // Shift-click → re-render from the start (new request, e.g. changed voice).
+    // Cancels any current playback and issues a fresh speak with the current
+    // engine/voice — the "regenerate with a different voice" path.
+    if (opts.shift) {
+        stopTts();
+        currentTtsExchangeId = exchangeId;
+        tts.speak(text, el);
+        return;
+    }
 
     // Same message while active:
     //   loading → cancel generation (only explicit cancel path besides stop/new speak)
@@ -3594,16 +3636,11 @@ function toggleTts(exchangeId, el) {
             stopTts(); // cancel()
             return;
         }
-        ttsPlayer?.reveal();
         tts.togglePause();
         return;
     }
 
-    const text = getAssistantPlainText(exchangeId);
-    if (!text) return;
-
     currentTtsExchangeId = exchangeId;
-    ttsPlayer?.reveal();
     tts.speak(text, el);
 }
 
@@ -4826,6 +4863,7 @@ function addAttachmentPreview(dataUrl, name) {
         const idx = attachedImages.findIndex(img => img.dataUrl === dataUrl);
         if (idx > -1) attachedImages.splice(idx, 1);
         item.remove();
+        syncAttachmentsRow();
     });
     
     // Lightbox click - open full image
@@ -4836,6 +4874,7 @@ function addAttachmentPreview(dataUrl, name) {
     });
     
     elements.attachmentPreview?.appendChild(item);
+    syncAttachmentsRow();
 }
 
 function clearAttachments() {
@@ -4843,6 +4882,17 @@ function clearAttachments() {
     if (elements.attachmentPreview) {
         elements.attachmentPreview.innerHTML = '';
     }
+    syncAttachmentsRow();
+}
+
+// Toggle a has-attachments class on the images row so it collapses when empty
+// WITHOUT relying on :has() (unsupported in some browsers). The CSS hides
+// .images-row:not(.has-attachments) fully — no leftover margin/padding band.
+function syncAttachmentsRow() {
+    const row = document.getElementById('images-row');
+    if (!row) return;
+    const count = elements.attachmentPreview?.querySelectorAll('.attachment-item').length || 0;
+    row.classList.toggle('has-attachments', count > 0);
 }
 
 // ============================================

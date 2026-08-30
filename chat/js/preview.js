@@ -122,6 +122,27 @@ function init() {
 // ============================================
 
 /**
+ * Heuristic: does this content look like markdown?
+ *
+ * The chat_preview_show tool has language as an opt-in hint, and the model
+ * frequently hands generated/read markdown without one (defaulting to 'text'
+ * → rendered as code, hiding the whole point of the preview). When no
+ * explicit language was given, treat clearly-markdown content as markdown.
+ * Only returns true on strong signatures — plain prose stays plain text.
+ */
+function looksLikeMarkdown(content) {
+    if (typeof content !== 'string' || !content) return false;
+    return /^#{1,6}\s/m.test(content)          // ATX heading
+        || /^\s*```/m.test(content)             // fenced code block
+        || /^\s*[-*+]\s+\S/m.test(content)      // list item
+        || /^\s*>\s+\S/m.test(content)          // blockquote
+        || /^\s*---\s*$/m.test(content)         // frontmatter / horizontal rule
+        || /\*\*[^*\n]+\*\*/m.test(content)     // bold
+        || /\[[^\]]+\]\([^)]+\)/m.test(content) // link
+        || /^\s*\|.+\|/m.test(content);         // table
+}
+
+/**
  * Show or update a preview item. Called by the chat_preview_show local tool.
  * Brings the item to front (selects it). Opens the pane if hidden.
  *
@@ -157,7 +178,12 @@ async function show(args) {
         // MODE A — generated content (existing behavior)
         content = args.content;
         if (typeof id !== 'string' || id.length === 0) throw new Error('preview.show: id required when using content');
-        if (typeof title !== 'string' || title.length === 0) throw new Error('preview.show: title required when using content');
+        // title is display-only dropdown metadata — a missing one must not
+        // block the render. Derive a label from the stable id and trace it.
+        if (typeof title !== 'string' || title.length === 0) {
+            console.warn('[preview] content mode missing title — deriving from id:', id);
+            title = id;
+        }
     } else {
         // MODE B — fetched file: the model hands just the url, the preview
         // fetches and displays it. No regeneration of content.
@@ -167,6 +193,12 @@ async function show(args) {
         if (typeof title !== 'string' || title.length === 0) title = deriveTitleFromUrl(resolvedUrl);
         if (typeof args.language !== 'string' || args.language.length === 0) language = inferLanguageFromUrl(resolvedUrl);
         if (!source) source = resolvedUrl;
+    }
+
+    // No explicit language hint and clearly-markdown content → render as MD.
+    // Otherwise the LLM's read/generated markdown shows as raw code.
+    if (language === 'text' && looksLikeMarkdown(content)) {
+        language = 'markdown';
     }
 
     if (content.length > MAX_CONTENT_BYTES) {
