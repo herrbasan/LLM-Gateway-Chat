@@ -18,6 +18,13 @@
 
 const TOOL_TIMEOUT_MS = 120000; // matches the browser client
 
+// Fixed-interval reconnect (issue #31): a dropped SSE stream or a failed
+// initial connect retries every RECONNECT_MS, forever. No backoff needed — a
+// retry against a down server is an instantly-refused TCP connect; against an
+// up one it's a single GET. Log state TRANSITIONS (down/recovered), never
+// attempts, so a long outage doesn't flood the log.
+const RECONNECT_MS = 5000;
+
 // The server passes its L getter (() => logger || noop). Calling it returns the
 // live logger — wrap it once so pool code can use log.info() directly.
 function wrapLog(logFn) {
@@ -43,7 +50,7 @@ function nextRequestId() {
 }
 
 class ServerConn {
-    constructor(cfg, log) {
+    constructor(cfg, log, onReconnect) {
         this.id = cfg.id;
         this.url = cfg.url;
         this.name = cfg.name || cfg.url;
@@ -53,6 +60,9 @@ class ServerConn {
         this.pending = new Map(); // requestId -> { resolve, reject, timeoutId }
         this.log = log;
         this._reader = null;
+        this._retryTimer = null;
+        this._wasDown = false;      // transition marker — log down/recovered once
+        this.onReconnect = onReconnect || null; // pool registry rebuild after recovery
     }
 
     async connect() {
@@ -66,8 +76,40 @@ class ServerConn {
         while (!this.postEndpoint && Date.now() < deadline && this.status === 'connected') {
             await new Promise(r => setTimeout(r, 50));
         }
-        if (!this.postEndpoint) throw new Error('No POST endpoint discovered');
+        if (!this.postEndpoint) {
+            this.status = 'disconnected';
+            throw new Error('No POST endpoint discovered');
+        }
         await this.refreshTools();
+    }
+
+    // Connect with transition-only logging; on failure schedule the next try.
+    // Single entry point for initial connect (ensureConnected) and retries.
+    async _tryConnect() {
+        try {
+            await this.connect();
+            if (this._wasDown) {
+                this._wasDown = false;
+                this.log.info('MCP reconnected', { server: this.name, tools: this.tools?.length ?? 0 }, 'MCPPool');
+            } else {
+                this.log.info('MCP connected', { server: this.name, tools: this.tools?.length ?? 0 }, 'MCPPool');
+            }
+            this.onReconnect?.();
+        } catch (e) {
+            if (!this._wasDown) {
+                this._wasDown = true;
+                this.log.warn('MCP connect failed', { server: this.name, error: e.message }, 'MCPPool');
+            }
+            this._scheduleRetry();
+        }
+    }
+
+    _scheduleRetry() {
+        if (this._retryTimer) return;
+        this._retryTimer = setTimeout(() => {
+            this._retryTimer = null;
+            this._tryConnect();
+        }, RECONNECT_MS);
     }
 
     async _readLoop(resp) {
@@ -96,6 +138,13 @@ class ServerConn {
             p.reject(new Error('MCP connection lost (stream ended)'));
         }
         this.pending.clear();
+        // Stream dropped (server bounce, network blip) — mark the transition
+        // once and keep retrying on a fixed interval (issue #31).
+        if (!this._wasDown) {
+            this._wasDown = true;
+            this.log.warn('MCP connection lost', { server: this.name }, 'MCPPool');
+        }
+        this._scheduleRetry();
     }
 
     _handleFrame(frame, base) {
@@ -239,20 +288,15 @@ class UserPool {
         const userList = (Array.isArray(s['mcp-servers']) && s['mcp-servers'].length)
             ? s['mcp-servers']
             : (Array.isArray(s.mcpServers) ? s.mcpServers : []);
-        this.servers = (userList.length ? userList : DEFAULT_SERVERS).map(cfg => new ServerConn(cfg, this.log));
+        this.servers = (userList.length ? userList : DEFAULT_SERVERS).map(cfg => new ServerConn(cfg, this.log, () => this.rebuildRegistry()));
     }
 
     async ensureConnected() {
         if (this._connected) return;
         this._connected = true;
-        await Promise.all(this.servers.map(async (srv) => {
-            try {
-                await srv.connect();
-                this.log.info('MCP connected', { server: srv.name, tools: srv.tools?.length ?? 0 }, 'MCPPool');
-            } catch (e) {
-                this.log.warn('MCP connect failed', { server: srv.name, error: e.message }, 'MCPPool');
-            }
-        }));
+        // _tryConnect schedules its own retry on failure — servers that are
+        // down at startup recover on their own (issue #31).
+        await Promise.all(this.servers.map(srv => srv._tryConnect()));
         this.rebuildRegistry();
     }
 

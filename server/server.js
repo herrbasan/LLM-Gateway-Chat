@@ -943,7 +943,7 @@ const routes = {
   'GET /health': async (req, res) => {
     json(res, {
       status: 'ok',
-      version: '1.0.0'
+      version: require('../package.json').version
     });
   },
 
@@ -1749,6 +1749,15 @@ const routes = {
     session.updatedAt = new Date().toISOString();
     db.update(session._id, session);
     emitListEvent(user.id, 'chat.updated', session);
+    // #27 — model changed out-of-band (settings save): sync a mounted runner's
+    // session copy (nDB returns detached objects) and converge its views.
+    if (body.model !== undefined) {
+      const r = runner.peekRunner(user.id, params.id);
+      if (r) {
+        r.session.model = body.model;
+        r.broadcast('model.changed', { model: body.model });
+      }
+    }
     json(res, session, 200, req);
   },
   

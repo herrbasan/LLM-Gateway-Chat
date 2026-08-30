@@ -359,7 +359,19 @@ function attachRunnerEvents(chatId) {
             renderHistoryList();
         },
         error(d) { _runnerError(chatId, d); },
-        'embed.status'(d) { _runnerEmbed(chatId, d); }
+        'embed.status'(d) { _runnerEmbed(chatId, d); },
+        // #27 — another view (or a settings save) switched the conversation's
+        // model: converge this view's selector on the actual model.
+        'model.changed'(d) {
+            if (!d?.model) return;
+            updateChatModel(chatId, d.model);
+            if (chatId === currentChatId && d.model !== currentModel) {
+                currentModel = d.model;
+                if (elements.modelSelect.setValue) elements.modelSelect.setValue(d.model);
+                const select = elements.modelSelect.querySelector('select');
+                if (select) select.value = d.model;
+            }
+        }
     });
 }
 

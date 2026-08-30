@@ -20,7 +20,7 @@
 const EVENT_NAMES = [
     'snapshot', 'run.start', 'delta', 'tool.start', 'tool.end',
     'msg.assistant', 'msg.user', 'msg.deleted',
-    'run.end', 'run.status', 'error', 'embed.status'
+    'run.end', 'run.status', 'error', 'embed.status', 'model.changed'
 ];
 
 // Event names the user-level list stream emits (sidebar sync across devices).

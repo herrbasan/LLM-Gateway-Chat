@@ -1,6 +1,6 @@
 {
   "name": "chat-standalone",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "description": "Standalone LLM Gateway Chat client",
   "scripts": {
     "postinstall": "git submodule update --init --recursive",

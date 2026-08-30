@@ -337,6 +337,8 @@ class Runner {
         if (body.model && body.model !== this.session.model) {
             this.session.model = body.model;
             this.dbInstance.db.set(this.session._id, 'model', body.model);
+            // #27 — converge all attached views on the actual conversation model.
+            this.broadcast('model.changed', { model: body.model });
         }
         this.broadcast('msg.user', this.viewMessage(message));
         this.touch();
@@ -417,7 +419,9 @@ class Runner {
             sessionPrompt: this.session.systemPrompt || '',
             archiveTools: { sessionId: this.conversationId, mcpOrigin, serverSide: true },
             mcpResources: null,
-            memoryToolsAvailable: pool.hasToolPrefix('memory.')
+            memoryToolsAvailable: pool.hasToolPrefix('memory.'),
+            // #28 — the model of THIS turn, so the seat knows its own substrate.
+            substrate: this.pendingModel || this.session.model || null
         });
         const { messages, chunkTable, chunkStats, rawMessages } = buildApiMessages(this.conv.messages, {
             systemPrompt,
@@ -1062,4 +1066,10 @@ class Runner {
     }
 }
 
-module.exports = { init, getRunner, handleEmbedStatus };
+// Return a mounted runner without creating one (route handlers that mutate
+// session state outside send() — e.g. PATCH model — use this to notify views).
+function peekRunner(userId, conversationId) {
+    return registry.get(`${userId}:${conversationId}`) || null;
+}
+
+module.exports = { init, getRunner, peekRunner, handleEmbedStatus };

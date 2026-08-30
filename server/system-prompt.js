@@ -14,11 +14,17 @@
 //   } | null,
 //   mcpResources: { resources, templates } | null,   // null in PA (no pool yet)
 //   memoryToolsAvailable: bool                        // false in PA
+//   substrate: model id serving this session          // #28 — the seat sees its own substrate
 // }
 // ============================================
 
-function buildMetadataPrefix(user = {}) {
-    const parts = ['LLM Gateway Chat v1.0'];
+// Version derived from package.json at startup — never hardcoded, so the
+// injected footer can't drift from the actual app version (#29).
+const APP_VERSION = require('../package.json').version;
+
+function buildMetadataPrefix(user = {}, substrate = null) {
+    const parts = [`LLM Gateway Chat v${APP_VERSION}`];
+    if (substrate) parts.push(`Substrate: "${substrate}"`);
     if (user.name) parts.push(`User: "${user.name}"`);
     if (user.location) parts.push(`Location: "${user.location}"`);
     if (user.language) parts.push(`Language: "${user.language}"`);
@@ -67,8 +73,8 @@ function buildMcpResourceContext(resources = [], templates = []) {
 const MEMORY_REMINDER = '\n\n## Memory Tools — Use Proactively\n\nThis chat app has persistent memory. Start every session with `memory.overview` to see what is already known, then use the tools below.\n\n- `memory.overview` — See your current memory map and top-priority facts. Run this at the start of each session.\n- `memory.store` — Save anything useful: user preferences, project facts, decisions, failures, plans, context. Store aggressively.\n- `memory.recall` — Search memory by meaning. Use before big decisions or when you need prior context.\n- `memory.get` — Retrieve one specific memory by ID.\n- `memory.list` — Browse all memories, optionally filtered by category.\n- `memory.update` / `memory.forget` — Edit or remove outdated memories.\n\nGuideline: Begin with `memory.overview`. If something would help future-you give a better answer, store it. If you need prior context, recall it.';
 
 function buildSystemPrompt(ctx = {}) {
-    const { instructions = '', user = {}, sessionPrompt = '', archiveTools = null, mcpResources = null, memoryToolsAvailable = false } = ctx;
-    const metadata = buildMetadataPrefix(user);
+    const { instructions = '', user = {}, sessionPrompt = '', archiveTools = null, mcpResources = null, memoryToolsAvailable = false, substrate = null } = ctx;
+    const metadata = buildMetadataPrefix(user, substrate);
 
     let prompt = instructions ? `${instructions}\n\n${metadata}` : metadata;
     if (sessionPrompt?.trim()) {
