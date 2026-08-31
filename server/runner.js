@@ -9,7 +9,7 @@
 // ============================================
 
 const convStore = require('./conversation-store');
-const { buildApiMessages, parseFileRef } = require('./api-view');
+const { buildApiMessages, parseFileRef, LEADING_TS_REGEX } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
 const { countApiMessages, breakdownApiMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
@@ -406,7 +406,7 @@ class Runner {
     // runOnce (the live turn) and buildSnapshot (the on-load context figure), so
     // the pill counts the SAME thing whether the conversation is fresh-loaded or
     // mid-stream — fixing the load-vs-live divergence (#10).
-    async _assemblePayload() {
+    async _assemblePayload(turnModel = null) {
         const [instructions, chunkView] = await Promise.all([
             DEPS.getInstructions(),
             this.chunkView ? Promise.resolve(this.chunkView) : import('../chat/js/chunk-view.js').then(m => (this.chunkView = m))
@@ -421,7 +421,12 @@ class Runner {
             mcpResources: null,
             memoryToolsAvailable: pool.hasToolPrefix('memory.'),
             // #28 — the model of THIS turn, so the seat knows its own substrate.
-            substrate: this.pendingModel || this.session.model || null
+            // turnModel is authoritative: runOnce clears pendingModel BEFORE
+            // assembly, so pendingModel here would already be null (2026-08-31
+            // blank-substrate bug). Resolved to the full models-list entry
+            // (5-min TTL cache — same poll the model select uses) so the seat
+            // knows its upstream, context window, vision, thinking levels.
+            substrate: await this._substrateEntry(turnModel || this.pendingModel || this.session.model || null)
         });
         const { messages, chunkTable, chunkStats, rawMessages } = buildApiMessages(this.conv.messages, {
             systemPrompt,
@@ -588,6 +593,20 @@ class Runner {
         };
     }
 
+    // The full models-list entry for a model id (cached poll), or the bare id
+    // when the gateway list is unreachable — substrate is informational, a
+    // lookup failure must never kill a run.
+    async _substrateEntry(modelId) {
+        if (!modelId) return null;
+        try {
+            const entries = await getModels();
+            return entries.find(m => m.id === modelId) || modelId;
+        } catch (e) {
+            DEPS.log().warn('Substrate lookup failed, using bare model id', { chatId: this.conversationId, model: modelId, error: e.message }, 'Runner');
+            return modelId;
+        }
+    }
+
     async runOnce() {
         this.refresh();
         // Per-send capture: the model the FIRST queued send chose, not whatever
@@ -630,7 +649,7 @@ class Runner {
             }
             await this._ensureVisionAnalysis(modelSupportsVision);
 
-            const { apiMessages, rawMessages, chunkStats, chunkTable, mcpOrigin } = await this._assemblePayload();
+            const { apiMessages, rawMessages, chunkStats, chunkTable, mcpOrigin } = await this._assemblePayload(model);
             this._chunkTable = chunkTable;
             // Keep the exact payload for the run-end context count (the real
             // on-the-wire size — the limit-relevant number).
@@ -967,7 +986,10 @@ class Runner {
                 message: {
                     id: f.messageId,
                     role: 'assistant',
-                    content: f.content,
+                    // Stored content is timestamp-free by invariant (2026-08-31):
+                    // timestamps live in the api-view projection from createdAt.
+                    // Strip any model-echoed leading prefix so it can never double.
+                    content: f.content.replace(LEADING_TS_REGEX, ''),
                     model: f.model,
                     reasoning_content: isAbort ? undefined : (f.reasoning_content || undefined),
                     thinking_signature: isAbort ? undefined : (f.thinkingSignature || undefined),

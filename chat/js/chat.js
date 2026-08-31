@@ -394,7 +394,7 @@ function _runnerRunStart(chatId, d) {
         container.querySelector(`.chat-message.user[data-exchange-id="${s.exchangeId}"] .user-pending-indicator`)?.classList.remove('visible');
     }
     if (!s.el) {
-        s.el = createAssistantElement(s.exchangeId || 'inflight', '', d.model || '');
+        s.el = createAssistantElement(s.exchangeId || 'inflight', formatHeaderTimestamp(Date.now()), d.model || '');
         s.el.dataset.isStreaming = 'true';
         _vsAppendMessage(container, s.el);
     }
@@ -455,6 +455,9 @@ function _runnerAssistant(chatId, msg) {
         }
     }
     if (s.el) {
+        // Authoritative timestamp: the persisted message's createdAt (view form).
+        const tsSpan = s.el.querySelector('.message-header .message-timestamp');
+        if (tsSpan && msg.timestamp) tsSpan.textContent = formatHeaderTimestamp(msg.timestamp);
         finalizeAssistantElement(s.el, s.exchangeId, msg.usage, msg.context, msg.streamStats, conv);
         forceFinalizeMarkdownStream(s.el, msg.content || '', msg.reasoning_content || null);
     }
@@ -531,7 +534,7 @@ function _runnerResumeInflight(chatId, inFlight) {
     const s = _runnerStreaming(chatId);
     const lastEx = conv?.exchanges[conv.exchanges.length - 1];
     s.exchangeId = lastEx?.id || 'inflight';
-    s.el = createAssistantElement(s.exchangeId, '', inFlight.model || '');
+    s.el = createAssistantElement(s.exchangeId, formatHeaderTimestamp(inFlight.timestamp), inFlight.model || '');
     s.el.dataset.isStreaming = 'true';
     _vsAppendMessage(container, s.el);
     s.content = inFlight.content || '';
@@ -2839,6 +2842,11 @@ function renderExchange(exchange, targetContainer = null) {
             finalizeAssistantElement(assistantEl, exchange.id);
         }
     }
+}
+
+// Header timestamp format shared by user + assistant messages.
+function formatHeaderTimestamp(tsMs) {
+    return new Date(tsMs || Date.now()).toISOString().slice(0, 16).replace('T', ' @ ');
 }
 
 function createAssistantElement(exchangeId, timestamp = '', modelName = '') {

@@ -15,6 +15,9 @@
 //   mcpResources: { resources, templates } | null,   // null in PA (no pool yet)
 //   memoryToolsAvailable: bool                        // false in PA
 //   substrate: model id serving this session          // #28 — the seat sees its own substrate
+//     (2026-08-31: full /v1/models entry object — id, adapterModel,
+//     capabilities { contextWindow, vision, tools, thinkingLevels, … } —
+//     so the seat knows what it is. Bare id string still accepted.)
 // }
 // ============================================
 
@@ -22,12 +25,44 @@
 // injected footer can't drift from the actual app version (#29).
 const APP_VERSION = require('../package.json').version;
 
+function _formatTokensCompact(n) {
+    if (n >= 1000000) return Math.round(n / 100000) / 10 + 'M';
+    if (n >= 1000) return Math.round(n / 100) / 10 + 'K';
+    return String(n);
+}
+
+// The seat's self-knowledge: everything the models list knows about the model
+// serving this turn. Fields render only when present — the gateway entry
+// shape varies per provider.
+function _substrateSegment(substrate) {
+    if (!substrate) return null;
+    if (typeof substrate === 'string') return `Substrate: "${substrate}"`;
+    const caps = substrate.capabilities || {};
+    const facts = [];
+    if (substrate.adapterModel) facts.push(`upstream "${substrate.adapterModel}"`);
+    if (caps.contextWindow) facts.push(`context ${_formatTokensCompact(caps.contextWindow)} tokens`);
+    if (caps.vision) facts.push('vision');
+    if (caps.tools) facts.push('tools');
+    const thinking = Array.isArray(caps.thinkingLevels) && caps.thinkingLevels.length
+        ? caps.thinkingLevels.join('/')
+        : (caps.thinking ? String(caps.thinking) : null);
+    if (thinking) facts.push(`thinking ${thinking}`);
+    return `Substrate: "${substrate.id}"${facts.length ? ' — ' + facts.join(', ') : ''}`;
+}
+
 function buildMetadataPrefix(user = {}, substrate = null) {
     const parts = [`LLM Gateway Chat v${APP_VERSION}`];
-    if (substrate) parts.push(`Substrate: "${substrate}"`);
+    const substrateSegment = _substrateSegment(substrate);
+    if (substrateSegment) parts.push(substrateSegment);
     if (user.name) parts.push(`User: "${user.name}"`);
     if (user.location) parts.push(`Location: "${user.location}"`);
     if (user.language) parts.push(`Language: "${user.language}"`);
+    // Absolute time anchor (2026-08-31): day granularity — fine-grained relative
+    // time comes from the per-message [ts] prefixes in the api-view projection.
+    // Day precision keeps the system prompt byte-stable within a day (cache).
+    const now = new Date();
+    const p = n => String(n).padStart(2, '0');
+    parts.push(`Date: "${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}"`);
     const header = parts.join(' | ');
     const instruction = 'Do not include timestamps in your responses - they are added automatically by the chat system.';
     return `${header}\n${instruction}`;

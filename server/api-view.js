@@ -20,6 +20,24 @@ function stripExtraTimestamps(content) {
     });
 }
 
+// Canonical per-message time signal (2026-08-31): exactly one
+// [YYYY-MM-DD@HH:MM] prefix per message, derived from stored createdAt —
+// NEVER from content. Model-echoed prefixes are stripped at the leading edge,
+// so a mimicked timestamp can never double up. Server local time, minute
+// precision. Returns '' when the message has no text (attachment-only).
+const LEADING_TS_REGEX = /^(\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*)+/;
+function formatMessageTs(createdAt) {
+    const d = new Date(createdAt);
+    if (Number.isNaN(d.getTime())) return '';
+    const p = n => String(n).padStart(2, '0');
+    return `[${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}@${p(d.getHours())}:${p(d.getMinutes())}] `;
+}
+function withTimestamp(content, createdAt) {
+    const clean = (content || '').replace(LEADING_TS_REGEX, '').trim();
+    if (!clean) return '';
+    return formatMessageTs(createdAt) + clean;
+}
+
 // Strip base64 data from tool args for API messages
 function sanitizeToolArgs(args) {
     if (!args || typeof args !== 'object') return args;
@@ -150,7 +168,7 @@ function buildApiMessages(messages, options = {}) {
                 const toolResultObj = {
                     role: 'tool',
                     tool_call_id: callId,
-                    content: msg.content || ''
+                    content: withTimestamp(msg.content, msg.createdAt)
                 };
                 if (msg.toolImages && msg.toolImages.length > 0) {
                     const resolvedToolImages = msg.toolImages
@@ -158,7 +176,7 @@ function buildApiMessages(messages, options = {}) {
                         .filter(u => u !== null);
                     if (resolvedToolImages.length > 0) {
                         toolResultObj.content = [
-                            { type: 'text', text: msg.content || '' },
+                            { type: 'text', text: withTimestamp(msg.content, msg.createdAt) },
                             ...resolvedToolImages.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } }))
                         ];
                     }
@@ -176,7 +194,7 @@ function buildApiMessages(messages, options = {}) {
                 ? atts.filter(att => att.dataUrl || att.url || att._file)
                 : [];
 
-            const cleanUserContent = stripExtraTimestamps(msg.content || '');
+            const cleanUserContent = withTimestamp(msg.content, msg.createdAt);
 
             if (validAttachments.length > 0) {
                 const gatewayImageUrls = validAttachments
@@ -229,7 +247,7 @@ function buildApiMessages(messages, options = {}) {
         // ---- Assistant messages (stored = complete by definition) ----
         if (msg.role === 'assistant') {
             if (msg.content || msg.reasoning_content || msg.tool_calls) {
-                const cleanAssistantContent = msg.content ? stripExtraTimestamps(msg.content).trim() : '';
+                const cleanAssistantContent = msg.content ? withTimestamp(msg.content, msg.createdAt) : '';
                 if (cleanAssistantContent || msg.reasoning_content || msg.tool_calls) {
                     const out = { role: 'assistant', content: cleanAssistantContent || null };
                 // Prior-reasoning policy is GATEWAY-side now (2026-08-29,
@@ -351,4 +369,4 @@ function buildApiMessages(messages, options = {}) {
     return { messages: merged, chunkTable: new Map(), chunkStats: null, rawMessages: merged };
 }
 
-module.exports = { buildApiMessages, stripExtraTimestamps, sanitizeToolArgs, resolveImageUrl, parseFileRef };
+module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef };
