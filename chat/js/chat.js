@@ -181,7 +181,6 @@ const elements = {
     overallContextProgressWrap: document.getElementById('overall-context-progress-wrap'),
     overallContextProgress: document.getElementById('overall-context-progress'),
     overallContextTooltip: document.getElementById('overall-context-tooltip'),
-    contextDetailPop: document.getElementById('context-detail-pop'),
     stopButton: document.getElementById('stop-btn'), // Added safe fallback
 
     // TTS Elements
@@ -1812,13 +1811,32 @@ function setupEventListeners() {
     // New chat
     elements.newChatBtn?.addEventListener('click', startNewChat);
 
-    // Context pill: click pins the persistent detail panel (hover tooltip
-    // alone closes on scroll during generation)
+    // Context pill: click toggles the rich nui-tooltip detail panel above it.
+    // Hover/focus are disabled on the tooltip (`disabled`) — open is click-only.
+    //
+    // The nui-tooltip auto-dismisses on any scroll (it captures window scroll,
+    // including scrolls INSIDE the panel's own retirement list). For a pinned
+    // report that would make the panel un-scrollable, so we neutralize the
+    // internal hidePopover and only close on explicit dismiss (toggle/Escape/
+    // outside click) via _hideContextTooltip.
+    const _ctxTip = elements.overallContextTooltip;
+    if (_ctxTip) {
+        _ctxTip._ctxOriginalHidePopover = _ctxTip.hidePopover.bind(_ctxTip);
+        _ctxTip.hidePopover = () => {};
+    }
     elements.overallContextProgressWrap?.addEventListener('click', toggleContextDetailPop);
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && elements.contextDetailPop?.matches(':popover-open')) {
-            elements.contextDetailPop.hidePopover();
+        if (e.key === 'Escape' && elements.overallContextTooltip?.matches(':popover-open')) {
+            _hideContextTooltip(elements.overallContextTooltip);
         }
+    });
+    // Outside click dismisses the open context tooltip.
+    document.addEventListener('click', (e) => {
+        const tip = elements.overallContextTooltip;
+        const wrap = elements.overallContextProgressWrap;
+        if (!tip || !tip.matches(':popover-open')) return;
+        if (tip.contains(e.target) || wrap?.contains(e.target)) return;
+        _hideContextTooltip(tip);
     });
     
     // Import chat
@@ -3074,37 +3092,57 @@ async function updateOverallContext(contextData = null) {
     }
 
     if (elements.overallContextTooltip) {
-        elements.overallContextTooltip.innerHTML = buildContextTooltipHtml(contextData, { text, pct, knownLimit });
-    }
-
-    // Pinned detail panel (click the pill): the §5c report view — headline
-    // rows + wire-vs-raw sparkline + savings + active retirements.
-    const pop = elements.contextDetailPop;
-    if (pop && pop.matches(':popover-open')) {
-        pop.innerHTML = buildContextDetailHtml(contextData, { text, pct, knownLimit });
+        // The nui-tooltip is the single context detail surface (hover disabled).
+        // Populated whenever context data changes; the pill click toggles it.
+        elements.overallContextTooltip.innerHTML = buildContextDetailHtml(contextData);
     }
 }
 
-// Click the context pill → pin/unpin the §5c report panel above it.
-// Positioned once on open; content refreshes on every updateOverallContext.
+// Click the context pill → toggle the rich nui-tooltip detail panel above it.
+// Hover/focus are disabled on the tooltip (`disabled`) — open is click-only.
 function toggleContextDetailPop() {
-    const pop = elements.contextDetailPop;
+    const tip = elements.overallContextTooltip;
     const wrap = elements.overallContextProgressWrap;
-    if (!pop || !wrap) return;
-    if (pop.matches(':popover-open')) { pop.hidePopover(); return; }
-    pop.innerHTML = buildContextDetailHtml(window._lastRealContext?.get(currentChatId) || null, { text: elements.overallContextTooltip?.textContent || '', pct: 0, knownLimit: false });
-    pop.showPopover();
+    if (!tip || !wrap) return;
+    if (tip.matches(':popover-open')) { _hideContextTooltip(tip); return; }
+    // Refresh content from the authoritative last real reading on open.
+    tip.innerHTML = buildContextDetailHtml(window._lastRealContext?.get(currentChatId) || null);
+    tip.showPopover();
+    positionContextTooltip(tip, wrap);
+}
+
+// Close the context tooltip via its ORIGINAL hidePopover (the instance one is
+// neutralized to disable the nui-tooltip's scroll-close).
+function _hideContextTooltip(tip) {
+    if (tip._ctxOriginalHidePopover) tip._ctxOriginalHidePopover();
+    else tip.hidePopover?.();
+}
+
+// Place the context tooltip above the pill, centered with the arrow pointing at it.
+// Flips below the pill when there is no room above.
+function positionContextTooltip(tip, wrap) {
     const rect = wrap.getBoundingClientRect();
-    const pr = pop.getBoundingClientRect();
-    pop.style.left = Math.max(8, rect.left + rect.width / 2 - pr.width / 2) + 'px';
-    pop.style.top = Math.max(8, rect.top - pr.height - 10) + 'px';
+    const pr = tip.getBoundingClientRect();
+    const pad = 8;
+    const gap = 10;
+    let top = rect.top - pr.height - gap;
+    let placement = 'top';
+    if (top < pad) { top = rect.bottom + gap; placement = 'bottom'; }
+    let left = rect.left + rect.width / 2 - pr.width / 2;
+    left = Math.max(pad, Math.min(left, window.innerWidth - pr.width - pad));
+    tip.style.top = `${top}px`;
+    tip.style.left = `${left}px`;
+    tip.style.margin = '0';
+    tip.setAttribute('data-placement', placement);
+    const arrow = (rect.left + rect.width / 2) - left;
+    tip.style.setProperty('--arrow-left', `${Math.max(16, Math.min(arrow, pr.width - 16))}px`);
 }
 
 // §5c report view: headline rows + turn sparkline + savings + retirements.
-function buildContextDetailHtml(contextData, { text, pct, knownLimit }) {
+function buildContextDetailHtml(contextData) {
     const fmtK = n => n >= 1000000 ? (Math.round(n / 100000) / 10) + 'M'
         : n >= 1000 ? (Math.round(n / 100) / 10) + 'K' : String(Math.round(n));
-    let html = buildContextTooltipHtml(contextData, { text, pct, knownLimit });
+    let html = buildContextTooltipHtml(contextData);
 
     const entry = _contextReports.get(currentChatId);
     const history = entry?.history || [];
@@ -3150,12 +3188,20 @@ function buildContextDetailHtml(contextData, { text, pct, knownLimit }) {
 
 // Pretty context tooltip (nui-tooltip rich content). Rows render only when the
 // data exists — an estimate-only reading shows just the headline.
-function buildContextTooltipHtml(contextData, { text, pct, knownLimit }) {
+function buildContextTooltipHtml(contextData) {
     const fmtK = n => n >= 1000000 ? (Math.round(n / 100000) / 10) + 'M'
         : n >= 1000 ? (Math.round(n / 100) / 10) + 'K' : String(Math.round(n));
+    // Headline: used tokens (compact) + window size, derived from contextData so
+    // the detail panel renders correctly without an externally passed string.
+    const usedTokens = contextData?.used_tokens ?? 0;
+    const isEstimate = contextData?.isEstimate;
+    let head = `${isEstimate ? '~' : ''}${fmtK(usedTokens)}`;
+    const win = contextData?.window_size
+        || models.find(m => m.id === currentModel)?.capabilities?.contextWindow;
+    if (win) head += ` / ${fmtK(win)}`;
     const rows = [];
     const row = (label, value) => rows.push(`<div class="ctx-tip-row"><span>${label}</span><b>${value}</b></div>`);
-    row('Wire (next request)', text.replace(' Tokens', ''));
+    row('Wire (next request)', head);
     if (contextData && !contextData.isEstimate) {
         if (contextData.raw_tokens != null) row('Raw (no measures)', fmtK(contextData.raw_tokens));
         if (contextData.reasoning_tokens != null && contextData.reasoning_tokens > 0) row('Reasoning on wire', fmtK(contextData.reasoning_tokens));
@@ -3403,31 +3449,47 @@ function updateAssistantContent(el, content, reasoningContent = null) {
 
             const nuiMd = document.createElement('nui-markdown');
             answerContainer.appendChild(nuiMd);
-            answerContainer.dataset.lastAnswerLen = 0;
+            answerContainer.dataset.lastAnswer = '';
         }
 
         const nuiMd = answerContainer.querySelector('nui-markdown');
         if (nuiMd) {
-            const currentAnswerLen = parseInt(answerContainer.dataset.lastAnswerLen || '0', 10);
-            const newAnswerLen = parsed.answer.length;
+            // Diff against the last RENDERED answer string, not its length:
+            // sanitization can rewrite the head retroactively (a model-echoed
+            // leading timestamp renders as a literal partial like "[2026-09"
+            // until it completes and parseTimestamp strips it). Length-only
+            // diffing then appends the wrong tail — the classic artifact was
+            // "[2026-09" + "he honest inventory" (prefix kept, head eaten).
+            const prevAnswer = answerContainer.dataset.lastAnswer || '';
+            const extendsPrev = parsed.answer.startsWith(prevAnswer);
 
             if (isNetworkStreaming) {
                 if (!nuiMd._isStreaming) nuiMd.beginStream();
-                if (newAnswerLen > currentAnswerLen) {
-                    const chunk = parsed.answer.substring(currentAnswerLen);
-                    nuiMd.appendChunk(chunk);
-                    answerContainer.dataset.lastAnswerLen = newAnswerLen;
+                if (extendsPrev) {
+                    const chunk = parsed.answer.slice(prevAnswer.length);
+                    if (chunk) nuiMd.appendChunk(chunk);
+                } else {
+                    // Head changed retroactively — append-only diffing would
+                    // corrupt the render. Reset and replay the full answer.
+                    nuiMd.endStream();
+                    nuiMd.beginStream();
+                    nuiMd.appendChunk(parsed.answer);
                 }
+                answerContainer.dataset.lastAnswer = parsed.answer;
             } else {
                 if (nuiMd._isStreaming) {
                     // End of an active stream
-                    if (newAnswerLen > currentAnswerLen) {
-                        const chunk = parsed.answer.substring(currentAnswerLen);
-                        nuiMd.appendChunk(chunk);
+                    if (extendsPrev) {
+                        const chunk = parsed.answer.slice(prevAnswer.length);
+                        if (chunk) nuiMd.appendChunk(chunk);
+                    } else {
+                        nuiMd.endStream();
+                        nuiMd.beginStream();
+                        nuiMd.appendChunk(parsed.answer);
                     }
                     nuiMd.endStream();
-                    answerContainer.dataset.lastAnswerLen = newAnswerLen;
-                } else if (newAnswerLen > currentAnswerLen) {
+                    answerContainer.dataset.lastAnswer = parsed.answer;
+                } else if (parsed.answer !== prevAnswer) {
                     // Complete message (e.g. from history load)
                     if (window.nui?.util?.markdownToHtml) {
                         nuiMd.innerHTML = window.nui.util.markdownToHtml(parsed.answer);
@@ -3441,7 +3503,7 @@ function updateAssistantContent(el, content, reasoningContent = null) {
                         const safeContent = parsed.answer.replace(/<\/script/gi, '<\\/script');
                         nuiMd.innerHTML = `<script type="text/markdown">\n${safeContent}\n</script>`;
                     }
-                    answerContainer.dataset.lastAnswerLen = newAnswerLen;
+                    answerContainer.dataset.lastAnswer = parsed.answer;
                 }
             }
         }
