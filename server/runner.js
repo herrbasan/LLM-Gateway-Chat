@@ -60,6 +60,12 @@ function handleEmbedStatus(evt) {
 // other timeout). Reset on every chunk, so slow-but-progressing generations are
 // unaffected; only total silence for this window is treated as a stall.
 const STREAM_STALL_MS = 300000;
+// TTFT trip (2026-08-31): no first chunk within this window = hung request
+// (gateway accepted, upstream deadlocked — observed with gemini-flash after
+// image-store tool chains: twice silent until reload). Distinct from the
+// mid-stream stall: slow-prefill local models still get 2 min of grace, but
+// the user no longer stares at a dead bubble for 5 min.
+const TTFT_MS = 120000;
 
 // Two-tier tool-hop cap — a safety line against an infinite tool loop,
 // distinguished by whether anyone is attached. It must never trip in normal
@@ -110,6 +116,7 @@ class Runner {
         this.abortRequested = false;
         this.idleTimer = null;
         this._stallTimer = null;
+        this._ttftTimer = null;
         this.chunkView = null; // lazy dynamic import (shared file, no port)
         this._chunkTable = new Map(); // last assembly's chunk labels → hashes (context_retire)
         // §5a reporting: per-turn context records (raw/wire/savings/cache hint),
@@ -703,6 +710,14 @@ class Runner {
             this._toolsAdvertised = tools.length > 0;
             this._mcpOrigin = mcpOrigin;
             this.resetStallTimer();
+            this._ttftTimer = setTimeout(() => {
+                if (this.inFlight && !this.inFlight.firstDeltaAt && !this.inFlight.stalled) {
+                    this.inFlight.stalled = true;
+                    this.inFlight.ttftTimeout = true;
+                    DEPS.log().warn('Runner TTFT timeout', { chatId: this.conversationId, ms: TTFT_MS, model }, 'Runner');
+                    this.inFlight.controller.abort();
+                }
+            }, TTFT_MS);
             this._status('streaming', 'Calling model…');
 
             const resp = await fetch(`${DEPS.gatewayUrl}/v1/chat/completions`, {
@@ -735,9 +750,12 @@ class Runner {
             if (this.abortRequested) {
                 outcome = 'aborted';
             } else if (this.inFlight?.stalled) {
-                DEPS.log().error('Runner stream stalled', null, { chatId: this.conversationId, ms: STREAM_STALL_MS }, 'Runner');
-                this.broadcast('error', { code: 'stream-stall', message: `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`, exchangeId });
-                this.inFlight.errorDetail = `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`;
+                const stallMsg = this.inFlight.ttftTimeout
+                    ? `No response from gateway within ${TTFT_MS / 1000}s — first token never arrived (hung request).`
+                    : `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`;
+                DEPS.log().error('Runner stream stalled', null, { chatId: this.conversationId, ttft: this.inFlight.ttftTimeout === true, ms: this.inFlight.ttftTimeout ? TTFT_MS : STREAM_STALL_MS }, 'Runner');
+                this.broadcast('error', { code: this.inFlight.ttftTimeout ? 'ttft-timeout' : 'stream-stall', message: stallMsg, exchangeId });
+                this.inFlight.errorDetail = stallMsg;
                 outcome = 'error';
             } else if (err?.name === 'AbortError') {
                 outcome = 'aborted';
@@ -872,6 +890,9 @@ class Runner {
             if (json.context) f.context = json.context;
             const choice = json.choices?.[0];
             if (!choice) return;
+            // Any real upstream frame disarms the TTFT trip — a tool_calls-only
+            // stream never produces content deltas and must not trip it.
+            clearTimeout(this._ttftTimer);
             const delta = choice.delta || {};
             const out = { messageId: f.messageId, exchangeId: f.exchangeId };
             let any = false;
@@ -921,6 +942,7 @@ class Runner {
 
     async endRun(outcome) {
         clearTimeout(this._stallTimer);
+        clearTimeout(this._ttftTimer);
         const f = this.inFlight;
         if (!f) return;
         const durationMs = Date.now() - f.startedAt;

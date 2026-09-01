@@ -15,9 +15,10 @@
 //   mcpResources: { resources, templates } | null,   // null in PA (no pool yet)
 //   memoryToolsAvailable: bool                        // false in PA
 //   substrate: model id serving this session          // #28 — the seat sees its own substrate
-//     (2026-08-31: full /v1/models entry object — id, adapterModel,
+//     (2026-08-31: full /v1/models entry object — id, prettyName, adapterModel,
 //     capabilities { contextWindow, vision, tools, thinkingLevels, … } —
-//     so the seat knows what it is. Bare id string still accepted.)
+//     so the seat knows what it is. Pretty name is primary (2026-09-01), alias
+//     rides along when they differ. Bare id string still accepted.)
 // }
 // ============================================
 
@@ -47,7 +48,11 @@ function _substrateSegment(substrate) {
         ? caps.thinkingLevels.join('/')
         : (caps.thinking ? String(caps.thinking) : null);
     if (thinking) facts.push(`thinking ${thinking}`);
-    return `Substrate: "${substrate.id}"${facts.length ? ' — ' + facts.join(', ') : ''}`;
+    // Pretty name is the seat's name for itself; the alias (config id) rides
+    // along when they differ — the alias is what logs and configs reference.
+    const name = substrate.prettyName || substrate.id;
+    const alias = substrate.prettyName && substrate.prettyName !== substrate.id ? ` (alias "${substrate.id}")` : '';
+    return `Substrate: "${name}"${alias}${facts.length ? ' — ' + facts.join(', ') : ''}`;
 }
 
 function buildMetadataPrefix(user = {}, substrate = null) {
