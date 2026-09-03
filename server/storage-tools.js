@@ -48,6 +48,34 @@ function statOut(abs) {
     return { bytes: st.size, mtime: st.mtime.toISOString() };
 }
 
+// Snapshot-before-mutate (data-loss mitigation, #34 fallout): storage_write/
+// replace/delete are full-file operations with no other safety net — a bad
+// tool argument destroys the target. Before any destructive op on an existing
+// FILE, copy it to .backups/<rel>.<timestamp> (last BACKUP_KEEP per path).
+// Directories are not snapshotted (size unbounded) — noted loudly on delete.
+const BACKUP_DIR = '.backups';
+const BACKUP_KEEP = 10;
+function backupIfExists(abs, rel) {
+    if (rel.replace(/\//g, '\\').startsWith(BACKUP_DIR)) return null; // never back up backups
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return null;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupRel = `${BACKUP_DIR}/${rel}.${ts}`;
+    const backupAbs = path.join(ROOT, backupRel);
+    fs.mkdirSync(path.dirname(backupAbs), { recursive: true });
+    fs.copyFileSync(abs, backupAbs);
+    // Retention: prune oldest beyond BACKUP_KEEP for this exact path
+    const dir = path.dirname(backupAbs);
+    const prefix = path.basename(rel) + '.';
+    const siblings = fs.readdirSync(dir)
+        .filter(f => f.startsWith(prefix))
+        .sort(); // ISO timestamps sort chronologically
+    while (siblings.length > BACKUP_KEEP) {
+        fs.rmSync(path.join(dir, siblings.shift()), { force: true });
+    }
+    LOG.info('snapshot before mutate', { path: rel, backup: backupRel }, 'StorageTools');
+    return backupRel;
+}
+
 // ============================================
 // Tool definitions
 // ============================================
@@ -184,11 +212,12 @@ async function execute(name, args, deps = {}) {
         case 'storage_write': {
             if (typeof args.content !== 'string') throw new Error('storage_write: content (string) required');
             const abs = safeResolve(args.path);
+            const backup = backupIfExists(abs, args.path);
             fs.mkdirSync(path.dirname(abs), { recursive: true });
             fs.writeFileSync(abs, args.content, 'utf8');
             const out = statOut(abs);
             LOG.info('storage_write', { path: args.path, bytes: out.bytes }, 'StorageTools');
-            return jsonResult({ ok: true, path: args.path, ...out });
+            return jsonResult({ ok: true, path: args.path, ...(backup ? { previousVersion: backup } : {}), ...out });
         }
 
         case 'storage_append': {
@@ -256,24 +285,28 @@ async function execute(name, args, deps = {}) {
             } else {
                 next = content.slice(0, idx) + replacement + content.slice(idx + effectiveMarker.length);
             }
+            const backup = backupIfExists(abs, args.path);
             fs.writeFileSync(abs, next, 'utf8');
             const out = statOut(abs);
             LOG.info('storage_replace', { path: args.path, occurrence, bytes: out.bytes }, 'StorageTools');
-            return jsonResult({ ok: true, path: args.path, occurrence, ...out });
+            return jsonResult({ ok: true, path: args.path, occurrence, ...(backup ? { previousVersion: backup } : {}), ...out });
         }
 
         case 'storage_delete': {
             const abs = safeResolve(args.path);
             if (abs === ROOT) throw new Error('storage_delete: refusing to delete the storage root');
             const st = fs.statSync(abs);
+            let backup = null;
             if (st.isDirectory()) {
                 if (!args.recursive) throw new Error(`storage_delete: "${args.path}" is a directory — pass recursive:true`);
+                LOG.warn('storage_delete: directory deleted WITHOUT snapshot (size unbounded)', { path: args.path }, 'StorageTools');
                 fs.rmSync(abs, { recursive: true });
             } else {
+                backup = backupIfExists(abs, args.path);
                 fs.rmSync(abs);
             }
             LOG.info('storage_delete', { path: args.path, wasDirectory: st.isDirectory() }, 'StorageTools');
-            return jsonResult({ ok: true, deleted: args.path, wasDirectory: st.isDirectory() });
+            return jsonResult({ ok: true, deleted: args.path, wasDirectory: st.isDirectory(), ...(backup ? { previousVersion: backup } : {}) });
         }
 
         default:
