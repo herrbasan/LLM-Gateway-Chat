@@ -61,6 +61,8 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | `chat/js/chat-history.js` | Multi-conversation management, backend CRUD, localStorage fallback |
 | `chat/js/mcp-client.js` | MCP SSE connections, tool registry. **Retired** — tools run server-side in the runner |
 | `chat/js/file-store.js` | Attachment upload → `/api/buckets/images/…`, returns lightweight URLs |
+| `chat/js/voice-dictation.js` | Dictation controller (mic button flow): settled finals stream into the input, Done → `/api/stt` cleanup → cleaned text replaces input, Cancel restores snapshot |
+| `chat/js/voice-assistant.js` | Hands-free assistant controller over the nVoice SDK R3 surface (wake → listen → capture → send/stop/cancel → internal cleanup → deliver) |
 | `chat/js/preview.js`, `preview-url.js`, `chunk-view.js` | Preview pane + chunk inspection |
 | `chat-arena/js/arena.js` | Arena **spectator view** over the server ArenaRunner (snapshot + events via `/api/chats/:id/events`, start/stop/extend via `/api/arena/:id/*`). Legacy `Participant`/`Arena` classes (lines ~40–1165) are dead orchestration except: summary generation (`summarize`, direct `GatewayClient`) and legacy import — **cutover remnants** |
 
@@ -178,6 +180,7 @@ Tools run in the runner, not the browser. `server/mcp-pool.js` (per-user MCP poo
 - **Embedding pipeline** (server-side, stays): fire-and-forget after message POST, startup reconciliation nDB↔nVDB, SSE `embed-status` events, retry with escalating backoff.
 - **Image lifecycle:** base64 intercepted client-side → bucket upload → lightweight URL in message JSON. On chat delete, refs are garbage-collected via `db.releaseFile` (orphans → `.trash`).
 - **Tool execution is server-side** (runner `mcp-pool` + `internal-tools`); the view renders `tool.start`/`tool.end` events. The browser no longer runs tools, assembles system prompts, or orchestrates the gateway — it is a view over the runner's snapshot + event stream.
+- **Voice input is nVoice behind the `/api/stt` relay** (vendored SDK `lib/stt/nvoice-client.js` — update = re-copy from the nVoice repo, never edit in place). Two modes: dictation (mic button, input-integrated) and assistant (per-conversation `assistantMode` meta → phone-first overlay + system-prompt voice block + auto-TTS). `voice: true` stored-form field marks spoken user messages.
 
 ## Security
 
