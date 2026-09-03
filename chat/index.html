@@ -318,25 +318,28 @@
                             </div>
                             <input type="file" id="file-input" accept="image/*" multiple hidden>
                             <input type="file" id="import-chat-input" accept=".json" hidden>
-                            <!-- Assistant mode — phone-first hands-free overlay over the whole pane -->
-                            <div class="assistant-view" id="assistant-view" hidden>
-                                <nui-button id="assistant-exit-btn" class="icon-only assistant-exit" title="Exit assistant mode">
-                                    <button type="button" aria-label="Exit assistant mode"><nui-icon name="close"></nui-icon></button>
-                                </nui-button>
-                                <div class="assistant-state" id="assistant-state">LISTENING</div>
-                                <div class="assistant-hint" id="assistant-hint">say "ok kimi"</div>
-                                <div class="assistant-text" id="assistant-text"></div>
-                                <div class="assistant-actions" id="assistant-actions" hidden>
-                                    <nui-button id="assistant-discard-btn" title="Discard">
-                                        <button type="button">Discard</button>
-                                    </nui-button>
-                                    <nui-button id="assistant-send-btn" variant="primary" title="Send">
-                                        <button type="button">Send</button>
-                                    </nui-button>
-                                </div>
-                                <div class="assistant-reply" id="assistant-reply"></div>
-                            </div>
                         </footer>
+                        <!-- Assistant mode — phone-first hands-free overlay over the whole pane.
+                             Direct child of .chat-pane (position: relative): inset:0 must pin to
+                             the pane, NOT to the footer (position: relative there would shrink it
+                             to the composer box and push all content below the fold). -->
+                        <div class="assistant-view" id="assistant-view" hidden>
+                            <nui-button id="assistant-exit-btn" class="icon-only assistant-exit" title="Exit assistant mode">
+                                <button type="button" aria-label="Exit assistant mode"><nui-icon name="close"></nui-icon></button>
+                            </nui-button>
+                            <div class="assistant-state" id="assistant-state">LISTENING</div>
+                            <div class="assistant-hint" id="assistant-hint">say "ok kimi"</div>
+                            <div class="assistant-text" id="assistant-text"></div>
+                            <div class="assistant-actions" id="assistant-actions" hidden>
+                                <nui-button id="assistant-discard-btn" title="Discard">
+                                    <button type="button">Discard</button>
+                                </nui-button>
+                                <nui-button id="assistant-send-btn" variant="primary" title="Send">
+                                    <button type="button">Send</button>
+                                </nui-button>
+                            </div>
+                            <div class="assistant-reply" id="assistant-reply"></div>
+                        </div>
                     </div>
                     
                     <!-- Preview Pane Resizer (drag handle) -->
