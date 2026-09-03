@@ -480,7 +480,7 @@ runner.init({
     emitUserEvent: (userId, chatId, event, data) =>
         listEvents.emit('event', { userId, event: 'r.' + event, data: { chatId, ...data } })
 });
-internalTools.init({ log: L });
+internalTools.init({ log: L, emitListEvent });
 require('./storage-tools').init({ log: L(), storageRoot: MCP_STORAGE_PATH });
 embedEvents.on('status', runner.handleEmbedStatus);
 mcpPool.init({

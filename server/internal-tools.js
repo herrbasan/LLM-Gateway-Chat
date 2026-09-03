@@ -13,9 +13,13 @@
 const storageTools = require('./storage-tools');
 
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
+// List-event emitter (issue #33): metadata mutations broadcast chat.updated so
+// attached sidebars refresh without a manual reload. Injected via init().
+let EMIT_LIST_EVENT = null;
 // log may be a logger instance OR a factory (() => logger), matching how
 // server.js passes L to mcpPool/runner.
-function init({ log }) {
+function init({ log, emitListEvent }) {
+    if (typeof emitListEvent === 'function') EMIT_LIST_EVENT = emitListEvent;
     if (typeof log === 'function') {
         LOG = {
             info: (...a) => { try { log().info(...a); } catch { } },
@@ -508,7 +512,7 @@ async function executeInternalTool(name, args, ctx) {
             return executePreviewState(args, { dbInstance, conversationId });
 
         case 'chat_archive_update_metadata':
-            return executeUpdateMetadata(args, { db, conversationId });
+            return executeUpdateMetadata(args, { db, conversationId, user });
 
         case 'chat_archive_search': {
             const data = await searchArchive(dbInstance, {
@@ -989,7 +993,7 @@ async function executeAttachmentSave(args, { mcpOrigin, publicOrigin, readBucket
 // (issues #6 and #8), writing directly to the session doc.
 // ============================================
 
-function executeUpdateMetadata(args, { db, conversationId }) {
+function executeUpdateMetadata(args, { db, conversationId, user }) {
     return (async () => {
         if (!args.session_id) throw new Error('chat_archive_update_metadata: session_id required');
         const sessions = db.find('id', args.session_id);
@@ -1049,6 +1053,10 @@ function executeUpdateMetadata(args, { db, conversationId }) {
 
         session.updatedAt = new Date().toISOString();
         db.update(session._id, session);
+
+        // Issue #33: the mutation is invisible to attached views without this —
+        // sidebars/headers only refresh on the list event (or a manual reload).
+        if (EMIT_LIST_EVENT && user?.id) EMIT_LIST_EVENT(user.id, 'chat.updated', session);
 
         return {
             type: 'text',
