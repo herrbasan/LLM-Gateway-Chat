@@ -639,5 +639,15 @@ export function buildChunkView(messages, options = {}) {
         }
     }
 
-    return { messages: out, stats, chunkTable };
+    // Label → full bare text (issue #34): lets the tool-call path RESOLVE a
+    // bare [chunk_X] argument to its content instead of rejecting it. Built
+    // from chunkTable (label→hash) + seen (hash→{text}). Tombstoned labels
+    // have no seen entry — unresolvable by design (the distill replaced them).
+    const chunkContents = new Map();
+    for (const [label, hash] of chunkTable) {
+        const entry = seen.get(hash);
+        if (entry) chunkContents.set(label, entry.text);
+    }
+
+    return { messages: out, stats, chunkTable, chunkContents };
 }

@@ -101,24 +101,31 @@ function errorDetailFromBody(text, fallback) {
     return msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
 }
 
-// #30 backstop: a chunk label in an outbound tool payload is always a bug —
-// labels are a context-window rendering for the model, never content, and the
-// model cannot self-guard (it never sees its own labels). Bare-label values
-// are rejected (executing would persist garbage/empty content); label-prefixed
+// #30/#34 backstop: a chunk label in an outbound tool payload is a context-
+// window rendering, never content, and the model cannot self-guard (it never
+// sees its own labels). Bare-label values are RESOLVED to their full content
+// from the last assembly's label→text map (#34 — the model legitimately means
+// "write that content"); unresolvable labels are rejected; label-prefixed
 // values are stripped, logged loud, and flagged in the tool result.
 const CHUNK_LABEL_LINE = /^\[chunk_[a-z0-9]+[^\]\n]*\]\n?/;
 const CHUNK_LABEL_ONLY = /^(\[chunk_[a-z0-9]+[^\]\n]*\]\s*)+$/;
-function scrubChunkLabels(value, hits) {
+function scrubChunkLabels(value, hits, resolve = null) {
     if (typeof value === 'string') {
-        if (CHUNK_LABEL_ONLY.test(value.trim())) { hits.bare.push(value.trim().slice(0, 60)); return value; }
+        if (CHUNK_LABEL_ONLY.test(value.trim())) {
+            const idMatch = value.trim().match(/^\[chunk_([a-z0-9]+)/);
+            const resolved = (idMatch && typeof resolve === 'function') ? resolve(`chunk_${idMatch[1]}`) : null;
+            if (resolved != null) { hits.resolved.push(idMatch[0]); return resolved; }
+            hits.bare.push(value.trim().slice(0, 60));
+            return value;
+        }
         if (CHUNK_LABEL_LINE.test(value)) {
             hits.stripped.push(value.slice(0, 40));
             return value.replace(/^(\[chunk_[a-z0-9]+[^\]\n]*\]\n?)+/, '');
         }
         return value;
     }
-    if (Array.isArray(value)) { for (let i = 0; i < value.length; i++) value[i] = scrubChunkLabels(value[i], hits); return value; }
-    if (value && typeof value === 'object') { for (const k of Object.keys(value)) value[k] = scrubChunkLabels(value[k], hits); return value; }
+    if (Array.isArray(value)) { for (let i = 0; i < value.length; i++) value[i] = scrubChunkLabels(value[i], hits, resolve); return value; }
+    if (value && typeof value === 'object') { for (const k of Object.keys(value)) value[k] = scrubChunkLabels(value[k], hits, resolve); return value; }
     return value;
 }
 
@@ -144,6 +151,7 @@ class Runner {
         this._ttftTimer = null;
         this.chunkView = null; // lazy dynamic import (shared file, no port)
         this._chunkTable = new Map(); // last assembly's chunk labels → hashes (context_retire)
+        this._chunkContents = new Map(); // last assembly's chunk labels → full text (issue #34)
         // §5a reporting: per-turn context records (raw/wire/savings/cache hint),
         // ring buffer of the last N turns — the data source for the report view.
         this.contextHistory = [];
@@ -460,7 +468,7 @@ class Runner {
             // knows its upstream, context window, vision, thinking levels.
             substrate: await this._substrateEntry(turnModel || this.pendingModel || this.session.model || null)
         });
-        const { messages, chunkTable, chunkStats, rawMessages } = buildApiMessages(this.conv.messages, {
+        const { messages, chunkTable, chunkStats, chunkContents, rawMessages } = buildApiMessages(this.conv.messages, {
             systemPrompt,
             publicOrigin: DEPS.publicOrigin,
             chunkTransform: this.session.chunkTransform === true,
@@ -469,7 +477,7 @@ class Runner {
             log: DEPS.log(),
             readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
         });
-        return { apiMessages: messages, rawMessages, chunkStats, chunkTable, mcpOrigin };
+        return { apiMessages: messages, rawMessages, chunkStats, chunkTable, chunkContents, mcpOrigin };
     }
 
     // Auto-vision (restored server-side 2026-08-29; the pre-BFF client-side
@@ -681,8 +689,9 @@ class Runner {
             }
             await this._ensureVisionAnalysis(modelSupportsVision);
 
-            const { apiMessages, rawMessages, chunkStats, chunkTable, mcpOrigin } = await this._assemblePayload(model);
+            const { apiMessages, rawMessages, chunkStats, chunkTable, chunkContents, mcpOrigin } = await this._assemblePayload(model);
             this._chunkTable = chunkTable;
+            this._chunkContents = chunkContents || new Map(); // label → full text (issue #34 tool-arg resolution)
             // Keep the exact payload for the run-end context count (the real
             // on-the-wire size — the limit-relevant number).
             this.inFlight.apiMessages = apiMessages;
@@ -818,17 +827,20 @@ class Runner {
             const tc = toolCalls[i];
             let args = {};
             try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
-            const labelHits = { bare: [], stripped: [] };
-            args = scrubChunkLabels(args, labelHits);
+            const labelHits = { bare: [], stripped: [], resolved: [] };
+            args = scrubChunkLabels(args, labelHits, (label) => this._chunkContents.get(label));
             DEPS.log().info('Runner tool call', { chatId: this.conversationId, tool: tc.function.name }, 'Runner');
             this.broadcast('tool.start', { toolCallId: tc.id, name: tc.function.name, args, exchangeId: f.exchangeId, messageId: f.messageId });
             let status = 'success', resultText = '', resultImages = [];
             try {
                 if (labelHits.bare.length > 0) {
-                    throw new Error(`Chunk label (${labelHits.bare.join(', ')}) used as argument content — labels are context references, never content. Re-emit the call with the full text the label refers to.`);
+                    throw new Error(`Chunk label (${labelHits.bare.join(', ')}) used as argument content but is unknown to this conversation's chunk view — labels are context references, never content. Re-emit the call with the full text the label refers to.`);
                 }
                 if (labelHits.stripped.length > 0) {
                     DEPS.log().warn('Stripped chunk label(s) from tool arguments (#30)', { chatId: this.conversationId, tool: tc.function.name, labels: labelHits.stripped }, 'Runner');
+                }
+                if (labelHits.resolved.length > 0) {
+                    DEPS.log().info('Resolved chunk label(s) to full content in tool arguments (#34)', { chatId: this.conversationId, tool: tc.function.name, labels: labelHits.resolved }, 'Runner');
                 }
                 const isChatSend = chatDispatcher !== null
                     && tc.function.name === chatDispatcher
@@ -839,8 +851,11 @@ class Runner {
                         ? await this._callToolWithChatProgress(pool, chatDispatcher, args, f)
                         : await pool.callTool(tc.function.name, args);
                 ({ text: resultText, images: resultImages } = this.extractToolResult(result));
-                if (labelHits.stripped.length > 0) {
-                    resultText += '\n\n[System note: a leading chunk label was stripped from your arguments before execution — labels are context references, never content. Do not emit them in tool arguments.]';
+                const labelNotes = [];
+                if (labelHits.stripped.length > 0) labelNotes.push('a leading chunk label was stripped from your arguments');
+                if (labelHits.resolved.length > 0) labelNotes.push(`bare chunk label(s) (${labelHits.resolved.join(', ')}) were resolved to their full content`);
+                if (labelNotes.length > 0) {
+                    resultText += `\n\n[System note: ${labelNotes.join('; ')} before execution — labels are context references, never content. Do not emit them in tool arguments.]`;
                 }
             } catch (e) {
                 status = 'error';

@@ -351,7 +351,7 @@ function buildApiMessages(messages, options = {}) {
     // Chunk-store transform (per-chat flag). Fail loud to raw on engine error.
     if (chunkTransform === true && chunkView) {
         try {
-            const { messages: tx, stats, chunkTable } = chunkView.buildChunkView(merged, {
+            const { messages: tx, stats, chunkTable, chunkContents } = chunkView.buildChunkView(merged, {
                 retirements,
                 retirementTools: true
             });
@@ -360,13 +360,13 @@ function buildApiMessages(messages, options = {}) {
             // rawMessages (pre-transform merged payload) rides along so the
             // runner can count the no-measures number (§5a reporting) without
             // re-running the projection.
-            return { messages: tx, chunkTable: chunkTable || new Map(), chunkStats: stats, rawMessages: merged };
+            return { messages: tx, chunkTable: chunkTable || new Map(), chunkContents: chunkContents || new Map(), chunkStats: stats, rawMessages: merged };
         } catch (e) {
             log?.error?.('[chunk-view] transform failed, sending raw:', e);
         }
     }
 
-    return { messages: merged, chunkTable: new Map(), chunkStats: null, rawMessages: merged };
+    return { messages: merged, chunkTable: new Map(), chunkContents: new Map(), chunkStats: null, rawMessages: merged };
 }
 
 module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef };
