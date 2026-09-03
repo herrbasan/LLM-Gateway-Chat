@@ -35,6 +35,10 @@ export function createVoiceDictation() {
         try {
             await client.start(); // includes the mic-permission prompt — can sit for a while
         } catch (e) {
+            // start() can fail AFTER the mic was granted (e.g. relay down on the
+            // session fetch) — disconnect or the track stays open and the
+            // browser's mic indicator never goes out.
+            client?.disconnect();
             client = null;
             state = 'idle';
             emit('state', { state });
