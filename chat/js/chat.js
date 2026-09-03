@@ -1151,6 +1151,21 @@ async function init() {
         });
     }
 
+    // Inline image policy (issue #32): markdown ![alt](url) in assistant/user
+    // messages renders only for trusted sources — same-origin paths (bucket
+    // URLs) and the workshop storage origin. Everything else renders as alt
+    // text, so an arbitrary external URL can never become a request (beacon).
+    if (window.nui?.util?.setMarkdownImagePolicy) {
+        const trustedOrigins = new Set([location.origin]);
+        if (CONFIG.mcpOrigin) {
+            try { trustedOrigins.add(new URL(CONFIG.mcpOrigin).origin); } catch { /* bad config — same-origin only */ }
+        }
+        window.nui.util.setMarkdownImagePolicy((url) => {
+            if (url.startsWith('/') || url.startsWith('#')) return true;
+            try { return trustedOrigins.has(new URL(url, location.origin).origin); } catch { return false; }
+        });
+    }
+
     // Restore theme (needs history loaded first for async prefs)
     const savedTheme = await storage.getPref('theme');
     if (savedTheme) {
