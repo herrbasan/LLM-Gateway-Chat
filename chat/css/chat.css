@@ -1876,6 +1876,21 @@ nui-slider.tts-player-scrub .tts-player-scrub-buffer {
     border-top-color: var(--color-warning, #d4a017);
 }
 
+/* chat.progress — ephemeral workshop-session status lines under an in-flight
+   chat.send tool bubble (progress spec §2.3). Matches the phase-line weight. */
+.chat-progress {
+    padding: 0 1rem 0.375rem 1rem; /* align with .tool-notifications (0 1rem …) */
+}
+.chat-progress-line {
+    color: var(--text-color-dim);
+    font-style: italic;
+    font-size: 0.9em;
+    line-height: 1.4;
+}
+.chat-progress.done .chat-progress-line {
+    opacity: 0.7;
+}
+
 /* Global activity indicator (header) — persists across the whole turn incl. tool
    hops, so the backend being busy is always visible. */
 #activity-indicator {

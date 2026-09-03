@@ -20,6 +20,10 @@ let DEPS = null;
 //          embedBatch, getEmbedAvailable }
 function init(deps) { DEPS = deps; }
 
+// chat.progress spec §2.1: poll interval for chat.status while a workshop
+// `chat.send` dispatcher call is in flight.
+const CHAT_STATUS_POLL_MS = 2000;
+
 // Model capabilities cache (vision filter) — gateway /v1/models, 5 min TTL.
 let _modelsCache = { at: 0, models: [] };
 async function getModels() {
@@ -781,6 +785,13 @@ class Runner {
         const toolCalls = f.toolCalls.filter(Boolean);
         if (toolCalls.length === 0) return false;
         const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        await pool.ensureConnected();
+        // chat.progress spec §2.1: find the workshop dispatcher (same scan as the
+        // auto-vision block) so chat.send calls can be detected below.
+        let chatDispatcher = null;
+        for (const name of pool.registry.keys()) {
+            if (name === 'tools' || name.endsWith('__tools')) { chatDispatcher = name; break; }
+        }
         let executed = false;
         for (let i = 0; i < toolCalls.length; i++) {
             const tc = toolCalls[i];
@@ -790,9 +801,14 @@ class Runner {
             this.broadcast('tool.start', { toolCallId: tc.id, name: tc.function.name, args, exchangeId: f.exchangeId, messageId: f.messageId });
             let status = 'success', resultText = '', resultImages = [];
             try {
+                const isChatSend = chatDispatcher !== null
+                    && tc.function.name === chatDispatcher
+                    && args.method === 'chat.send';
                 const result = internalTools.isInternalTool(tc.function.name)
                     ? await internalTools.executeInternalTool(tc.function.name, args, this.internalToolCtx())
-                    : await pool.callTool(tc.function.name, args);
+                    : isChatSend
+                        ? await this._callToolWithChatProgress(pool, chatDispatcher, args, f)
+                        : await pool.callTool(tc.function.name, args);
                 ({ text: resultText, images: resultImages } = this.extractToolResult(result));
             } catch (e) {
                 status = 'error';
@@ -820,6 +836,36 @@ class Runner {
             this.broadcast('tool.end', { toolCallId: tc.id, name: tc.function.name, status, resultMessage: resultText, resultImages, toolMessageId: toolMsg.id, messageId: f.messageId });
         }
         return executed;
+    }
+
+    // chat.progress spec §2.1: await one `chat.send` dispatcher call while a
+    // chat.status poller (CHAT_STATUS_POLL_MS) broadcasts each result as a
+    // `chat.progress` runner event. Poller failure is boundary tolerance WITH
+    // a trace: warn per tick and continue — the poller must never reject the
+    // tool call it observes. When the call settles the interval is cleared and
+    // one final { done: true } broadcast fires with the last known sessions.
+    async _callToolWithChatProgress(pool, dispatcher, args, f) {
+        let lastSessions = [];
+        let timer = null;
+        const poll = async () => {
+            try {
+                const result = await pool.callTool(dispatcher, { method: 'chat.status', payload: {} });
+                const obj = JSON.parse(this.extractToolResult(result).text);
+                if (!obj || !Array.isArray(obj.sessions)) throw new Error('chat.status returned no sessions array');
+                lastSessions = obj.sessions;
+                this.broadcast('chat.progress', { sessions: lastSessions, messageId: f.messageId, exchangeId: f.exchangeId });
+            } catch (e) {
+                DEPS.log().warn('chat.progress: poll failed — continuing', { chatId: this.conversationId, error: e.message }, 'Runner');
+            }
+        };
+        poll(); // fire immediately (not after 2s) so the human sees something fast
+        timer = setInterval(poll, CHAT_STATUS_POLL_MS);
+        try {
+            return await pool.callTool(dispatcher, args);
+        } finally {
+            clearInterval(timer);
+            this.broadcast('chat.progress', { done: true, sessions: lastSessions, messageId: f.messageId, exchangeId: f.exchangeId });
+        }
     }
 
     // PB-b: ctx for internal tool execution — everything over dbInstance,
@@ -997,6 +1043,21 @@ class Runner {
             await this._persistFailureNote(f.errorDetail || 'Run failed.', { atIdx: f.idx, messageId: f.messageId, model: f.model });
         } else if (hasPayload) {
             const toolCalls = f.toolCalls.filter(Boolean);
+            // Sanitize malformed tool-call arguments BEFORE they enter history.
+            // A truncated args string (stream cut, max_tokens) persisted verbatim
+            // poisons every follow-up request: the provider validates history
+            // tool_calls and 502s the whole turn until the nodes are deleted
+            // manually (deepseek-flash truncated memory.store args, 2026-09-03).
+            // '{}' keeps the wire valid; the tool-execution error result tells
+            // the model its call failed and why.
+            for (const tc of toolCalls) {
+                const args = tc?.function?.arguments;
+                if (typeof args !== 'string') continue;
+                try { JSON.parse(args); } catch {
+                    DEPS.log().warn('Sanitizing malformed tool-call arguments before persist', { chatId: this.conversationId, tool: tc.function?.name, rawPreview: args.slice(0, 120) }, 'Runner');
+                    tc.function.arguments = '{}';
+                }
+            }
             // Aborted runs persist CONTENT only. Reasoning cut mid-stream is a
             // truncated thinking block — persisting it poisons every follow-up
             // payload (provider thinking-mode contract: "content[].thinking must

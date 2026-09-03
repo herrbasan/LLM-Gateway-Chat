@@ -349,6 +349,7 @@ function attachRunnerEvents(chatId) {
         'msg.deleted'(d) { _runnerDeleted(chatId, d); },
         'run.end'(d) { _runnerRunEnd(chatId, d); },
         'run.status'(d) { _runnerStatus(chatId, d); },
+        'chat.progress'(d) { _runnerChatProgress(chatId, d); },
         'run.state'(d) {
             const view = runnerViews.get(chatId);
             if (view) view.running = !!d.running;
@@ -413,6 +414,50 @@ function _runnerStatus(chatId, d) {
     s.phaseStart = Date.now();
     _tickWaiting(chatId);
     _setActivityPhase(d.message);
+}
+
+// chat.progress (progress spec §2.3): live workshop-session status while a
+// `chat.send` dispatcher call runs. One line per non-idle session, rendered in
+// place under the in-flight tool bubble. Ephemeral ONLY — never persisted or
+// restored (no history/render path touches it); tool.end is the durable
+// artifact and removes the lines with the running state.
+function _runnerChatProgress(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    const entries = [...s.toolBubbles.values()];
+    const entry = entries[entries.length - 1]; // the in-flight tool block
+    if (!entry) return;
+    if (d.done) { entry.progressEl?.classList.add('done'); return; } // freeze
+    const sessions = (d.sessions || []).filter(x => x && x.phase && x.phase !== 'idle');
+    if (!sessions.length) { entry.progressEl?.replaceChildren(); return; }
+    if (!entry.progressEl) {
+        entry.progressEl = document.createElement('div');
+        entry.progressEl.className = 'chat-progress';
+        entry.el.querySelector('.tool-bubble').insertBefore(
+            entry.progressEl,
+            entry.el.querySelector('.tool-notifications')
+        );
+    }
+    entry.progressEl.replaceChildren(...sessions.map(x => {
+        const line = document.createElement('div');
+        line.className = 'chat-progress-line';
+        // Human-readable activity: verb phrase instead of registry jargon.
+        // `name · generating (hop 2) · 14s` / `name · browser.research (hop 3) · 6s — Phase 3: …`
+        const hop = x.hops ? ` (hop ${x.hops})` : '';
+        const what = x.phase === 'tool-call' && x.currentTool ? x.currentTool
+            : x.phase === 'waiting-gateway' ? 'generating'
+            : x.phase === 'queued' ? 'starting'
+            : x.phase === 'error' ? 'error'
+            : (x.phase || 'working');
+        // Elapsed time in the current phase (registry phaseSince) — the live
+        // "still working" signal during long gateway waits and tool runs.
+        const elapsed = x.phaseSince ? ` · ${Math.max(0, Math.round((Date.now() - Date.parse(x.phaseSince)) / 1000))}s` : '';
+        // detail: fine-grained progress from INSIDE the running tool
+        // (workshop ctx.progress, e.g. research phases) — captured by the
+        // chat agent into chat.status instead of being discarded.
+        const detail = x.detail ? ` — ${x.detail}` : '';
+        line.textContent = `${x.name} · ${what}${hop}${elapsed}${detail}`;
+        return line;
+    }));
 }
 
 function _runnerDelta(chatId, d) {
@@ -589,6 +634,7 @@ function _runnerToolEnd(chatId, d) {
     if (!entry) return;
 
     const { el, exchange } = entry;
+    entry.progressEl?.remove(); // chat.progress lines are ephemeral — tool.end replaces them
     const status = d.status === 'error' ? 'error' : 'success';
     exchange.tool.status = status;
     exchange.tool.content = d.resultMessage || '';
