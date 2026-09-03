@@ -282,10 +282,11 @@ export const CHUNK_CONVENTION_PARAGRAPH =
     'This conversation uses content-addressed chunks. Large contents are ' +
     'labeled [chunk_X] where X is a stable content hash — the same content ' +
     'always has the same label, on every turn. The label may prefix a message ' +
-    'body OR appear inside a tool call\'s arguments. Labels persist: when ' +
-    'chunk content is written to a file, the label is stored with it, so a ' +
-    'file may legitimately begin with a [chunk_X] line — that is normal, not ' +
-    'a bug, and not a reference. If a later message would repeat a chunk you ' +
+    'body OR appear inside a tool call\'s arguments. Labels are a VIEW-ONLY ' +
+    'rendering of this conversation — they are never part of any file, tool ' +
+    'payload, or stored content. NEVER emit a label as tool-argument content: ' +
+    'the server strips leading labels before execution and rejects a bare ' +
+    'label as a value with an error. If a later message would repeat a chunk you ' +
     'have already seen, it collapses to the bare label: [chunk_X] alone means ' +
     'you ALREADY HAVE the full content under that label earlier in this ' +
     'conversation — treat the label as that content. A near-duplicate appears ' +

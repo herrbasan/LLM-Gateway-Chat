@@ -137,6 +137,7 @@ Existing `/api/chats/*` CRUD (list/rename/pin/delete), `/api/search`, `/api/buck
 - `_assemblePayload()` in `server/runner.js` is shared by `runOnce` (live turn) and `buildSnapshot` (on-load) — identical payload → no load/send flip. **The context pill = the on-the-wire payload** (what the next request consumes), not raw stored history.
 - **Measures** (audited against "saving must exceed cache-break cost"): dedup/chunk-collapse (cache-neutral, keep), retirement/tombstones (breaking by design — batch them), unretire, merge/auto-heal.
 - **Chunk IDs are content-derived**: `chunk_` + `fnv1a64(bareContent).toString(36)`. Tombstones key retirements by content hash. Label regex `^chunk_[a-z0-9]+$`. Accept both on read; never rewrite stored numeric labels.
+- **Chunk labels are view-only** — never file content, never tool payload (#30). The runner scrubs outbound tool args before dispatch: leading labels are stripped (logged loud + flagged in the tool result), a bare label as a value is rejected with an error. The chunk-view convention paragraph teaches this contract; never reintroduce "labels persist in files".
 - **Per-provider prior-reasoning policy** (in the gateway, `capabilities.priorReasoning`; the chat `api-view` strip was REMOVED — reasoning passes through verbatim):
 
 | Provider | `priorReasoning` | Why |

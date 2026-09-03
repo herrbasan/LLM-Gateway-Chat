@@ -101,6 +101,27 @@ function errorDetailFromBody(text, fallback) {
     return msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
 }
 
+// #30 backstop: a chunk label in an outbound tool payload is always a bug —
+// labels are a context-window rendering for the model, never content, and the
+// model cannot self-guard (it never sees its own labels). Bare-label values
+// are rejected (executing would persist garbage/empty content); label-prefixed
+// values are stripped, logged loud, and flagged in the tool result.
+const CHUNK_LABEL_LINE = /^\[chunk_[a-z0-9]+[^\]\n]*\]\n?/;
+const CHUNK_LABEL_ONLY = /^(\[chunk_[a-z0-9]+[^\]\n]*\]\s*)+$/;
+function scrubChunkLabels(value, hits) {
+    if (typeof value === 'string') {
+        if (CHUNK_LABEL_ONLY.test(value.trim())) { hits.bare.push(value.trim().slice(0, 60)); return value; }
+        if (CHUNK_LABEL_LINE.test(value)) {
+            hits.stripped.push(value.slice(0, 40));
+            return value.replace(/^(\[chunk_[a-z0-9]+[^\]\n]*\]\n?)+/, '');
+        }
+        return value;
+    }
+    if (Array.isArray(value)) { for (let i = 0; i < value.length; i++) value[i] = scrubChunkLabels(value[i], hits); return value; }
+    if (value && typeof value === 'object') { for (const k of Object.keys(value)) value[k] = scrubChunkLabels(value[k], hits); return value; }
+    return value;
+}
+
 class Runner {
     constructor(user, dbInstance, conversationId) {
         this.user = user;
@@ -797,10 +818,18 @@ class Runner {
             const tc = toolCalls[i];
             let args = {};
             try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
+            const labelHits = { bare: [], stripped: [] };
+            args = scrubChunkLabels(args, labelHits);
             DEPS.log().info('Runner tool call', { chatId: this.conversationId, tool: tc.function.name }, 'Runner');
             this.broadcast('tool.start', { toolCallId: tc.id, name: tc.function.name, args, exchangeId: f.exchangeId, messageId: f.messageId });
             let status = 'success', resultText = '', resultImages = [];
             try {
+                if (labelHits.bare.length > 0) {
+                    throw new Error(`Chunk label (${labelHits.bare.join(', ')}) used as argument content — labels are context references, never content. Re-emit the call with the full text the label refers to.`);
+                }
+                if (labelHits.stripped.length > 0) {
+                    DEPS.log().warn('Stripped chunk label(s) from tool arguments (#30)', { chatId: this.conversationId, tool: tc.function.name, labels: labelHits.stripped }, 'Runner');
+                }
                 const isChatSend = chatDispatcher !== null
                     && tc.function.name === chatDispatcher
                     && args.method === 'chat.send';
@@ -810,6 +839,9 @@ class Runner {
                         ? await this._callToolWithChatProgress(pool, chatDispatcher, args, f)
                         : await pool.callTool(tc.function.name, args);
                 ({ text: resultText, images: resultImages } = this.extractToolResult(result));
+                if (labelHits.stripped.length > 0) {
+                    resultText += '\n\n[System note: a leading chunk label was stripped from your arguments before execution — labels are context references, never content. Do not emit them in tool arguments.]';
+                }
             } catch (e) {
                 status = 'error';
                 resultText = `Tool error: ${e.message}`;
@@ -1177,4 +1209,4 @@ function peekRunner(userId, conversationId) {
     return registry.get(`${userId}:${conversationId}`) || null;
 }
 
-module.exports = { init, getRunner, peekRunner, handleEmbedStatus };
+module.exports = { init, getRunner, peekRunner, handleEmbedStatus, scrubChunkLabels };
