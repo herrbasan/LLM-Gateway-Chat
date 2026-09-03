@@ -43,7 +43,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 ├── lib/             # Submodules: nui_wc2, ndb, nvdb, nlogger; tts/
 ├── server/          # Backend: server.js (router+routes), runner.js, arena-runner.js,
 │                    #   conversation-store.js, api-view.js, system-prompt.js, mcp-pool.js,
-│                    #   internal-tools.js, embed.js, config.json, migrations (historical)
+│                    #   internal-tools.js, embed.js, stt-relay.js, config.json, migrations (historical)
 │   ├── data/        # nDB + nVDB files (gitignored, per-user subdirs)
 │   └── logs/        # JSON Lines logs (gitignored)
 └── docs/            # Governing spec + codebase survey
@@ -75,6 +75,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | `server/system-prompt.js` | System-prompt assembly (prime-directive blob + metadata + tool context) |
 | `server/mcp-pool.js`, `internal-tools.js` | Server-side tool execution (MCP SSE pool + internal archive/storage/bucket tools) |
 | `server/embed.js` | Embed pipeline: fire-and-forget, retry backoff, startup reconciliation, `embed.status` events |
+| `server/stt-relay.js` | Same-origin relay → nVoice (`/api/stt/*`): REST sessions/cleanup + WS realtime/wakeword. Two handshakes then a raw TCP splice — never parses frames; auth on the upgrade; first `upgrade` handling in the backend |
 
 ## Technical Spec — How This Codebase Works
 

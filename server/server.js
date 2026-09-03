@@ -13,6 +13,7 @@ const convStore = require('./conversation-store');
 const runner = require('./runner');
 const arenaRunner = require('./arena-runner');
 const mcpPool = require('./mcp-pool');
+const sttRelay = require('./stt-relay');
 
 // Load minimal .env natively
 try {
@@ -575,6 +576,8 @@ function requireAuth(req, res) {
 // GET: catalog calls (JSON). POST: speech synthesis — the request body is a
 // small JSON payload (buffered), the audio response is streamed to the client.
 // ============================================
+
+const stt = sttRelay.createRelay({ cfg, getAuthUser, requireAuth, L });
 
 function ttsBase() {
   return (process.env.TTS_ENDPOINT || cfg.ttsEndpoint || 'http://localhost:2233').replace(/\/+$/, '');
@@ -1210,6 +1213,12 @@ const routes = {
   'GET /api/tts/v1/voices': (req, res) => proxyTts(req, res, '/v1/voices'),
   'GET /api/tts/v1/admin/engines': (req, res) => proxyTts(req, res, '/v1/admin/engines'),
   'POST /api/tts/v1/audio/speech': (req, res) => proxyTts(req, res, '/v1/audio/speech'),
+
+  // nVoice same-origin relay (STT) — same rationale as the TTS proxy above:
+  // nVoice binds localhost on the server host. The WS half (realtime audio +
+  // wakeword) is handled by the server 'upgrade' listener, not this table.
+  'GET /api/stt/v1/realtime/sessions': (req, res) => stt.proxyRest(req, res),
+  'POST /api/stt/v1/audio/cleanup': (req, res) => stt.proxyRest(req, res),
 
   // Preview fetch proxy (same-origin, architecture §8): the view must not
   // talk to the MCP server directly — it binds localhost on the server host,
@@ -2271,6 +2280,10 @@ const server = http.createServer(async (req, res) => {
       sendBody(req, res, data, headers, 200);
     });
 });
+
+// STT relay: WebSocket upgrades (realtime STT + wakeword) → nVoice.
+// First-ever upgrade handling on this server — see stt-relay.js for the splice.
+server.on('upgrade', (req, socket, head) => stt.handleUpgrade(req, socket, head));
 
 // Start HTTP server
 server.listen(PORT, () => {
