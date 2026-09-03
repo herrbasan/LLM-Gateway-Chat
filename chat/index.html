@@ -283,6 +283,19 @@
                             </div>
                             <!-- TTS player — in-flow section below the attachments row -->
                             <div class="tts-player-mount" id="tts-player-mount"></div>
+                            <!-- Voice dictation status — visible while dictating -->
+                            <div class="voice-status" id="voice-status" hidden>
+                                <nui-icon name="mic" class="voice-status-icon"></nui-icon>
+                                <span class="voice-status-label" id="voice-status-label">Recording</span>
+                                <span class="voice-status-time" id="voice-status-time"></span>
+                                <span class="voice-status-provisional" id="voice-status-provisional"></span>
+                                <nui-button id="voice-done-btn" variant="primary" title="Done — clean up into the input">
+                                    <button type="button">Done</button>
+                                </nui-button>
+                                <nui-button id="voice-cancel-btn" title="Discard dictation">
+                                    <button type="button">Cancel</button>
+                                </nui-button>
+                            </div>
                             <!-- Input Row -->
                             <div class="input-row">
                                 <div id="overall-context-progress-wrap" class="context-progress-wrap">
@@ -292,6 +305,9 @@
                                 <nui-rich-text id="message-input" class="chat-input" no-toolbar placeholder="Type a message... (Shift+Enter for new line, Ctrl+Alt+V for code block)"></nui-rich-text>
                                 <nui-button id="attach-btn" class="icon-only" title="Attach Image">
                                     <button type="button" aria-label="Image"><nui-icon name="image"></nui-icon></button>
+                                </nui-button>
+                                <nui-button id="dictate-btn" class="icon-only" title="Dictate">
+                                    <button type="button" aria-label="Dictate"><nui-icon name="mic"></nui-icon></button>
                                 </nui-button>
                                 <nui-button id="send-btn" variant="primary" title="Send">
                                     <button type="button" aria-label="Send"><nui-icon name="send"></nui-icon></button>

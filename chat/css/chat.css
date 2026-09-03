@@ -862,6 +862,70 @@ nui-code pre {
     opacity: 1;
 }
 
+/* Voice dictation status line — in-flow section above the input row */
+.voice-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    margin-bottom: 0.5rem;
+    padding: 0.375rem 0.75rem;
+    background: var(--color-base);
+    border: thin solid var(--border-shade2);
+    border-radius: 0.2rem;
+    font-size: 0.8125rem;
+}
+
+.voice-status[hidden] {
+    display: none;
+}
+
+.voice-status-icon {
+    color: var(--color-error, #d32f2f);
+    animation: voice-pulse 1.6s ease-in-out infinite;
+}
+
+.voice-status.connecting .voice-status-icon,
+.voice-status.cleaning .voice-status-icon {
+    color: var(--color-highlight);
+    animation: none;
+}
+
+@keyframes voice-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+.voice-status-label {
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.voice-status.error .voice-status-label {
+    color: var(--color-error, #d32f2f);
+    font-weight: 400;
+}
+
+.voice-status-time {
+    color: var(--text-color-dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.voice-status-provisional {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-color-dim);
+    font-style: italic;
+}
+
+#dictate-btn.active nui-icon {
+    color: var(--color-error, #d32f2f);
+}
+
 .input-row {
     display: flex;
     gap: 0.5rem;
@@ -876,7 +940,8 @@ nui-code pre {
    container's top border and the player's divider. (No nested :has() — a
    stylesheet parser rejects it and would drop the whole rule.) */
 .chat-input-area:has(.tts-player:not([hidden])) .input-row,
-.chat-input-area:has(.images-row.has-attachments) .input-row {
+.chat-input-area:has(.images-row.has-attachments) .input-row,
+.chat-input-area:has(.voice-status:not([hidden])) .input-row {
     border-top: thin solid var(--border-shade2);
     width: calc(100% + (2 * var(--composer-pad-inline, 1.5rem)));
     margin-inline: calc(-1 * var(--composer-pad-inline, 1.5rem));

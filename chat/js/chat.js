@@ -12,6 +12,7 @@ import { getPlainText } from './tts-utils.js';
 import { backendClient } from './api-client.js';
 import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
 import { TtsPlayerHost } from '../../lib/tts/tts-player.js';
+import { createVoiceDictation } from './voice-dictation.js';
 import { preview } from './preview.js';
 import { runnerClient } from './runner-client.js';
 
@@ -168,6 +169,13 @@ const elements = {
     messageInput: document.getElementById('message-input'),
     sendBtn: document.getElementById('send-btn'),
     attachBtn: document.getElementById('attach-btn'),
+    dictateBtn: document.getElementById('dictate-btn'),
+    voiceStatus: document.getElementById('voice-status'),
+    voiceStatusLabel: document.getElementById('voice-status-label'),
+    voiceStatusTime: document.getElementById('voice-status-time'),
+    voiceStatusProvisional: document.getElementById('voice-status-provisional'),
+    voiceDoneBtn: document.getElementById('voice-done-btn'),
+    voiceCancelBtn: document.getElementById('voice-cancel-btn'),
     fileInput: document.getElementById('file-input'),
     importChatInput: document.getElementById('import-chat-input'),
     importChatBtn: document.getElementById('import-chat-btn'),
@@ -1978,10 +1986,133 @@ function setupEventListeners() {
 
 
 // ============================================
+// Voice Dictation — mic button flow. Settled segments stream into the input
+// (one update per pause); the provisional tail lives on the status line only.
+// Done → cleanup replaces the input; Cancel restores the pre-dictation
+// snapshot. Talks to the /api/stt relay via chat/js/voice-dictation.js.
+// ============================================
+
+const dictation = createVoiceDictation();
+let dictateSnapshot = null;   // input content before dictation began (null = not dictating)
+let dictateTimer = null;
+let dictateSeconds = 0;
+
+function dictationJoin(base, addition) {
+    const b = (base || '').trimEnd();
+    return b ? b + '\n\n' + addition : addition;
+}
+
+function renderDictationState(state) {
+    const el = elements.voiceStatus;
+    if (!el) return;
+    el.classList.remove('connecting', 'recording', 'cleaning', 'error');
+    if (state === 'idle') {
+        el.hidden = true;
+        elements.dictateBtn?.classList.remove('active');
+        clearInterval(dictateTimer); dictateTimer = null;
+        return;
+    }
+    el.hidden = false;
+    el.classList.add(state);
+    elements.dictateBtn?.classList.toggle('active', state === 'recording');
+    elements.voiceStatusLabel.textContent =
+        state === 'connecting' ? 'Connecting…' :
+        state === 'recording'  ? 'Recording' :
+        state === 'cleaning'   ? 'Cleaning…' : '';
+    elements.voiceStatusProvisional.textContent = '';
+    clearInterval(dictateTimer); dictateTimer = null;
+    if (state === 'recording') {
+        dictateSeconds = 0;
+        elements.voiceStatusTime.textContent = '0:00';
+        dictateTimer = setInterval(() => {
+            dictateSeconds++;
+            const m = Math.floor(dictateSeconds / 60), s = dictateSeconds % 60;
+            elements.voiceStatusTime.textContent = `${m}:${String(s).padStart(2, '0')}`;
+        }, 1000);
+    } else {
+        elements.voiceStatusTime.textContent = '';
+    }
+}
+
+// Transient inline error on the status line — voice failures never open modals.
+function dictationError(message) {
+    const el = elements.voiceStatus;
+    if (!el) return;
+    clearInterval(dictateTimer); dictateTimer = null;
+    el.hidden = false;
+    el.classList.remove('connecting', 'recording', 'cleaning');
+    el.classList.add('error');
+    elements.voiceStatusLabel.textContent = message;
+    elements.voiceStatusTime.textContent = '';
+    elements.voiceStatusProvisional.textContent = '';
+    elements.dictateBtn?.classList.remove('active');
+    setTimeout(() => { if (el.classList.contains('error')) { el.hidden = true; el.classList.remove('error'); } }, 6000);
+}
+
+async function startDictation() {
+    dictateSnapshot = elements.messageInput.getMarkdown();
+    try {
+        await dictation.start();
+    } catch (e) {
+        dictateSnapshot = null;
+        const msg = e?.message || String(e);
+        dictationError(/session|fetch|network|503|502/i.test(msg) ? 'Voice backend unavailable' : `Mic error: ${msg}`);
+    }
+}
+
+async function finishDictation() {
+    try {
+        const { cleaned } = await dictation.finish();
+        elements.messageInput.setMarkdown(dictationJoin(dictateSnapshot, cleaned));
+        dictateSnapshot = null;
+    } catch (e) {
+        // Cleanup failed — the raw dictation stays in the input, nothing lost.
+        dictateSnapshot = null;
+        dictationError(`Cleanup failed — kept raw text (${e?.message || e})`);
+    }
+}
+
+function cancelDictation() {
+    dictation.cancel();
+    if (dictateSnapshot !== null) {
+        elements.messageInput.setMarkdown(dictateSnapshot);
+        dictateSnapshot = null;
+    }
+}
+
+dictation.on('state', ({ state }) => renderDictationState(state));
+dictation.on('final', ({ settled }) => {
+    if (dictateSnapshot === null) return;
+    elements.messageInput.setMarkdown(dictationJoin(dictateSnapshot, settled));
+});
+dictation.on('provisional', ({ text }) => {
+    if (elements.voiceStatusProvisional) elements.voiceStatusProvisional.textContent = text;
+});
+dictation.on('error', ({ error }) => dictationError(error));
+
+elements.dictateBtn?.addEventListener('click', () => {
+    if (dictation.state === 'idle') startDictation();
+    else if (dictation.state === 'recording') finishDictation();
+});
+elements.voiceDoneBtn?.addEventListener('click', finishDictation);
+elements.voiceCancelBtn?.addEventListener('click', cancelDictation);
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && dictation.state === 'recording') cancelDictation();
+});
+
+// Mic needs a secure context (localhost counts; LAN http does not).
+if (!window.isSecureContext && elements.dictateBtn) {
+    elements.dictateBtn.title = 'Voice input requires HTTPS or localhost';
+    elements.dictateBtn.style.opacity = '0.4';
+    elements.dictateBtn.style.pointerEvents = 'none';
+}
+
+// ============================================
 // Message Sending
 // ============================================
 
 async function sendMessage() {
+    if (dictation.state !== 'idle') cancelDictation();
     const editor = elements.messageInput;
     const content = editor?.getMarkdown().trim();
 
