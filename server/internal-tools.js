@@ -6,7 +6,11 @@
 // Tool names and result shapes are kept identical so model behavior carries over.
 // Single source of truth: /api/search and /api/references routes call the
 // searchArchive/findReferences functions below (extracted 2026-08-24).
+// storage_* ops (native, direct-fs to the MCP storage box) live in
+// ./storage-tools.js and are folded into defs + dispatch here.
 // ============================================
+
+const storageTools = require('./storage-tools');
 
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
 // log may be a logger instance OR a factory (() => logger), matching how
@@ -441,10 +445,11 @@ const RETIREMENT_TOOL_DEFS = [
     }
 ];
 
-const INTERNAL_TOOL_NAMES = new Set([...ARCHIVE_TOOL_DEFS, ...RETIREMENT_TOOL_DEFS].map(t => t.function.name));
+const INTERNAL_TOOL_NAMES = new Set([...ARCHIVE_TOOL_DEFS, ...RETIREMENT_TOOL_DEFS, ...storageTools.TOOL_DEFS].map(t => t.function.name));
 
 function getToolDefs({ chunkTransform = false } = {}) {
-    return chunkTransform ? [...ARCHIVE_TOOL_DEFS, ...RETIREMENT_TOOL_DEFS] : [...ARCHIVE_TOOL_DEFS];
+    const defs = chunkTransform ? [...ARCHIVE_TOOL_DEFS, ...RETIREMENT_TOOL_DEFS] : [...ARCHIVE_TOOL_DEFS];
+    return [...defs, ...storageTools.TOOL_DEFS];
 }
 
 function isInternalTool(name) {
@@ -480,6 +485,14 @@ async function executeInternalTool(name, args, ctx) {
     const { user, dbInstance, conversationId, mcpOrigin, publicOrigin, chunkTable, embedDeps } = ctx;
     const { db } = dbInstance;
     if (!user || !dbInstance) throw new Error(`${name}: ctx.user and ctx.dbInstance required`);
+
+    // Native storage ops — direct fs on the MCP storage box (storage-tools.js).
+    // chunkText wires the browser_fetch large-result chunking into storage_read.
+    if (storageTools.isStorageTool(name)) {
+        return storageTools.execute(name, args, {
+            chunkText: (buffer, contentType, prefix) => chunkLargeText(buffer, contentType, dbInstance, prefix)
+        });
+    }
 
     switch (name) {
         case 'browser_fetch':

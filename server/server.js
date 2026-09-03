@@ -73,7 +73,12 @@ let embedFailCount = 0;
 // frontmatter is stripped. Retired 2026-08-25: the automated PLATFORM-marker
 // extraction from the canonical (drift-prone, ~6.4K tokens every turn).
 
-const PRIME_DIRECTIVE_PATH = 'D:\\MCP_Storage\\documentation\\Workshop\\Agents_Prime_Chat.md';
+// MCP storage box root — the backend runs on the same machine, so native
+// storage_* tools (server/storage-tools.js) hit the filesystem directly.
+// Configurable via MCP_STORAGE_PATH; reliably D:\MCP_Storage on Badkid.
+const MCP_STORAGE_PATH = process.env.MCP_STORAGE_PATH || 'D:\\MCP_Storage';
+
+const PRIME_DIRECTIVE_PATH = path.join(MCP_STORAGE_PATH, 'documentation', 'Workshop', 'Agents_Prime_Chat.md');
 
 async function fetchPrimeDirective() {
     try {
@@ -476,6 +481,7 @@ runner.init({
         listEvents.emit('event', { userId, event: 'r.' + event, data: { chatId, ...data } })
 });
 internalTools.init({ log: L });
+require('./storage-tools').init({ log: L(), storageRoot: MCP_STORAGE_PATH });
 embedEvents.on('status', runner.handleEmbedStatus);
 mcpPool.init({
     log: L,
