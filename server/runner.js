@@ -466,7 +466,10 @@ class Runner {
             // blank-substrate bug). Resolved to the full models-list entry
             // (5-min TTL cache — same poll the model select uses) so the seat
             // knows its upstream, context window, vision, thinking levels.
-            substrate: await this._substrateEntry(turnModel || this.pendingModel || this.session.model || null)
+            substrate: await this._substrateEntry(turnModel || this.pendingModel || this.session.model || null),
+            // Hands-free assistant mode (per-conversation meta) — the model
+            // answers for the ear (VOICE_MODE_BLOCK). Synced live by PATCH.
+            voiceMode: this.session.assistantMode === true
         });
         const { messages, chunkTable, chunkStats, chunkContents, rawMessages } = buildApiMessages(this.conv.messages, {
             systemPrompt,

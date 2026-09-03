@@ -1750,6 +1750,7 @@ const routes = {
     if (body.systemPrompt !== undefined) session.systemPrompt = body.systemPrompt;
     if (body.category !== undefined) session.category = body.category;
     if (body.chunkTransform !== undefined) session.chunkTransform = !!body.chunkTransform;
+    if (body.assistantMode !== undefined) session.assistantMode = !!body.assistantMode;
     if (body.retirements !== undefined) {
       if (body.retirements === null || typeof body.retirements !== 'object' || Array.isArray(body.retirements)) {
         json(res, { error: 'retirements must be an object map { [contentHash]: { distill, at } }' }, 400, req); return;
@@ -1772,6 +1773,13 @@ const routes = {
         r.session.model = body.model;
         r.broadcast('model.changed', { model: body.model });
       }
+    }
+    // assistantMode toggled out-of-band: sync the mounted runner's in-memory
+    // session (nDB returns detached objects) so the next run's system prompt
+    // carries/drops the voice block without a remount.
+    if (body.assistantMode !== undefined) {
+      const r = runner.peekRunner(user.id, params.id);
+      if (r) r.session.assistantMode = !!body.assistantMode;
     }
     json(res, session, 200, req);
   },

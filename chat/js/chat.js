@@ -13,6 +13,7 @@ import { backendClient } from './api-client.js';
 import { NSpeechController } from '../../lib/tts/nspeech-controller.js';
 import { TtsPlayerHost } from '../../lib/tts/tts-player.js';
 import { createVoiceDictation } from './voice-dictation.js';
+import { createVoiceAssistant } from './voice-assistant.js';
 import { preview } from './preview.js';
 import { runnerClient } from './runner-client.js';
 
@@ -176,6 +177,16 @@ const elements = {
     voiceStatusProvisional: document.getElementById('voice-status-provisional'),
     voiceDoneBtn: document.getElementById('voice-done-btn'),
     voiceCancelBtn: document.getElementById('voice-cancel-btn'),
+    assistantBtn: document.getElementById('assistant-btn'),
+    assistantView: document.getElementById('assistant-view'),
+    assistantState: document.getElementById('assistant-state'),
+    assistantHint: document.getElementById('assistant-hint'),
+    assistantText: document.getElementById('assistant-text'),
+    assistantReply: document.getElementById('assistant-reply'),
+    assistantActions: document.getElementById('assistant-actions'),
+    assistantSendBtn: document.getElementById('assistant-send-btn'),
+    assistantDiscardBtn: document.getElementById('assistant-discard-btn'),
+    assistantExitBtn: document.getElementById('assistant-exit-btn'),
     fileInput: document.getElementById('file-input'),
     importChatInput: document.getElementById('import-chat-input'),
     importChatBtn: document.getElementById('import-chat-btn'),
@@ -512,6 +523,11 @@ function _runnerAssistant(chatId, msg) {
         if (tsSpan && msg.timestamp) tsSpan.textContent = formatHeaderTimestamp(msg.timestamp);
         finalizeAssistantElement(s.el, s.exchangeId, msg.usage, msg.context, msg.streamStats, conv);
         forceFinalizeMarkdownStream(s.el, msg.content || '', msg.reasoning_content || null);
+    }
+    // Assistant mode: auto-speak the reply — the hands-free loop closes. Only
+    // the visible chat speaks (a background chat's run finishing stays silent).
+    if (msg.content && !msg.error && chatId === assistantChatId && chatId === currentChatId) {
+        assistantSpeak(msg.content);
     }
 }
 
@@ -1283,6 +1299,7 @@ async function init() {
     const initContainer = getOrCreateContainer(currentChatId);
     initContainer.style.display = 'flex'; // show the active chat
     attachRunnerEvents(currentChatId);
+    renderAssistantChrome(); // assistant mode persisted on this chat → overlay (tap-to-start)
 
     // Load MCP config from storage (servers still back vision/preview features)
     await mcpClient.ready();
@@ -2105,6 +2122,230 @@ if (!window.isSecureContext && elements.dictateBtn) {
     elements.dictateBtn.title = 'Voice input requires HTTPS or localhost';
     elements.dictateBtn.style.opacity = '0.4';
     elements.dictateBtn.style.pointerEvents = 'none';
+}
+
+// ============================================
+// Assistant Mode — hands-free, phone-first overlay. Per-conversation toggle
+// (session.assistantMode, PATCH-persisted; the system prompt carries the
+// voice block server-side while on). One global voice session owned by the
+// visible chat. "ok kimi" → listen → capture → send/stop/cancel; replies
+// auto-speak; "ok kimi" during speech barges in.
+// ============================================
+
+const assistant = createVoiceAssistant();
+let assistantChatId = null;   // chat owning the live voice session (one global)
+let assistantUiState = 'listening';
+let wakeLock = null;
+
+const ASSISTANT_STATES = {
+    listening:  ['LISTENING',  'say "ok kimi"'],
+    starting:   ['STARTING',   'opening mic + wake detector…'],
+    awake:      ['AWAKE',      'say "listen" to start'],
+    capturing:  ['CAPTURING',  '"ok kimi send" delivers · "ok kimi stop" holds · "ok kimi cancel" discards'],
+    processing: ['PROCESSING', 'cleaning…'],
+    held:       ['REVIEW',     'send or discard — or say "ok kimi send"'],
+    speaking:   ['SPEAKING',   'say "ok kimi" to interrupt'],
+};
+
+function renderAssistantState(state) {
+    assistantUiState = state;
+    const [word, hint] = ASSISTANT_STATES[state] || ASSISTANT_STATES.listening;
+    elements.assistantView.dataset.state = state;
+    elements.assistantState.textContent = word;
+    elements.assistantHint.textContent = hint;
+    elements.assistantHint.classList.remove('error');
+}
+
+// Transient inline error on the hint line — never a modal.
+function assistantError(message) {
+    elements.assistantHint.textContent = message;
+    elements.assistantHint.classList.add('error');
+    setTimeout(() => {
+        if (elements.assistantHint.classList.contains('error')) renderAssistantState(assistantUiState);
+    }, 6000);
+}
+
+function renderAssistantChrome() {
+    const meta = chatHistory.conversations.find(c => c.id === currentChatId);
+    const on = !!(meta && meta.assistantMode);
+    elements.assistantView.hidden = !on;
+    elements.assistantBtn?.classList.toggle('active', on);
+    if (on && !assistant.running) {
+        // Mode persisted but no live session (page load, or a dead session):
+        // the mic needs a user gesture — the overlay itself is the button.
+        elements.assistantView.dataset.state = 'off';
+        elements.assistantState.textContent = 'ASSISTANT';
+        elements.assistantHint.textContent = 'tap anywhere to start';
+    }
+}
+
+async function requestWakeLock() {
+    releaseWakeLock();
+    try { wakeLock = await (navigator.wakeLock?.request('screen') ?? Promise.resolve(null)); }
+    catch { wakeLock = null; }
+    document.addEventListener('visibilitychange', reWakeOnVisible);
+}
+function reWakeOnVisible() {
+    if (document.visibilityState === 'visible' && assistantChatId) requestWakeLock();
+}
+function releaseWakeLock() {
+    try { wakeLock?.release(); } catch { /* already released */ }
+    wakeLock = null;
+    document.removeEventListener('visibilitychange', reWakeOnVisible);
+}
+
+let _assistantTtsWired = false;
+function wireAssistantTts() {
+    if (_assistantTtsWired || !tts) return;
+    _assistantTtsWired = true;
+    tts.on('state', ({ state }) => {
+        if (state === 'idle' && assistantUiState === 'speaking') renderAssistantState('listening');
+    });
+}
+
+async function startAssistantSession(chatId) {
+    if (assistantChatId === chatId && assistant.running) return;
+    stopAssistantSession();
+    try {
+        await assistant.start();
+    } catch (e) {
+        // Mic/backend failure — do not leave a dead mode persisted.
+        const meta = chatHistory.conversations.find(c => c.id === chatId);
+        if (meta) { meta.assistantMode = false; meta._dirty = true; chatHistory._saveList(); }
+        renderAssistantChrome();
+        const msg = e?.message || String(e);
+        dictationError(/session|fetch|network|503|502/i.test(msg) ? 'Voice backend unavailable' : `Mic error: ${msg}`);
+        return;
+    }
+    assistantChatId = chatId;
+    requestWakeLock();
+    wireAssistantTts();
+    elements.assistantText.textContent = '';
+    elements.assistantReply.textContent = '';
+    elements.assistantActions.hidden = true;
+    renderAssistantState('listening');
+}
+
+function stopAssistantSession() {
+    if (!assistantChatId && !assistant.running) return;
+    assistant.stop();
+    assistantChatId = null;
+    releaseWakeLock();
+}
+
+function assistantSpeak(text) {
+    elements.assistantReply.textContent = text;
+    renderAssistantState('speaking');
+    if (!tts) { renderAssistantState('listening'); return; }
+    ttsPlayer?.reveal();
+    tts.speak(text, elements.assistantView);
+}
+
+async function sendAssistantMessage(text) {
+    const chatId = assistantChatId;
+    const content = (text || '').trim();
+    if (!chatId || !content || !currentModel) return;
+    const container = getOrCreateContainer(chatId);
+    container?.querySelector('.welcome-message')?.remove();
+    const conv = activeConversations.get(chatId);
+    if (conv && conv.exchanges.length === 0) updateChatTitle(chatId, content);
+
+    const temperature = parseFloat(elements.temperature?.querySelector('input')?.value) || DEFAULT_TEMPERATURE;
+    const maxTokensRaw = elements.maxTokens?.querySelector('input')?.value?.trim();
+    const maxTokens = maxTokensRaw ? parseInt(maxTokensRaw) : null;
+    const effortSel = elements.thinkingEffortSelect;
+    const effort = effortSel?.getValue?.() ?? effortSel?.querySelector('select')?.value ?? 'default';
+
+    const sendBody = { content, attachments: null, model: currentModel, temperature, voice: true };
+    if (maxTokens && !isNaN(maxTokens)) sendBody.max_tokens = maxTokens;
+    if (effort && effort !== 'default') sendBody.reasoning_effort = effort;
+
+    const res = await runnerClient.send(chatId, sendBody);
+    if (!res.ok) assistantError(res.data?.error || `send failed (${res.status})`);
+}
+
+async function setAssistantMode(chatId, on) {
+    const meta = chatHistory.conversations.find(c => c.id === chatId);
+    if (!meta) return;
+    meta.assistantMode = on;
+    meta._dirty = true;
+    chatHistory._saveList(); // PATCH → session doc + mounted-runner sync (voice block)
+    renderAssistantChrome();
+    if (on) {
+        // The session start can take seconds (first-ever wake-model load on the
+        // worker) — show the overlay with a STARTING state before awaiting, or
+        // the toggle looks dead.
+        renderAssistantState('starting');
+        await startAssistantSession(chatId);
+    } else {
+        stopAssistantSession();
+        renderAssistantChrome();
+    }
+}
+
+assistant.on('state', ({ state }) => {
+    if (state === 'awake' && tts?.isActive()) tts.stop(); // barge-in
+    renderAssistantState(state);
+    if (state === 'listening') {
+        elements.assistantText.textContent = '';
+        elements.assistantActions.hidden = true;
+    }
+});
+assistant.on('capture', ({ text }) => { elements.assistantText.textContent = text; });
+assistant.on('hold', ({ text }) => {
+    elements.assistantText.textContent = text;
+    elements.assistantActions.hidden = false;
+});
+assistant.on('message', async ({ text }) => {
+    elements.assistantActions.hidden = true;
+    elements.assistantText.textContent = text;
+    await sendAssistantMessage(text);
+});
+assistant.on('cancel', () => {
+    elements.assistantText.textContent = '';
+    elements.assistantActions.hidden = true;
+});
+assistant.on('error', ({ error }) => assistantError(error));
+
+elements.assistantBtn?.addEventListener('click', () => {
+    const meta = chatHistory.conversations.find(c => c.id === currentChatId);
+    if (!meta) return;
+    setAssistantMode(currentChatId, !meta.assistantMode);
+});
+elements.assistantExitBtn?.addEventListener('click', (e) => {
+    e.stopPropagation(); // or the bubbling view click restarts the session
+    setAssistantMode(currentChatId, false);
+});
+// Tap-to-start: the overlay itself is the gesture when the mode is on but no
+// session is live (page load, dead session).
+elements.assistantView?.addEventListener('click', () => {
+    if (!assistant.running) startAssistantSession(currentChatId);
+});
+elements.assistantSendBtn?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const text = elements.assistantText.textContent;
+    assistant.releaseHeld();
+    elements.assistantActions.hidden = true;
+    renderAssistantState('listening');
+    await sendAssistantMessage(text);
+});
+elements.assistantDiscardBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    assistant.releaseHeld();
+    elements.assistantText.textContent = '';
+    elements.assistantActions.hidden = true;
+    renderAssistantState('listening');
+});
+elements.assistantReply?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (tts?.isActive()) tts.stop(); // tap the reply to stop speech
+});
+
+// Same secure-context rule as dictation.
+if (!window.isSecureContext && elements.assistantBtn) {
+    elements.assistantBtn.title = 'Assistant mode requires HTTPS or localhost';
+    elements.assistantBtn.style.opacity = '0.4';
+    elements.assistantBtn.style.pointerEvents = 'none';
 }
 
 // ============================================
@@ -4138,6 +4379,12 @@ async function switchChat(targetChatId) {
     // Lives on the session doc; consulted by getMessagesForApi at send time.
     const chatMeta = chatHistory.conversations.find(c => c.id === targetChatId);
     conv.chunkTransform = !!(chatMeta && chatMeta.chunkTransform);
+
+    // Assistant mode follows the visible conversation: stop a session owned by
+    // the outgoing chat; start one if the incoming chat has the mode on.
+    if (assistantChatId && assistantChatId !== targetChatId) stopAssistantSession();
+    if (chatMeta?.assistantMode) await startAssistantSession(targetChatId);
+    renderAssistantChrome();
 
     // Savings pill follows the chat: reset accumulator + visibility.
     const pill = document.getElementById('chunk-savings-pill');

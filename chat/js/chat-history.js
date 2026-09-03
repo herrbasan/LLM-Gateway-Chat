@@ -49,7 +49,8 @@ export class ChatHistory {
                         model: conv.model,
                         systemPrompt: conv.systemPrompt,
                         category: conv.category,
-                        chunkTransform: !!conv.chunkTransform
+                        chunkTransform: !!conv.chunkTransform,
+                        assistantMode: !!conv.assistantMode
                     };
                     if (conv.summary && typeof conv.summary === 'object' && !Array.isArray(conv.summary)) {
                         fields.summary = conv.summary;
@@ -77,7 +78,8 @@ export class ChatHistory {
             summary: session.summary || '',
             mode: session.mode || 'direct',
             pinned: session.pinned || false,
-            chunkTransform: session.chunkTransform || false
+            chunkTransform: session.chunkTransform || false,
+            assistantMode: session.assistantMode || false
         };
     }
 
