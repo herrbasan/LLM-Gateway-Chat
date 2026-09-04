@@ -2237,12 +2237,51 @@ function stopAssistantSession() {
     releaseWakeLock();
 }
 
+// Mobile autoplay policy: programmatic audio (our SSE-triggered TTS replies)
+// is blocked unless a media play happened inside a user gesture on this
+// document. The assistant's own gestures (toggle tap, tap-to-start, reply tap)
+// are the unlock points — play a silent snippet there once.
+let _audioUnlocked = false;
+function _silentWavDataUri() {
+    // 100ms of 8kHz mono 8-bit PCM silence (0x80 = zero amplitude) — built in
+    // code, no asset, always valid WAV.
+    const n = 800;
+    const buf = new Uint8Array(44 + n);
+    const v = new DataView(buf.buffer);
+    const wstr = (o, s) => { for (let i = 0; i < s.length; i++) buf[o + i] = s.charCodeAt(i); };
+    wstr(0, 'RIFF'); v.setUint32(4, 36 + n, true); wstr(8, 'WAVE');
+    wstr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 8000, true);
+    v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+    wstr(36, 'data'); v.setUint32(40, n, true);
+    buf.fill(0x80, 44);
+    let bin = '';
+    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    return 'data:audio/wav;base64,' + btoa(bin);
+}
+function unlockAudioPlayback() {
+    if (_audioUnlocked) return;
+    _audioUnlocked = true;
+    try {
+        new Audio(_silentWavDataUri()).play().catch(() => { _audioUnlocked = false; });
+    } catch { _audioUnlocked = false; }
+}
+
 function assistantSpeak(text) {
     elements.assistantReply.textContent = text;
     renderAssistantState('speaking');
     if (!tts) { renderAssistantState('listening'); return; }
     ttsPlayer?.reveal();
     tts.speak(text, elements.assistantView);
+    // Autoplay-blocked watchdog (phones): the vendored player swallows the
+    // play() rejection, so detect the silence ourselves and offer a retry —
+    // the reply tap is a gesture and will play.
+    setTimeout(() => {
+        const a = tts?._speechPlayer?.audio;
+        if (a && a.paused && !a.ended && assistantUiState === 'speaking') {
+            assistantError('Audio blocked — tap the reply to play it');
+        }
+    }, 2500);
 }
 
 async function sendAssistantMessage(text) {
@@ -2312,6 +2351,7 @@ assistant.on('cancel', () => {
 assistant.on('error', ({ error }) => assistantError(error));
 
 elements.assistantBtn?.addEventListener('click', () => {
+    unlockAudioPlayback();
     const meta = chatHistory.conversations.find(c => c.id === currentChatId);
     if (!meta) return;
     setAssistantMode(currentChatId, !meta.assistantMode);
@@ -2323,6 +2363,7 @@ elements.assistantExitBtn?.addEventListener('click', (e) => {
 // Tap-to-start: the overlay itself is the gesture when the mode is on but no
 // session is live (page load, dead session).
 elements.assistantView?.addEventListener('click', () => {
+    unlockAudioPlayback();
     if (!assistant.running) startAssistantSession(currentChatId);
 });
 elements.assistantSendBtn?.addEventListener('click', async (e) => {
@@ -2342,7 +2383,10 @@ elements.assistantDiscardBtn?.addEventListener('click', (e) => {
 });
 elements.assistantReply?.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (tts?.isActive()) tts.stop(); // tap the reply to stop speech
+    unlockAudioPlayback(); // the tap itself is the gesture that unblocks audio
+    if (tts?.isActive()) { tts.stop(); return; } // tap the reply to stop speech
+    const text = elements.assistantReply.textContent;
+    if (text) assistantSpeak(text); // blocked earlier → retry inside the gesture
 });
 
 // Same secure-context rule as dictation — tap explains, not just grey.
