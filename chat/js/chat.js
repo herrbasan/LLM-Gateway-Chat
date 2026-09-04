@@ -1375,6 +1375,11 @@ async function applyDefaultConfig() {
             dictation.setAudioDevice(savedSttDevice);
             assistant.setAudioDevice(savedSttDevice);
         }
+        // A persisted permission doesn't unblind the list on a fresh load —
+        // flash the mic once (no prompt, already granted) to unlock names.
+        // Without permission this is a no-op; the first voice session's
+        // re-enumeration fills the list instead.
+        await unlockSttDeviceLabels();
         loadSttDevices(savedSttDevice || '');
     } catch (e) {
         console.warn('[STT] settings restore failed:', e);
@@ -2431,6 +2436,20 @@ if (!window.isSecureContext && elements.assistantBtn) {
 // session (the SDK reads the device at start()). Labels stay hidden until
 // mic permission is granted — re-enumerate after the first live session.
 // ============================================
+
+// Chrome hides device labels AND ids until getUserMedia has run in THIS
+// document — a persisted permission alone leaves the list blind on a fresh
+// page load. If permission is already granted (no prompt possible), flash a
+// silent stream once to unlock the names. Returns true when names are usable.
+async function unlockSttDeviceLabels() {
+    try {
+        const perm = await navigator.permissions?.query({ name: 'microphone' });
+        if (perm?.state !== 'granted') return false;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+        return true;
+    } catch { return false; }
+}
 
 async function loadSttDevices(savedId) {
     const sel = elements.sttDeviceSelect;
