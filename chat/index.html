@@ -122,6 +122,7 @@
                         <button>User</button>
                         <button>System</button>
                         <button>TTS</button>
+                        <button>STT</button>
                     </nav>
                     
                     <!-- Model Tab -->
@@ -259,6 +260,21 @@
                         
                         <div id="tts-status" class="tts-status" style="display: none;">
                             <!-- Status messages -->
+                        </div>
+                    </div>
+
+                    <!-- STT Tab -->
+                    <div>
+                        <nui-input-group class="sidebar-section">
+                            <label>Microphone</label>
+                            <nui-select id="stt-device-select" data-label="System default">
+                                <select>
+                                    <option value="">System default</option>
+                                </select>
+                            </nui-select>
+                        </nui-input-group>
+                        <div class="sidebar-section stt-hint">
+                            Applies to the next voice session. Device names appear once microphone permission has been granted.
                         </div>
                     </div>
                 </nui-tabs>

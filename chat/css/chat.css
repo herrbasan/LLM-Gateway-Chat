@@ -927,6 +927,12 @@ nui-code pre {
     color: var(--color-error, #d32f2f);
 }
 
+.stt-hint {
+    font-size: 0.75rem;
+    color: var(--text-color-dim);
+    line-height: 1.4;
+}
+
 #assistant-btn.active nui-icon {
     color: var(--color-highlight);
 }

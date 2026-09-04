@@ -208,7 +208,10 @@ const elements = {
     ttsSpeed: document.getElementById('tts-speed'),
     ttsMdClean: document.getElementById('tts-md-clean')?.closest('nui-checkbox'),
     ttsStitch: document.getElementById('tts-stitch')?.closest('nui-checkbox'),
-    ttsStatus: document.getElementById('tts-status')
+    ttsStatus: document.getElementById('tts-status'),
+
+    // STT Elements
+    sttDeviceSelect: document.getElementById('stt-device-select')
 };
 
 // ============================================
@@ -1364,6 +1367,14 @@ async function applyDefaultConfig() {
         if (input) input.value = language;
     }
 
+    // STT settings (voice controllers exist by now — module init order).
+    const savedSttDevice = await storage.getPref('stt-device-id');
+    if (savedSttDevice) {
+        dictation.setAudioDevice(savedSttDevice);
+        assistant.setAudioDevice(savedSttDevice);
+    }
+    loadSttDevices(savedSttDevice || '');
+
     // Initialize shared TTS controller (talks to nSpeech V3 API).
     // Fire-and-forget — TTS is non-critical and must NOT block chat init.
     tts = new NSpeechController({
@@ -1779,6 +1790,13 @@ function setupEventListeners() {
         storage.setPref('user-language', e.target.value).catch(() => {});
     });
 
+    elements.sttDeviceSelect?.querySelector('select')?.addEventListener('change', (e) => {
+        const id = e.target.value;
+        storage.setPref('stt-device-id', id).catch(() => {});
+        dictation.setAudioDevice(id || null);
+        assistant.setAudioDevice(id || null);
+    });
+
     elements.systemPrompt?.querySelector('textarea')?.addEventListener('input', (e) => {
         if (currentChatId) {
             updateChatSystemPrompt(currentChatId, e.target.value);
@@ -2032,6 +2050,7 @@ function renderDictationState(state) {
     el.hidden = false;
     el.classList.add(state);
     elements.dictateBtn?.classList.toggle('active', state === 'recording');
+    if (state === 'recording') loadSttDevices(); // permission granted → labels available now
     elements.voiceStatusLabel.textContent =
         state === 'connecting' ? 'Connecting…' :
         state === 'recording'  ? 'Recording' :
@@ -2228,6 +2247,7 @@ async function startAssistantSession(chatId) {
     elements.assistantReply.textContent = '';
     elements.assistantActions.hidden = true;
     renderAssistantState('listening');
+    loadSttDevices(); // permission granted → device labels available now
 }
 
 function stopAssistantSession() {
@@ -2398,6 +2418,32 @@ if (!window.isSecureContext && elements.assistantBtn) {
         dictationError('Assistant mode requires HTTPS or localhost — the browser blocks the mic on plain LAN http');
     }, true);
 }
+
+// ============================================
+// STT Settings — config tab values shared by both voice controllers.
+// Microphone choice persists (stt-device-id) and applies to the NEXT voice
+// session (the SDK reads the device at start()). Labels stay hidden until
+// mic permission is granted — re-enumerate after the first live session.
+// ============================================
+
+async function loadSttDevices(savedId) {
+    const sel = elements.sttDeviceSelect;
+    const inner = sel?.querySelector('select');
+    if (!inner) return;
+    let devices = [];
+    try {
+        if (navigator.mediaDevices?.enumerateDevices) {
+            devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+        }
+    } catch { /* enumeration blocked — leave default only */ }
+    const current = savedId ?? inner.value ?? '';
+    inner.innerHTML = '<option value="">System default</option>' +
+        devices.map((d, i) => `<option value="${d.deviceId}">${d.label || `Microphone ${i + 1}`}</option>`).join('');
+    inner.value = current;
+    if (inner.value !== current) inner.value = ''; // device unplugged → show default (pref kept)
+}
+
+navigator.mediaDevices?.addEventListener?.('devicechange', () => loadSttDevices());
 
 // ============================================
 // Message Sending

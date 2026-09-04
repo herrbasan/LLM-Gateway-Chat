@@ -15,17 +15,20 @@ export function createVoiceDictation() {
     let client = null;
     let state = 'idle'; // idle | connecting | recording | cleaning
     let cancelPending = false;
+    let audioDeviceId = null; // STT settings tab — applied to the next session
     const listeners = {};
     const emit = (ev, data) => (listeners[ev] || []).slice().forEach((cb) => cb(data));
 
     function on(ev, cb) { (listeners[ev] ??= []).push(cb); }
+
+    function setAudioDevice(id) { audioDeviceId = id || null; }
 
     async function start() {
         if (state !== 'idle') throw new Error(`voice-dictation: start() while ${state}`);
         state = 'connecting';
         cancelPending = false;
         emit('state', { state });
-        client = new ClientClass({ serverUrl: '', basePath: STT_BASE_PATH });
+        client = new ClientClass({ serverUrl: '', basePath: STT_BASE_PATH, audioDeviceId });
         client.on('transcript', (d) => {
             if (!client) return;
             if (d.is_final) emit('final', { settled: client.getRawText() });
@@ -87,7 +90,7 @@ export function createVoiceDictation() {
     }
 
     return {
-        on, start, finish, cancel,
+        on, start, finish, cancel, setAudioDevice,
         get state() { return state; },
     };
 }

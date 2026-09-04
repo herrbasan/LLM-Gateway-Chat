@@ -22,14 +22,17 @@ export function createVoiceAssistant() {
 
     let client = null;
     let running = false;
+    let audioDeviceId = null; // STT settings tab — applied to the next session
     const listeners = {};
     const emit = (ev, data) => (listeners[ev] || []).slice().forEach((cb) => cb(data));
 
     function on(ev, cb) { (listeners[ev] ??= []).push(cb); }
 
+    function setAudioDevice(id) { audioDeviceId = id || null; }
+
     async function start() {
         if (running) throw new Error('voice-assistant: start() while running');
-        client = new ClientClass({ serverUrl: '', basePath: STT_BASE_PATH });
+        client = new ClientClass({ serverUrl: '', basePath: STT_BASE_PATH, audioDeviceId });
 
         client.on('assistantState', ({ state }) => {
             if (state === 'disabled') return; // controller-owned transition
@@ -76,7 +79,7 @@ export function createVoiceAssistant() {
     }
 
     return {
-        on, start, stop, releaseHeld,
+        on, start, stop, releaseHeld, setAudioDevice,
         get running() { return running; },
     };
 }
