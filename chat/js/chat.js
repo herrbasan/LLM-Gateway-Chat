@@ -1801,8 +1801,8 @@ function setupEventListeners() {
         storage.setPref('user-language', e.target.value).catch(() => {});
     });
 
-    elements.sttDeviceSelect?.querySelector('select')?.addEventListener('change', (e) => {
-        const id = e.target.value;
+    elements.sttDeviceSelect?.addEventListener('nui-change', (e) => {
+        const id = (e.detail?.values?.[0]) || e.detail?.value || '';
         storage.setPref('stt-device-id', id).catch(() => {});
         dictation.setAudioDevice(id || null);
         assistant.setAudioDevice(id || null);
@@ -2453,8 +2453,7 @@ async function unlockSttDeviceLabels() {
 
 async function loadSttDevices(savedId) {
     const sel = elements.sttDeviceSelect;
-    const inner = sel?.querySelector('select');
-    if (!inner) return;
+    if (!sel) return;
     let devices = [];
     try {
         if (navigator.mediaDevices?.enumerateDevices) {
@@ -2465,11 +2464,23 @@ async function loadSttDevices(savedId) {
                 .filter(d => d.kind === 'audioinput' && d.deviceId);
         }
     } catch { /* enumeration blocked — leave default only */ }
-    const current = savedId ?? inner.value ?? '';
-    inner.innerHTML = '<option value="">System default</option>' +
-        devices.map((d, i) => `<option value="${d.deviceId}">${d.label || `Microphone ${i + 1}`}</option>`).join('');
-    inner.value = current;
-    if (inner.value !== current) inner.value = ''; // device unplugged → show default (pref kept)
+    const items = [{ value: '', label: 'System default' },
+        ...devices.map((d, i) => ({ value: d.deviceId, label: d.label || `Microphone ${i + 1}` }))];
+    const current = savedId ?? (sel.getValue?.() ?? sel.querySelector('select')?.value ?? '');
+    // nui-select renders its dropdown from its OWN state — writing the inner
+    // select's innerHTML leaves the component blind (the bug behind "no mic
+    // listed"). setItems/setValue is the contract; inner select is the fallback.
+    if (sel.setItems) {
+        sel.setItems(items);
+        if (current) sel.setValue(current);
+    } else {
+        const inner = sel.querySelector('select');
+        if (inner) {
+            inner.innerHTML = items.map(it => `<option value="${it.value}">${it.label}</option>`).join('');
+            inner.value = current;
+            if (inner.value !== current) inner.value = '';
+        }
+    }
 }
 
 navigator.mediaDevices?.addEventListener?.('devicechange', () => loadSttDevices());
