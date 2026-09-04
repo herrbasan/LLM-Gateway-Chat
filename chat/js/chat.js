@@ -1368,12 +1368,18 @@ async function applyDefaultConfig() {
     }
 
     // STT settings (voice controllers exist by now — module init order).
-    const savedSttDevice = await storage.getPref('stt-device-id');
-    if (savedSttDevice) {
-        dictation.setAudioDevice(savedSttDevice);
-        assistant.setAudioDevice(savedSttDevice);
+    // Guarded: a prefs hiccup must never take the rest of init down with it.
+    try {
+        const savedSttDevice = await storage.getPref('stt-device-id');
+        if (savedSttDevice) {
+            dictation.setAudioDevice(savedSttDevice);
+            assistant.setAudioDevice(savedSttDevice);
+        }
+        loadSttDevices(savedSttDevice || '');
+    } catch (e) {
+        console.warn('[STT] settings restore failed:', e);
+        loadSttDevices('');
     }
-    loadSttDevices(savedSttDevice || '');
 
     // Initialize shared TTS controller (talks to nSpeech V3 API).
     // Fire-and-forget — TTS is non-critical and must NOT block chat init.
@@ -2433,7 +2439,11 @@ async function loadSttDevices(savedId) {
     let devices = [];
     try {
         if (navigator.mediaDevices?.enumerateDevices) {
-            devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+            // Pre-permission entries carry neither label nor deviceId — a
+            // deviceId-less option is indistinguishable from "System default"
+            // and selects nothing. Only real, identifiable devices qualify.
+            devices = (await navigator.mediaDevices.enumerateDevices())
+                .filter(d => d.kind === 'audioinput' && d.deviceId);
         }
     } catch { /* enumeration blocked — leave default only */ }
     const current = savedId ?? inner.value ?? '';
