@@ -2117,11 +2117,15 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && dictation.state === 'recording') cancelDictation();
 });
 
-// Mic needs a secure context (localhost counts; LAN http does not).
+// Mic needs a secure context (localhost counts; LAN http does not). Keep the
+// button clickable: touch has no hover for the tooltip — a tap explains instead.
 if (!window.isSecureContext && elements.dictateBtn) {
     elements.dictateBtn.title = 'Voice input requires HTTPS or localhost';
     elements.dictateBtn.style.opacity = '0.4';
-    elements.dictateBtn.style.pointerEvents = 'none';
+    elements.dictateBtn.addEventListener('click', (e) => {
+        e.stopImmediatePropagation();
+        dictationError('Voice requires HTTPS or localhost — the browser blocks the mic on plain LAN http');
+    }, true);
 }
 
 // ============================================
@@ -2341,11 +2345,14 @@ elements.assistantReply?.addEventListener('click', (e) => {
     if (tts?.isActive()) tts.stop(); // tap the reply to stop speech
 });
 
-// Same secure-context rule as dictation.
+// Same secure-context rule as dictation — tap explains, not just grey.
 if (!window.isSecureContext && elements.assistantBtn) {
     elements.assistantBtn.title = 'Assistant mode requires HTTPS or localhost';
     elements.assistantBtn.style.opacity = '0.4';
-    elements.assistantBtn.style.pointerEvents = 'none';
+    elements.assistantBtn.addEventListener('click', (e) => {
+        e.stopImmediatePropagation();
+        dictationError('Assistant mode requires HTTPS or localhost — the browser blocks the mic on plain LAN http');
+    }, true);
 }
 
 // ============================================
