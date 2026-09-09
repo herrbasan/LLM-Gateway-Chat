@@ -105,23 +105,61 @@ function errorDetailFromBody(text, fallback) {
 // window rendering, never content, and the model cannot self-guard (it never
 // sees its own labels). Bare-label values are RESOLVED to their full content
 // from the last assembly's label→text map (#34 — the model legitimately means
-// "write that content"); unresolvable labels are rejected; label-prefixed
-// values are stripped, logged loud, and flagged in the tool result.
+// "write that content"). A compound near-dup [chunk_NEW ≈ chunk_BASE ...]
+// resolves to whichever of its named ids is known — the BASE, per the
+// convention "your copy at chunk_X applies", is what the model means and it
+// may be the SECOND id, not the first. Unresolvable bare labels are rejected.
+// Label-prefixed values are stripped; labels embedded mid-content (the
+// YAML-breakage source) are stripped too. All strips/resolves are logged loud
+// and flagged in the tool result.
 const CHUNK_LABEL_LINE = /^\[chunk_[a-z0-9]+[^\]\n]*\]\n?/;
 const CHUNK_LABEL_ONLY = /^(\[chunk_[a-z0-9]+[^\]\n]*\]\s*)+$/;
+// Any bracketed chunk-label token anywhere in a string (inline leak): the
+// simple [chunk_X], the compound near-dup [chunk_A ≈ chunk_B (...)], the
+// diff [chunk_A, diff of chunk_B], and the tombstone [chunk_A RETIRED ...].
+const CHUNK_LABEL_ANY = /\[chunk_[a-z0-9]+[^\]]*\]/g;
 function scrubChunkLabels(value, hits, resolve = null) {
     if (typeof value === 'string') {
+        // Whole value is one or more labels — a "bare label" the model emitted
+        // as content. Try EVERY chunk id named in the label: a near-dup is
+        // [chunk_NEW ≈ chunk_BASE ...] and the BASE is the content the model
+        // means, but it may be the SECOND id, not the first. Prefer the first
+        // resolvable id; reject only if none resolve.
         if (CHUNK_LABEL_ONLY.test(value.trim())) {
-            const idMatch = value.trim().match(/^\[chunk_([a-z0-9]+)/);
-            const resolved = (idMatch && typeof resolve === 'function') ? resolve(`chunk_${idMatch[1]}`) : null;
-            if (resolved != null) { hits.resolved.push(idMatch[0]); return resolved; }
+            const ids = value.match(/chunk_[a-z0-9]+/g) || [];
+            for (const id of ids) {
+                const resolved = (typeof resolve === 'function') ? resolve(id) : null;
+                if (resolved != null) {
+                    hits.resolved.push(id);
+                    return resolved;
+                }
+            }
             hits.bare.push(value.trim().slice(0, 60));
             return value;
         }
+        // Leading label prefix → strip (existing #30).
         if (CHUNK_LABEL_LINE.test(value)) {
             hits.stripped.push(value.slice(0, 40));
             return value.replace(/^(\[chunk_[a-z0-9]+[^\]\n]*\]\n?)+/, '');
         }
+        // Inline label leak mid-content (the YAML-breakage source): strip each
+        // token, resolving a known id to its content where possible. Never
+        // silent — logged loud and flagged in the tool result.
+        let changed = false;
+        const out = value.replace(CHUNK_LABEL_ANY, (match) => {
+            changed = true;
+            const hitIds = match.match(/chunk_[a-z0-9]+/g) || [];
+            for (const id of hitIds) {
+                const resolved = (typeof resolve === 'function') ? resolve(id) : null;
+                if (resolved != null) {
+                    hits.resolved.push(id);
+                    return resolved;
+                }
+            }
+            hits.stripped.push(match.slice(0, 40));
+            return '';
+        });
+        if (changed) return out;
         return value;
     }
     if (Array.isArray(value)) { for (let i = 0; i < value.length; i++) value[i] = scrubChunkLabels(value[i], hits, resolve); return value; }
@@ -797,9 +835,17 @@ class Runner {
             } else if (err?.name === 'AbortError') {
                 outcome = 'aborted';
             } else {
-                DEPS.log().error('Runner stream error', { chatId: this.conversationId, error: err?.message }, 'Runner');
-                this.broadcast('error', { code: 'stream', message: err?.message || 'stream error', exchangeId });
-                this.inFlight.errorDetail = err?.message || 'stream error';
+                // Surface the REAL cause — undici wraps a connection failure as
+                // a bare "fetch failed" TypeError with the underlying reason in
+                // err.cause (ECONNREFUSED / ECONNRESET / UND_ERR_CONNECT_TIMEOUT…).
+                // Without it, "fetch failed" stops the run and hides why.
+                const rootCause = err?.cause
+                    ? (err.cause?.message || err.cause?.code || String(err.cause))
+                    : undefined;
+                DEPS.log().error('Runner stream error', { chatId: this.conversationId, error: err?.message, cause: rootCause }, 'Runner');
+                const detail = rootCause ? `${err?.message || 'stream error'} — cause: ${rootCause}` : (err?.message || 'stream error');
+                this.broadcast('error', { code: 'stream', message: detail, exchangeId });
+                this.inFlight.errorDetail = detail;
                 outcome = 'error';
             }
         }
@@ -855,7 +901,7 @@ class Runner {
                         : await pool.callTool(tc.function.name, args);
                 ({ text: resultText, images: resultImages } = this.extractToolResult(result));
                 const labelNotes = [];
-                if (labelHits.stripped.length > 0) labelNotes.push('a leading chunk label was stripped from your arguments');
+                if (labelHits.stripped.length > 0) labelNotes.push('chunk label(s) were stripped from your arguments');
                 if (labelHits.resolved.length > 0) labelNotes.push(`bare chunk label(s) (${labelHits.resolved.join(', ')}) were resolved to their full content`);
                 if (labelNotes.length > 0) {
                     resultText += `\n\n[System note: ${labelNotes.join('; ')} before execution — labels are context references, never content. Do not emit them in tool arguments.]`;

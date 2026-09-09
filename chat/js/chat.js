@@ -111,14 +111,20 @@ function updateChunkSavingsPill(stats) {
 // how THIS client reaches the workshop (LAN IP locally, dyndns remotely).
 // Never hardcode a storage/MCP host: derive it from the user's configured
 // server list so the same code works from any network location.
+//
+// mcp-client.js is retired — the browser no longer loads MCP servers, they run
+// server-side in the runner. So mcpClient.servers is normally EMPTY and the
+// preview url-mode origin must come from the server-provided CONFIG.mcpOrigin.
+// Fall back to it when no client-configured server URL exists.
 function getMcpServerOrigin() {
     const server = (mcpClient.servers || []).find(s => s.url);
-    if (!server) return null;
-    try {
-        return new URL(server.url).origin;
-    } catch (_) {
-        return null;
+    if (server) {
+        try { return new URL(server.url).origin; } catch (_) { /* fall through */ }
     }
+    if (CONFIG.mcpOrigin) {
+        try { return new URL(CONFIG.mcpOrigin).origin; } catch (_) { return null; }
+    }
+    return null;
 }
 
 

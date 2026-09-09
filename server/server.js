@@ -598,10 +598,22 @@ async function proxyTts(req, res, nspeechPath) {
     if (req.headers['content-type']) init.headers['Content-Type'] = req.headers['content-type'];
   }
 
+  // Propagate a client abort (e.g. the player closed mid-generation) upstream
+  // to nSpeech so the generation actually stops. Without this, closing the
+  // player leaves the proxy streaming and nSpeech burning resources generating
+  // audio nobody is listening to. 'res' close fires on normal completion too,
+  // so only abort when the response did NOT finish normally (client went away).
+  const ac = new AbortController();
+  init.signal = ac.signal;
+  let finished = false;
+  res.on('finish', () => { finished = true; });
+  res.on('close', () => { if (!finished) ac.abort(); });
+
   let upstream;
   try {
     upstream = await fetch(target, init);
   } catch (e) {
+    if (ac.signal.aborted) return; // client went away — nothing to send
     json(res, { error: `nSpeech unreachable: ${e.message}` }, 502, req);
     return;
   }

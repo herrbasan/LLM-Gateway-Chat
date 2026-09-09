@@ -339,9 +339,12 @@ function syncDropdown() {
 
     selectEl.setItems(itemList);
 
-    // Set the native select value to activeId
-    const nativeSelect = selectEl.querySelector('select');
-    if (nativeSelect) nativeSelect.value = activeId || '';
+    // Set through the component API (NOT the native select .value) so the
+    // custom control label (nui-select-value) syncs with activeId. Setting
+    // nativeSelect.value directly left the label stale — it showed the first
+    // option (setItems rebuilds options with no selected), so the user picked
+    // a wrong item first and had to "switch back and forth" to reach real one.
+    if (selectEl.setValue) selectEl.setValue(activeId || '');
 }
 
 // ============================================
