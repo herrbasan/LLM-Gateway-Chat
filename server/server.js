@@ -1224,6 +1224,9 @@ const routes = {
   // backend. Audio responses are PIPED chunk-by-chunk, never buffered.
   'GET /api/tts/v1/voices': (req, res) => proxyTts(req, res, '/v1/voices'),
   'GET /api/tts/v1/admin/engines': (req, res) => proxyTts(req, res, '/v1/admin/engines'),
+  // Model catalog for cloud engines (engine + slug list, OpenAI-style) — feeds
+  // the TTS settings model selector.
+  'GET /api/tts/v1/models': (req, res) => proxyTts(req, res, '/v1/models'),
   'POST /api/tts/v1/audio/speech': (req, res) => proxyTts(req, res, '/v1/audio/speech'),
 
   // nVoice same-origin relay (STT) — same rationale as the TTS proxy above:

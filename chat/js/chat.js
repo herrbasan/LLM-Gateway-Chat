@@ -210,6 +210,7 @@ const elements = {
 
     // TTS Elements
     ttsEngineSelect: document.getElementById('tts-engine-select'),
+    ttsModelSelect: document.getElementById('tts-model-select'),
     ttsVoiceSelect: document.getElementById('tts-voice-select'),
     ttsSpeed: document.getElementById('tts-speed'),
     ttsMdClean: document.getElementById('tts-md-clean')?.closest('nui-checkbox'),
@@ -1399,6 +1400,7 @@ async function applyDefaultConfig() {
         storage,
         elements: {
             engineSelect: elements.ttsEngineSelect,
+            modelSelect: elements.ttsModelSelect,
             voiceSelect: elements.ttsVoiceSelect,
             speed: elements.ttsSpeed,
             status: elements.ttsStatus,

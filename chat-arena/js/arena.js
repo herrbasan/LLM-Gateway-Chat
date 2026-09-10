@@ -1219,6 +1219,8 @@ class ArenaUI {
         // TTS Elements
         this.ttsEngineASelect = document.getElementById('tts-engine-a-select');
         this.ttsEngineBSelect = document.getElementById('tts-engine-b-select');
+        this.ttsModelASelect = document.getElementById('tts-model-a-select');
+        this.ttsModelBSelect = document.getElementById('tts-model-b-select');
         this.ttsVoiceASelect = document.getElementById('tts-voice-a-select');
         this.ttsVoiceBSelect = document.getElementById('tts-voice-b-select');
         this.ttsSpeed = document.getElementById('tts-speed');
@@ -1806,6 +1808,8 @@ class ArenaUI {
             elements: {
                 engineASelect: this.ttsEngineASelect,
                 engineBSelect: this.ttsEngineBSelect,
+                modelASelect: this.ttsModelASelect,
+                modelBSelect: this.ttsModelBSelect,
                 voiceASelect: this.ttsVoiceASelect,
                 voiceBSelect: this.ttsVoiceBSelect,
                 speed: this.ttsSpeed,
