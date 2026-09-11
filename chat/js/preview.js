@@ -173,6 +173,7 @@ async function show(args) {
     let language = typeof args.language === 'string' && args.language.length > 0 ? args.language : 'text';
     let source = typeof args.source === 'string' && args.source.length > 0 ? args.source : null;
     let content;
+    let docBase = null;
 
     if (hasContent) {
         // MODE A — generated content (existing behavior)
@@ -188,6 +189,7 @@ async function show(args) {
         // MODE B — fetched file: the model hands just the url, the preview
         // fetches and displays it. No regeneration of content.
         const resolvedUrl = resolvePreviewUrl(args.url, _mcpOriginResolver);
+        docBase = resolvedUrl;
         content = await _fetchUrlText(resolvedUrl);
         if (typeof id !== 'string' || id.length === 0) id = deriveIdFromUrl(resolvedUrl);
         if (typeof title !== 'string' || title.length === 0) title = deriveTitleFromUrl(resolvedUrl);
@@ -215,7 +217,13 @@ async function show(args) {
         title,
         language,
         content,
-        source
+        source,
+        // Document base (issue #38): in url mode the fetched document HAS a
+        // location — its resolved URL — and relative media destinations must
+        // resolve against it, like any viewer opening the file from disk.
+        // Content mode has no location; base stays null and relative paths
+        // render as authored.
+        base: docBase
     });
 
     // Select this item (brings to front)
@@ -376,7 +384,7 @@ function renderActive() {
     }
 
     if (item.language === 'markdown') {
-        renderMarkdown(item.content);
+        renderMarkdown(item.content, item.base);
     } else {
         renderCode(item.content, item.language);
     }
@@ -390,11 +398,12 @@ function renderActive() {
  * Creating a fresh element per render is REQUIRED, not just convenient.
  * Do not "optimize" this to in-place content swapping.
  */
-function renderMarkdown(mdContent) {
+function renderMarkdown(mdContent, base) {
     const md = document.createElement('nui-markdown');
     // Previews show rendered work product, not document metadata — strip
     // frontmatter (nui-markdown default 'show' renders it as a card).
     md.setAttribute('frontmatter', 'strip');
+    if (base) md.base = base;
     const script = document.createElement('script');
     script.type = 'text/markdown';
     script.textContent = mdContent;
