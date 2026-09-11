@@ -17,6 +17,7 @@
 ## Operating Rules
 
 - **Master IS live.** Work directly in `D:\SRV` on `master`; the server runs under nPM — coordinate stop/start with the user around backend edits and restarts.
+- **Never put a query string on a JS module URL.** Modules are cached per full URL including the query, so `nui.js?v=5` in `index.html` plus the addons' bare `import ... from '../../nui.js'` evaluates the file TWICE — two module instances, where app-level config (image policy/rewrite hooks) lands on one instance while the other renders. Cost hours on 2026-09-11; symptom was "hooks silently do nothing" and `nui-list already defined` console errors. Instead, the server sends `Cache-Control: no-store` for `.html/.js/.css/.json` (images keep a 1h cache), so no cache-busting query is ever needed. Do not reintroduce `?v=` — edit and reload.
 - Server does not auto-restart — restart after backend edits. A `Chat Backend running at …` log line means the process started, not that the command returned. Start servers in background; poll `/api/config` or `/health` for readiness (never an SSE endpoint — it hangs the request).
 
 ## Project Overview
