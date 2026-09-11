@@ -2257,10 +2257,28 @@ const server = http.createServer(async (req, res) => {
     pathname = '/chat-arena/index.html';
   }
 
-  // File serving from data directory
+  // File serving from data directory (issue #35). Cookie-auth'd like every
+  // other data route, and the resolved path MUST stay inside FILES_DIR:
+  // decodeURIComponent runs before the join, so %2e%2e%2f would otherwise
+  // escape the root (unauthenticated arbitrary read).
   if (pathname.startsWith('/files/')) {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
     const subPath = req.url.slice(7).split('?')[0];
-    const filePath = path.join(FILES_DIR, decodeURIComponent(subPath));
+    let decoded;
+    try {
+      decoded = decodeURIComponent(subPath);
+    } catch (e) {
+      json(res, { error: 'Malformed path' }, 400, req);
+      return;
+    }
+    const filesRoot = path.resolve(FILES_DIR);
+    const filePath = path.resolve(filesRoot, decoded);
+    if (filePath !== filesRoot && !filePath.startsWith(filesRoot + path.sep)) {
+      logger.warn('Rejected path traversal attempt', { subPath, resolved: filePath }, 'Security');
+      json(res, { error: 'Forbidden' }, 403, req);
+      return;
+    }
     try {
       if ((await fs.promises.stat(filePath)).isFile()) {
         serveFile(req, res, filePath);
