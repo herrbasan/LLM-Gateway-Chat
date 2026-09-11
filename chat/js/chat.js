@@ -1187,16 +1187,36 @@ async function init() {
 
     // Inline image policy (issue #32): markdown ![alt](url) in assistant/user
     // messages renders only for trusted sources — same-origin paths (bucket
-    // URLs) and the workshop storage origin. Everything else renders as alt
-    // text, so an arbitrary external URL can never become a request (beacon).
+    // URLs, proxied /storage/*) and the workshop storage origin. Everything
+    // else renders as alt text, so an arbitrary external URL can never become
+    // a request (beacon).
+    //
+    // Issue #36: storage URLs arrive in multiple host spellings (localhost vs
+    // LAN IP vs dyndns) — one spelling per machine, none universal. Canonical
+    // form is the same-origin proxy path /storage/<path> (server proxies to
+    // the MCP storage box). Rewrite every known storage spelling to it BEFORE
+    // the policy check: old messages render everywhere, new authoring uses
+    // /storage/... directly.
     if (window.nui?.util?.setMarkdownImagePolicy) {
-        const trustedOrigins = new Set([location.origin]);
+        const storageHostPatterns = [];
         if (CONFIG.mcpOrigin) {
-            try { trustedOrigins.add(new URL(CONFIG.mcpOrigin).origin); } catch { /* bad config — same-origin only */ }
+            try { storageHostPatterns.push(new RegExp('^' + new URL(CONFIG.mcpOrigin).origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/storage/')); } catch { /* bad config — same-origin only */ }
         }
+        // Common workshop spellings of the storage box origin (LAN IP + localhost on port 3100)
+        storageHostPatterns.push(/^https?:\/\/192\.168\.0\.100:3100\/storage\//, /^https?:\/\/localhost:3100\/storage\//, /^https?:\/\/127\.0\.0\.1:3100\/storage\//);
+
+        const toStorageProxyUrl = (url) => {
+            if (typeof url !== 'string') return null;
+            for (const re of storageHostPatterns) {
+                if (re.test(url)) return url.replace(re, '/storage/');
+            }
+            return null;
+        };
+        window.nui.util.setMarkdownImageRewrite(toStorageProxyUrl);
         window.nui.util.setMarkdownImagePolicy((url) => {
+            if (url.startsWith('/storage/')) return true;
             if (url.startsWith('/') || url.startsWith('#')) return true;
-            try { return trustedOrigins.has(new URL(url, location.origin).origin); } catch { return false; }
+            try { return new URL(url, location.origin).origin === location.origin; } catch { return false; }
         });
     }
 

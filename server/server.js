@@ -579,6 +579,56 @@ function requireAuth(req, res) {
 
 const stt = sttRelay.createRelay({ cfg, getAuthUser, requireAuth, L });
 
+// ============================================
+// Storage proxy (issue #36): /storage/* → workshop MCP storage server,
+// cookie-auth'd same-origin. Referencing storage images as /storage/<path>
+// works from every machine — the origin resolves against whatever host
+// served the chat, unlike absolute localhost/LAN spellings.
+// ============================================
+
+function storageBase() {
+  if (!MCP_URL) throw new Error('Storage proxy: MCP_URL not configured');
+  return MCP_URL.replace(/\/+$/, '');
+}
+
+async function proxyStorage(req, res, storagePath) {
+  const authResult = requireAuth(req, res);
+  if (!authResult) return;
+
+  const url = new URL(req.url, 'http://localhost');
+  let target;
+  try {
+    target = storageBase() + '/storage/' + storagePath + url.search;
+  } catch (e) {
+    json(res, { error: e.message }, 503, req);
+    return;
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(target, { method: 'GET' });
+  } catch (e) {
+    json(res, { error: `Storage server unreachable: ${e.message}` }, 502, req);
+    return;
+  }
+  if (!upstream.ok) {
+    json(res, { error: `Storage: ${upstream.status} ${upstream.statusText}` }, upstream.status, req);
+    return;
+  }
+
+  const outHeaders = {
+    'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream'
+  };
+  res.writeHead(200, outHeaders);
+  if (upstream.body) {
+    const stream = Readable.fromWeb(upstream.body);
+    stream.on('error', (e) => { logger?.error('Storage proxy stream failed', e, { storagePath }, 'Storage'); stream.destroy(); res.destroy(); });
+    stream.pipe(res);
+  } else {
+    res.end();
+  }
+}
+
 function ttsBase() {
   return (process.env.TTS_ENDPOINT || cfg.ttsEndpoint || 'http://localhost:2233').replace(/\/+$/, '');
 }
@@ -2197,6 +2247,15 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       json(res, { error: 'File not found' }, 404);
     }
+    return;
+  }
+
+  // Storage proxy (issue #36) — same-origin /storage/* → MCP storage server,
+  // cookie-auth'd. Inserted BEFORE the static fallback so it can't be shadowed
+  // by a file on disk. POST/etc. are not proxied: images are read-only.
+  if (pathname.startsWith('/storage/') && (req.method === 'GET' || req.method === 'HEAD')) {
+    const subPath = req.url.slice(9).split('?')[0];
+    await proxyStorage(req, res, decodeURIComponent(subPath));
     return;
   }
 
