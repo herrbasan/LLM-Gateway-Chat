@@ -20,6 +20,24 @@ let DEPS = null;
 //          embedBatch, getEmbedAvailable }
 function init(deps) { DEPS = deps; }
 
+// Canonicalize storage URLs in message content (issue #36 architecture):
+// every absolute spelling of the storage box origin becomes the host-less
+// proxy path /storage/..., which the backend itself serves (proxyStorage).
+// Applied at viewMessage — the single choke point where messages leave the
+// server — so views and renderers never see a storage host and need no
+// topology knowledge. Known spellings: the configured MCP origin plus the
+// common LAN/loopback forms on the storage port.
+const STORAGE_SPELLING_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|192\.168\.0\.100):3100\/storage\//gi;
+function canonicalizeStorageUrls(content, mcpOrigin) {
+    if (typeof content !== 'string' || !content.includes(':3100/storage/') && !(mcpOrigin && content.includes(mcpOrigin + '/storage/'))) return content;
+    let out = content.replace(STORAGE_SPELLING_RE, '/storage/');
+    if (mcpOrigin) {
+        const re = new RegExp(mcpOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/storage/', 'gi');
+        out = out.replace(re, '/storage/');
+    }
+    return out;
+}
+
 // chat.progress spec §2.1: poll interval for chat.status while a workshop
 // `chat.send` dispatcher call is in flight.
 const CHAT_STATUS_POLL_MS = 2000;
@@ -335,7 +353,18 @@ class Runner {
         } else if (cloned.timestamp === undefined) {
             cloned.timestamp = Date.parse(cloned.createdAt) || null;
         }
+        cloned.content = canonicalizeStorageUrls(cloned.content, this._storageOrigin());
         return cloned;
+    }
+
+    // Storage-box origin for URL canonicalization — cached per runner. The pool
+    // is per-user; getForUser is idempotent so this is a lookup, not a connect.
+    _storageOrigin() {
+        if (this._storageOriginCache !== undefined) return this._storageOriginCache;
+        let origin = null;
+        try { origin = mcpPool.getForUser(this.user, this.dbInstance).getStorageOrigin(); } catch { origin = null; }
+        this._storageOriginCache = origin;
+        return origin;
     }
 
     async buildSnapshot() {

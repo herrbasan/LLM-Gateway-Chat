@@ -597,6 +597,23 @@ function storageBase() {
   }
 }
 
+// Canonicalize storage URLs in text bodies served to views (issue #36): every
+// absolute spelling of the storage origin becomes the host-less /storage/...
+// path this backend serves. Applied to fetched preview documents so renderers
+// never see a storage host. Mirrors runner.canonicalizeStorageUrls.
+const STORAGE_SPELLING_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|192\.168\.0\.100):3100\/storage\//gi;
+function canonicalizeStorageUrls(content) {
+  if (typeof content !== 'string' || !content.includes('/storage/')) return content;
+  let out = content.replace(STORAGE_SPELLING_RE, '/storage/');
+  if (MCP_URL) {
+    try {
+      const origin = new URL(MCP_URL).origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp(origin + '/storage/', 'gi'), '/storage/');
+    } catch { /* unparsable MCP_URL — the spelling regex already ran */ }
+  }
+  return out;
+}
+
 async function proxyStorage(req, res, storagePath) {
   const authResult = requireAuth(req, res);
   if (!authResult) return;
@@ -1314,7 +1331,7 @@ const routes = {
       if (!upstream.ok) { json(res, { error: `upstream ${upstream.status} for ${target}` }, 502, req); return; }
       const text = await upstream.text();
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end(text);
+      res.end(canonicalizeStorageUrls(text));
     } catch (e) {
       json(res, { error: `preview fetch failed: ${e.message}` }, 502, req);
     }

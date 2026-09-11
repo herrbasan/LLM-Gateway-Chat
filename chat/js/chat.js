@@ -1213,6 +1213,9 @@ async function init() {
 
         const toStorageProxyUrl = (url) => {
             if (typeof url !== 'string') return null;
+            // Already-canonical server output (/storage/...) — only needs the
+            // /chat prefix when the app is served behind the public proxy.
+            if (url.startsWith('/storage/')) return storageBasePath ? storageBasePath + url : null;
             for (const re of storageHostPatterns) {
                 if (re.test(url)) return storageBasePath + url.replace(re, '/storage/');
             }
