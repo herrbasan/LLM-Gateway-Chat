@@ -2024,16 +2024,33 @@ function setupEventListeners() {
     });
     
     // Image lightbox - use event delegation
-    elements.messages?.addEventListener('click', (e) => {
-        const img = e.target.closest('.chat-attachment');
-        if (img) {
-            e.preventDefault();
-            const fullSrc = img.dataset.fullSrc;
-            if (fullSrc && nui.components?.lightbox) {
-                nui.components.lightbox.show([{ src: fullSrc, title: img.alt }], 0);
-            }
-        }
-    });
+    elements.messages?.addEventListener('click', onMarkdownImageClick);
+    document.getElementById('preview-content')?.addEventListener('click', onMarkdownImageClick);
+}
+
+/**
+ * Delegated click handler: open lightbox for images inside nui-markdown
+ * (assistant replies, preview pane) and legacy .chat-attachment images.
+ * All images in the same markdown container form one lightbox gallery.
+ */
+function onMarkdownImageClick(e) {
+    const img = e.target.closest('img');
+    if (!img) return;
+    if (!nui.components?.lightbox) return;
+
+    const md = img.closest('nui-markdown');
+    if (md) {
+        const gallery = [...md.querySelectorAll('img')].map((i) => ({ src: i.src, title: i.alt }));
+        const start = Math.max(0, gallery.findIndex((g) => g.src === img.src));
+        if (gallery.length) nui.components.lightbox.show(gallery, start);
+        return;
+    }
+
+    const att = img.closest('.chat-attachment');
+    if (att) {
+        const fullSrc = att.dataset.fullSrc;
+        if (fullSrc) nui.components.lightbox.show([{ src: fullSrc, title: att.alt }], 0);
+    }
 }
 
 
