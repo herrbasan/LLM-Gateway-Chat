@@ -9,11 +9,14 @@
 3. [docs/architecture-conversation-runner.md](docs/architecture-conversation-runner.md) — the design authority: the conversation is a server-side session; the browser is an attach/detach view.
 4. `docs/codebase-survey-bff.md` — the channel × callsite map of the client-centric code. Keep it updated; do not duplicate its call-shape tables into this file (snapshots drift, pointers don't).
 
+## Session Start (mandatory, before any other work)
+
+1. **Submodule update check:** run `git submodule update --remote` (fetches each of `lib/ndb`, `lib/nlogger`, `lib/nui_wc2`, `lib/nvdb` and moves them to their configured remote branch tip — branches are declared in `.gitmodules`). Then `git status --short`: a modified `lib/...` line means the pointer moved ahead — commit the bump separately (`chore: bump lib/<name> submodule to <branch> (<short-sha>)`) before starting work. Windows gotcha: a running server keeps ndb's napi `.node` binary locked — stop the server before updating `lib/ndb`, and load-test after: `node -e "require('./lib/ndb/napi')"`.
+2. **Vendored SDK drift check:** diff `lib/tts/nspeech-client.js` against upstream `herrbasan/nSpeech` → `lib/nspeech-client/nspeech-client.js`, and `lib/stt/nvoice-client.js` against the nVoice repo. Update = raw re-copy from upstream, never edit in place.
+
 ## Operating Rules
 
 - **Master IS live.** Work directly in `D:\SRV` on `master`; the server runs under nPM — coordinate stop/start with the user around backend edits and restarts.
-- **Submodules: check for updates at the start of every work session.** Fetch in each of `lib/ndb`, `lib/nvdb`, `lib/nlogger`, `lib/nui_wc2` and fast-forward to the remote default branch; commit the pointer bump separately. Windows gotcha: a running server keeps ndb's napi `.node` binary locked — stop the server before updating `lib/ndb`, and load-test after: `node -e "require('./lib/ndb/napi')"`.
-- **Vendored SDKs: check for upstream updates at the start of every work session.** `lib/tts/nspeech-client.js` (upstream: `herrbasan/nSpeech` → `lib/nspeech-client/nspeech-client.js`) and `lib/stt/nvoice-client.js` (upstream: the nVoice repo). Update = raw re-copy from upstream, never edit in place; diff against the remote raw file to detect drift.
 - Server does not auto-restart — restart after backend edits. A `Chat Backend running at …` log line means the process started, not that the command returned. Start servers in background; poll `/api/config` or `/health` for readiness (never an SSE endpoint — it hangs the request).
 
 ## Project Overview
