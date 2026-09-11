@@ -588,7 +588,13 @@ const stt = sttRelay.createRelay({ cfg, getAuthUser, requireAuth, L });
 
 function storageBase() {
   if (!MCP_URL) throw new Error('Storage proxy: MCP_URL not configured');
-  return MCP_URL.replace(/\/+$/, '');
+  // MCP_URL may carry an endpoint path (e.g. http://host:3100/mcp/compact) —
+  // the storage HTTP surface hangs off the ORIGIN, not the endpoint.
+  try {
+    return new URL(MCP_URL).origin;
+  } catch (e) {
+    throw new Error(`Storage proxy: MCP_URL unparsable (${MCP_URL})`);
+  }
 }
 
 async function proxyStorage(req, res, storagePath) {
