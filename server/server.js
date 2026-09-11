@@ -2383,7 +2383,16 @@ const server = http.createServer(async (req, res) => {
         '.jpg': 'image/jpeg',
         '.svg': 'image/svg+xml'
       }[ext] || 'application/octet-stream';
-      const headers = { 'Content-Type': mime };
+      // Text assets must never be served stale. Hand-bumped ?v= cache-busters
+      // were the previous defense and repeatedly went stale — and a versioned
+      // query on a module URL that other modules import by bare path creates a
+      // SECOND module instance (app configures one copy, the other renders).
+      // no-store removes both problems: every load gets the file on disk.
+      const CACHEABLE = !/^text\/|javascript|json/.test(mime);
+      const headers = {
+        'Content-Type': mime,
+        'Cache-Control': CACHEABLE ? 'public, max-age=3600' : 'no-store'
+      };
       sendBody(req, res, data, headers, 200);
     });
 });
