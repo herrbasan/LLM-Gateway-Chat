@@ -2259,9 +2259,11 @@ const server = http.createServer(async (req, res) => {
   // Storage proxy (issue #36) — same-origin /storage/* → MCP storage server,
   // cookie-auth'd. Inserted BEFORE the static fallback so it can't be shadowed
   // by a file on disk. POST/etc. are not proxied: images are read-only.
-  if (pathname.startsWith('/storage/') && (req.method === 'GET' || req.method === 'HEAD')) {
-    const subPath = req.url.slice(9).split('?')[0];
-    await proxyStorage(req, res, decodeURIComponent(subPath));
+  // Accepts an optional /chat prefix: behind nPort the route is stripPath:false,
+  // so the public path /chat/storage/... arrives here verbatim.
+  const storageMatch = pathname.match(/^\/(chat)?\/storage\/(.*)$/);
+  if (storageMatch && (req.method === 'GET' || req.method === 'HEAD')) {
+    await proxyStorage(req, res, decodeURIComponent(storageMatch[2]));
     return;
   }
 

@@ -1205,16 +1205,22 @@ async function init() {
         // Common workshop spellings of the storage box origin (LAN IP + localhost on port 3100)
         storageHostPatterns.push(/^https?:\/\/192\.168\.0\.100:3100\/storage\//, /^https?:\/\/localhost:3100\/storage\//, /^https?:\/\/127\.0\.0\.1:3100\/storage\//);
 
+        // Same-origin base for the proxied path. Direct access (localhost:8080/chat/)
+        // serves /storage/* from the backend root. Behind the public reverse proxy
+        // (mcode.freeddns.org/chat/*) only the /chat/* prefix is routed — so the
+        // proxy path must carry the same prefix and let the proxy strip it.
+        const storageBasePath = location.pathname.startsWith('/chat') ? '/chat' : '';
+
         const toStorageProxyUrl = (url) => {
             if (typeof url !== 'string') return null;
             for (const re of storageHostPatterns) {
-                if (re.test(url)) return url.replace(re, '/storage/');
+                if (re.test(url)) return storageBasePath + url.replace(re, '/storage/');
             }
             return null;
         };
         window.nui.util.setMarkdownImageRewrite(toStorageProxyUrl);
         window.nui.util.setMarkdownImagePolicy((url) => {
-            if (url.startsWith('/storage/')) return true;
+            if (url.startsWith(storageBasePath + '/storage/')) return true;
             if (url.startsWith('/') || url.startsWith('#')) return true;
             try { return new URL(url, location.origin).origin === location.origin; } catch { return false; }
         });
