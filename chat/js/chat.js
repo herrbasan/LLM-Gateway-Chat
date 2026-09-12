@@ -373,6 +373,7 @@ function attachRunnerEvents(chatId) {
         delta(d) { _runnerDelta(chatId, d); },
         'tool.start'(d) { _runnerToolStart(chatId, d); },
         'tool.end'(d) { _runnerToolEnd(chatId, d); },
+        'tool.progress'(d) { _runnerToolProgress(chatId, d); },
         'msg.assistant'(d) { _runnerAssistant(chatId, d); },
         'msg.user'(d) { _runnerUser(chatId, d); },
         'msg.deleted'(d) { _runnerDeleted(chatId, d); },
@@ -660,6 +661,26 @@ function _runnerToolStart(chatId, d) {
 
     s.toolBubbles.set(d.toolCallId, { el, exchange });
     _setActivityPhase('Running tool…');
+}
+
+// tool.progress — live MCP progress notifications (notifications/progress
+// relayed by the runner while a tool runs; forge tools emit these via
+// ctx.progress throughout their execution). Rendered as the tool bubble's
+// live status line: "message · 42%". Ephemeral — tool.end clears it.
+function _runnerToolProgress(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    const entry = s.toolBubbles.get(d.toolCallId);
+    if (!entry || !entry.el.isConnected) return;
+    let line = entry.el.querySelector('.tool-progress-line');
+    if (!line) {
+        line = document.createElement('div');
+        line.className = 'tool-progress-line chat-progress-line';
+        const notif = entry.el.querySelector('.tool-notifications');
+        if (notif) notif.replaceChildren(line);
+    }
+    const pct = (typeof d.progress === 'number' && typeof d.total === 'number' && d.total > 0)
+        ? ` · ${Math.round((d.progress / d.total) * 100)}%` : '';
+    line.textContent = `${d.message || 'working'}${pct}`;
 }
 
 function _runnerToolEnd(chatId, d) {

@@ -18,7 +18,7 @@
 
 // Event names the runner emits (server fan-out prefixes them with `r.`).
 const EVENT_NAMES = [
-    'snapshot', 'run.start', 'delta', 'tool.start', 'tool.end',
+    'snapshot', 'run.start', 'delta', 'tool.start', 'tool.end', 'tool.progress',
     'msg.assistant', 'msg.user', 'msg.deleted',
     'run.end', 'run.status', 'error', 'embed.status', 'model.changed',
     'chat.progress'

@@ -923,11 +923,18 @@ class Runner {
                 const isChatSend = chatDispatcher !== null
                     && tc.function.name === chatDispatcher
                     && args.method === 'chat.send';
+                // MCP progress relay: opts.onProgress registers a progressToken
+                // with the pool; notifications/progress frames from the server
+                // (forge tools call ctx.progress throughout) become tool.progress
+                // broadcasts the UI renders live under the tool bubble.
+                const onProgress = (message, progress, total) => {
+                    this.broadcast('tool.progress', { toolCallId: tc.id, message, progress, total, exchangeId: f.exchangeId, messageId: f.messageId });
+                };
                 const result = internalTools.isInternalTool(tc.function.name)
                     ? await internalTools.executeInternalTool(tc.function.name, args, this.internalToolCtx())
                     : isChatSend
                         ? await this._callToolWithChatProgress(pool, chatDispatcher, args, f)
-                        : await pool.callTool(tc.function.name, args);
+                        : await pool.callTool(tc.function.name, args, { onProgress });
                 ({ text: resultText, images: resultImages } = this.extractToolResult(result));
                 const labelNotes = [];
                 if (labelHits.stripped.length > 0) labelNotes.push('chunk label(s) were stripped from your arguments');
