@@ -1083,6 +1083,19 @@ class Runner {
             // Some adapters deliver the signature on the final message object, not deltas
             if (choice.message?.thinking_signature) f.thinkingSignature = choice.message.thinking_signature;
             if (json.thinking_signature) f.thinkingSignature = json.thinking_signature;
+            // The gateway's canonical delivery shape for thinking + signature is
+            // thinking_blocks[] on the message (verified deepseek-flash-chat
+            // 2026-09-13: {type:'thinking', thinking, signature}) — the bare
+            // thinking_signature field never arrives. Without this capture the
+            // payload echoes reasoning_content UNSIGNED on the follow-up turn
+            // and the provider 400s ("content[].thinking must be passed back").
+            const blocksSrc = Array.isArray(delta.thinking_blocks) ? delta.thinking_blocks
+                : Array.isArray(choice.message?.thinking_blocks) ? choice.message.thinking_blocks
+                    : Array.isArray(json.thinking_blocks) ? json.thinking_blocks : null;
+            if (blocksSrc) {
+                const sig = blocksSrc.find?.((b) => b?.signature)?.signature;
+                if (sig) f.thinkingSignature = sig;
+            }
             if (Array.isArray(delta.tool_calls)) {
                 for (const frag of delta.tool_calls) {
                     const ti = frag.index ?? 0;

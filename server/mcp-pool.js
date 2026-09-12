@@ -58,6 +58,7 @@ class ServerConn {
         this.tools = null;
         this.postEndpoint = null;
         this.pending = new Map(); // requestId -> { resolve, reject, timeoutId }
+        this.progressHandlers = new Map(); // progressToken -> onProgress(message, progress, total)
         this.log = log;
         this._reader = null;
         this._retryTimer = null;
@@ -164,6 +165,16 @@ class ServerConn {
         if (eventType === 'message') {
             let data;
             try { data = JSON.parse(eventData); } catch { return; }
+            // Progress notifications are id-less JSON-RPC notifications keyed
+            // by progressToken — route them to the call's onProgress callback.
+            if (data.id === undefined && data.method === 'notifications/progress') {
+                const token = data.params?.progressToken;
+                const handler = token !== undefined ? this.progressHandlers.get(String(token)) : null;
+                if (handler) {
+                    try { handler(data.params?.message ?? '', data.params?.progress, data.params?.total); } catch { /* display-side failure must not break the stream */ }
+                }
+                return;
+            }
             if (data.id !== undefined) {
                 const p = this.pending.get(String(data.id));
                 if (!p) return; // orphan
@@ -177,17 +188,32 @@ class ServerConn {
 
     // JSON-RPC call with dual-path response: POST body (streamable HTTP, 200+SSE)
     // or the persistent SSE stream (legacy 202). First delivery wins.
-    async rpc(method, params) {
+    // opts.onProgress(message, progress, total): registers a progressToken so
+    // the server streams notifications/progress events for this call (MCP spec
+    // §-progress); they arrive on the POST body stream and are routed in
+    // _handleFrame. Without onProgress no token is sent and the server stays
+    // silent — unchanged behavior.
+    async rpc(method, params, opts = {}) {
         if (this.status !== 'connected' || !this.postEndpoint) throw new Error(`server ${this.name} not connected`);
         const requestId = nextRequestId();
+        let progressToken = null;
+        if (typeof opts.onProgress === 'function') {
+            progressToken = `pg-${requestId}`;
+            params = { ...params, _meta: { ...(params?._meta ?? {}), progressToken } };
+            this.progressHandlers.set(progressToken, opts.onProgress);
+        }
         const payload = { jsonrpc: '2.0', id: requestId, method, params };
 
+        const cleanupProgress = () => {
+            if (progressToken !== null) this.progressHandlers.delete(progressToken);
+        };
         const resultPromise = new Promise((resolve, reject) => {
             const timeoutId = setTimeout(() => {
                 this.pending.delete(requestId);
+                cleanupProgress();
                 reject(new Error(`MCP ${method} timeout after ${TOOL_TIMEOUT_MS / 1000}s (${this.name})`));
             }, TOOL_TIMEOUT_MS);
-            this.pending.set(requestId, { resolve, reject, timeoutId });
+            this.pending.set(requestId, { resolve: (v) => { cleanupProgress(); resolve(v); }, reject: (e) => { cleanupProgress(); reject(e); }, timeoutId });
         });
         // CRASH GUARD: if the POST fetch below hangs past the timeout, this
         // rejection fires while rpc() is still stuck in fetch — resultPromise
@@ -257,8 +283,8 @@ class ServerConn {
         this.tools = result?.tools || [];
     }
 
-    async callTool(originalName, args) {
-        return this.rpc('tools/call', { name: originalName, arguments: args });
+    async callTool(originalName, args, opts) {
+        return this.rpc('tools/call', { name: originalName, arguments: args }, opts);
     }
 
     async readResource(uri) {
