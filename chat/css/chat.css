@@ -1040,6 +1040,13 @@ nui-code pre {
     box-sizing: border-box;
 }
 
+.input-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-shrink: 0;
+}
+
 /* The input row is its own section — give it a full-width top divider when it
    follows another section (attachments or the TTS player). Bleeds past the
    composer padding so the hairline reaches the viewport edges, matching the
@@ -1760,6 +1767,13 @@ nui-app:not(.nui-ready) { display: none; }
     }
     .chat-input-area .input-row .nui-rich-text-container {
         margin: 0;
+    }
+    .input-actions {
+        display: grid;
+        grid-template-columns: repeat(2, auto);
+        gap: 0.35rem 0.5rem;
+        align-items: center;
+        justify-items: center;
     }
 }
 
