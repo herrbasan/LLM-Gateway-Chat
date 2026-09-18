@@ -16,7 +16,27 @@
 // UI hooks and the trace buffer are not ported.
 // ============================================
 
-const TOOL_TIMEOUT_MS = 120000; // matches the browser client
+// Default per-call budget (issue #39): calls with no declared budget keep
+// the flat cap. A tool that declares one (forge.call's `timeout` arg, in ms)
+// gets up to MAX_TOOL_TIMEOUT_MS — the same ceiling the forge worker itself
+// enforces, so the pool never outlives the tool's own accounting.
+const TOOL_TIMEOUT_MS = 120000;
+const MAX_TOOL_TIMEOUT_MS = 900000;
+
+function clampBudget(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return TOOL_TIMEOUT_MS;
+    return Math.min(n, MAX_TOOL_TIMEOUT_MS);
+}
+
+// forge.call (and any tool following the convention) declares its runtime
+// budget as args.timeout in ms. The pool honors it up to the clamp; tools
+// without the field keep the flat default.
+function withBudget(opts, args) {
+    const n = Number(args?.timeout);
+    if (!Number.isFinite(n) || n <= 0) return opts;
+    return { ...opts, timeoutMs: n };
+}
 
 // Fixed-interval reconnect (issue #31): a dropped SSE stream or a failed
 // initial connect retries every RECONNECT_MS, forever. No backoff needed — a
@@ -57,7 +77,7 @@ class ServerConn {
         this.status = 'disconnected';
         this.tools = null;
         this.postEndpoint = null;
-        this.pending = new Map(); // requestId -> { resolve, reject, timeoutId }
+        this.pending = new Map(); // requestId -> { resolve, reject, cancel, ac }
         this.progressHandlers = new Map(); // progressToken -> onProgress(message, progress, total)
         this.log = log;
         this._reader = null;
@@ -135,7 +155,8 @@ class ServerConn {
         this.status = 'disconnected';
         this.postEndpoint = null;
         for (const [, p] of this.pending) {
-            clearTimeout(p.timeoutId);
+            p.cancel?.();
+            p.ac?.abort(); // unstick an in-flight POST fetch on the streamable path
             p.reject(new Error('MCP connection lost (stream ended)'));
         }
         this.pending.clear();
@@ -179,7 +200,7 @@ class ServerConn {
                 const p = this.pending.get(String(data.id));
                 if (!p) return; // orphan
                 this.pending.delete(String(data.id));
-                clearTimeout(p.timeoutId);
+                p.cancel?.();
                 if (data.error) p.reject(new Error(`MCP error: ${data.error.message || JSON.stringify(data.error)}`));
                 else p.resolve(data.result);
             }
@@ -188,32 +209,46 @@ class ServerConn {
 
     // JSON-RPC call with dual-path response: POST body (streamable HTTP, 200+SSE)
     // or the persistent SSE stream (legacy 202). First delivery wins.
-    // opts.onProgress(message, progress, total): registers a progressToken so
-    // the server streams notifications/progress events for this call (MCP spec
-    // §-progress); they arrive on the POST body stream and are routed in
-    // _handleFrame. Without onProgress no token is sent and the server stays
-    // silent — unchanged behavior.
+    // opts.timeoutMs overrides the default budget (see withBudget). A progress
+    // notification re-arms the FULL budget — a tool reporting steady progress
+    // never times out; silent work is capped by the budget from call start
+    // (issue #39). opts.onProgress(message, progress, total) remains an
+    // optional display hook on top of that.
     async rpc(method, params, opts = {}) {
         if (this.status !== 'connected' || !this.postEndpoint) throw new Error(`server ${this.name} not connected`);
         const requestId = nextRequestId();
-        let progressToken = null;
-        if (typeof opts.onProgress === 'function') {
-            progressToken = `pg-${requestId}`;
-            params = { ...params, _meta: { ...(params?._meta ?? {}), progressToken } };
-            this.progressHandlers.set(progressToken, opts.onProgress);
-        }
+        const budget = clampBudget(opts.timeoutMs);
+        const progressToken = `pg-${requestId}`;
+        const ac = new AbortController();
+        params = { ...params, _meta: { ...(params?._meta ?? {}), progressToken } };
         const payload = { jsonrpc: '2.0', id: requestId, method, params };
 
-        const cleanupProgress = () => {
-            if (progressToken !== null) this.progressHandlers.delete(progressToken);
-        };
-        const resultPromise = new Promise((resolve, reject) => {
-            const timeoutId = setTimeout(() => {
+        let timeoutId = null;
+        let fired = false;
+        const arm = () => {
+            clearTimeout(timeoutId);
+            timeoutId = setTimeout(() => {
+                fired = true;
                 this.pending.delete(requestId);
-                cleanupProgress();
-                reject(new Error(`MCP ${method} timeout after ${TOOL_TIMEOUT_MS / 1000}s (${this.name})`));
-            }, TOOL_TIMEOUT_MS);
-            this.pending.set(requestId, { resolve: (v) => { cleanupProgress(); resolve(v); }, reject: (e) => { cleanupProgress(); reject(e); }, timeoutId });
+                this.progressHandlers.delete(progressToken);
+                ac.abort(); // unstick the POST fetch; its error is mapped below
+                rejectFn(new Error(`MCP ${method} timeout after ${budget / 1000}s (${this.name})`));
+            }, budget);
+        };
+        let rejectFn;
+        const resultPromise = new Promise((resolve, reject) => {
+            rejectFn = reject;
+            this.pending.set(requestId, {
+                resolve: (v) => { clearTimeout(timeoutId); this.progressHandlers.delete(progressToken); resolve(v); },
+                reject: (e) => { clearTimeout(timeoutId); this.progressHandlers.delete(progressToken); reject(e); },
+                cancel: () => clearTimeout(timeoutId),
+                ac
+            });
+        });
+        arm();
+        this.progressHandlers.set(progressToken, (message, progress, total) => {
+            arm();
+            if (typeof opts.onProgress === 'function') opts.onProgress(message, progress, total);
         });
         // CRASH GUARD: if the POST fetch below hangs past the timeout, this
         // rejection fires while rpc() is still stuck in fetch — resultPromise
@@ -222,15 +257,24 @@ class ServerConn {
         // Callers still receive the rejection via their own await.
         resultPromise.catch(() => { /* handled at the call site */ });
 
-        const resp = await fetch(this.postEndpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(TOOL_TIMEOUT_MS + 5000)
-        });
+        let resp;
+        try {
+            resp = await fetch(this.postEndpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+                body: JSON.stringify(payload),
+                signal: ac.signal
+            });
+        } catch (e) {
+            // The abort came from our own timeout (or a stream-loss teardown) —
+            // resultPromise already carries the precise rejection; surface it
+            // instead of the generic AbortError.
+            if (fired) return resultPromise;
+            throw e;
+        }
         if (!resp.ok) {
             const p = this.pending.get(requestId);
-            if (p) { this.pending.delete(requestId); clearTimeout(p.timeoutId); }
+            if (p) { this.pending.delete(requestId); p.cancel?.(); this.progressHandlers.delete(progressToken); }
             const text = await resp.text().catch(() => '');
             throw new Error(`MCP HTTP ${resp.status}: ${text.slice(0, 300)}`);
         }
@@ -265,14 +309,14 @@ class ServerConn {
             const p = this.pending.get(requestId);
             if (p) {
                 this.pending.delete(requestId);
-                clearTimeout(p.timeoutId);
+                p.cancel?.();
                 p.reject(new Error('MCP stream ended without response'));
             }
         } catch (e) {
             const p = this.pending.get(requestId);
             if (p) {
                 this.pending.delete(requestId);
-                clearTimeout(p.timeoutId);
+                p.cancel?.();
                 p.reject(e);
             }
         }
@@ -283,8 +327,8 @@ class ServerConn {
         this.tools = result?.tools || [];
     }
 
-    async callTool(originalName, args, opts) {
-        return this.rpc('tools/call', { name: originalName, arguments: args }, opts);
+    async callTool(originalName, args, opts = {}) {
+        return this.rpc('tools/call', { name: originalName, arguments: args }, withBudget(opts, args));
     }
 
     async readResource(uri) {
@@ -378,13 +422,13 @@ class UserPool {
         return out;
     }
 
-    async callTool(llmName, args) {
+    async callTool(llmName, args, opts = {}) {
         await this.ensureConnected();
         if (llmName === 'read_resource') return this.executeReadResource(args);
         const rec = this.registry.get(llmName);
         if (!rec) throw new Error(`Unknown tool: ${llmName}`);
         if (rec.server.status !== 'connected') throw new Error(`Server for tool ${llmName} is disconnected`);
-        return rec.server.callTool(rec.originalName, args);
+        return rec.server.callTool(rec.originalName, args, opts);
     }
 
     // Workshop origin for storage PUTs (browser_fetch / attachment_save /
