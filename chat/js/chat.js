@@ -5137,7 +5137,13 @@ async function initChatList() {
         render: renderChatTabItem,
         search: [{ prop: 'title' }, { prop: 'searchText' }],
         sort: [
-            { label: 'Date', prop: 'createdAt', numeric: true },
+            // Modified first = default (issue #40): newest activity at top.
+            // Pref stores {index, direction}; index 0 previously meant the
+            // Created column, so an explicitly saved 'Date' choice lands on
+            // 'Modified' once — the new intended default, not worth a
+            // migration.
+            { label: 'Modified', prop: 'updatedAt', numeric: true },
+            { label: 'Created', prop: 'createdAt', numeric: true },
             { label: 'Title', prop: 'title' },
             { label: 'Messages', prop: 'messageCount', numeric: true }
         ],
@@ -5253,8 +5259,11 @@ function renderChatTabItem(chat) {
     const metaDiv = document.createElement('div');
     metaDiv.className = 'chat-history-item-meta';
 
+    // Show the date the list is sorted by: creation date normally, modified
+    // date while the Modified sort is active (issue #40).
     const dateSpan = document.createElement('span');
-    const dateObj = new Date(chat.createdAt || chat.updatedAt || Date.now());
+    const sortByModified = chatTabList?.currentSort?.prop === 'updatedAt';
+    const dateObj = new Date((sortByModified ? chat.updatedAt : chat.createdAt) || chat.updatedAt || Date.now());
     dateSpan.textContent = dateObj.toLocaleDateString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 
     const countSpan = document.createElement('span');
