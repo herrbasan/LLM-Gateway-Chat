@@ -1,0 +1,19 @@
+{
+    "nVoice":  {
+                   "version":  "1.1.0",
+                   "tag":  "sdk-v1.1.0",
+                   "updatedAt":  "2026-09-20",
+                   "repo":  "herrbasan/nVoice",
+                   "files":  {
+                                 "sdk/nVoiceClient.js":  "lib/stt/nvoice-client.js",
+                                 "sdk/tts-player.js":  "lib/stt/tts-player.js",
+                                 "sdk/README.md":  "lib/stt/README.md"
+                             }
+               },
+    "nSpeech":  {
+                    "repo":  "herrbasan/nSpeech",
+                    "files":  {
+                                  "lib/nspeech-client/nspeech-client.js":  "lib/tts/nspeech-client.js"
+                              }
+                }
+}
