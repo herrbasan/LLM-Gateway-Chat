@@ -1064,6 +1064,23 @@ class Runner {
             if (data === '[DONE]') return;
             let json;
             try { json = JSON.parse(data); } catch { return; }
+            // In-band upstream failure: the gateway can only report a stream that
+            // dies AFTER SSE headers were flushed as a `data: {"error":{...}}`
+            // frame (see StreamHandler.process). Dropping it here made a failed
+            // run indistinguishable from an empty answer — nothing persisted, no
+            // error, view left holding a frozen "Calling model…" bubble
+            // (kimi-k3-chat ZERO_CONTENT, 2026-09-20). Capture it; endRun decides.
+            if (json.error && !json.choices) {
+                const e = json.error;
+                f.streamError = {
+                    code: e.code || e.type || 'stream-error',
+                    message: e.message || 'Upstream stream error'
+                };
+                DEPS.log().error('Gateway stream error (in-band)', null, {
+                    chatId: this.conversationId, model: f.model, ...f.streamError
+                }, 'Runner');
+                return;
+            }
             if (json.usage) f.usage = json.usage;
             if (json.context) f.context = json.context;
             const choice = json.choices?.[0];
@@ -1145,6 +1162,33 @@ class Runner {
         };
         const hasPayload = !!(f.content || f.reasoning_content || f.toolCalls.filter(Boolean).length > 0);
 
+        // A run that ends with nothing AND no error is the worst possible
+        // outcome: no message persisted, no error broadcast, run.end nulls the
+        // view's in-flight element without anyone having finalized it — the
+        // bubble stays on screen showing the last phase ("Calling model…") with
+        // its ticker stopped. That is a real failure, not an empty answer.
+        if (!hasPayload && outcome !== 'error' && outcome !== 'aborted') {
+            const se = f.streamError;
+            const detail = se
+                ? `No content returned by ${f.model} (${se.code}): ${se.message}`
+                : `No content returned by ${f.model} — the stream ended without an answer.`;
+            DEPS.log().error('Run produced no content', null, {
+                chatId: this.conversationId, model: f.model,
+                finishReason: f.finishReason, streamError: se || null
+            }, 'Runner');
+            this.broadcast('error', { code: se?.code || 'zero-content', message: detail, exchangeId: f.exchangeId });
+            f.errorDetail = detail;
+            outcome = 'error';
+        }
+        if (f.streamError && hasPayload) {
+            // Partial answer: the upstream died mid-stream after emitting
+            // content. It is persisted, but it is NOT complete — say so in the
+            // message instead of presenting a truncated reply as finished.
+            DEPS.log().error('Stream ended early — partial answer persisted', null, {
+                chatId: this.conversationId, model: f.model, ...f.streamError
+            }, 'Runner');
+        }
+
         // Authoritative context = the actual on-the-wire payload (what hits the
         // context-window limit), counted from the exact apiMessages array sent.
         // This is "how close am I to the limit" — the limit-relevant number.
@@ -1217,7 +1261,11 @@ class Runner {
                     // Stored content is timestamp-free by invariant (2026-08-31):
                     // timestamps live in the api-view projection from createdAt.
                     // Strip any model-echoed leading prefix so it can never double.
-                    content: f.content.replace(LEADING_TS_REGEX, ''),
+                    // A mid-stream upstream error leaves a truncated answer — mark
+                    // it so it is never mistaken for a finished one.
+                    content: f.content.replace(LEADING_TS_REGEX, '') + (f.streamError
+                        ? `\n\n⚠️ The stream ended early — ${f.streamError.message} (${f.streamError.code}). The answer above may be incomplete.`
+                        : ''),
                     model: f.model,
                     reasoning_content: isAbort ? undefined : (f.reasoning_content || undefined),
                     thinking_signature: isAbort ? undefined : (f.thinkingSignature || undefined),
