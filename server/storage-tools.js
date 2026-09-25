@@ -77,6 +77,53 @@ function backupIfExists(abs, rel) {
 }
 
 // ============================================
+// Frontmatter guard: models see every message stamped '[YYYY-MM-DD@HH:MM] '
+// (api-view withTimestamp) and echo that marker into file writes — glued
+// before the YAML frontmatter opener, where it breaks the document (first
+// line must be exactly '---'). Same failure class as chunk labels (#30).
+// A marker in this position is NEVER content, so it is stripped — logged
+// loud and flagged in the tool result (the model self-corrects in-band).
+// Narrow class: bracketed timestamps and chunk labels only; a file that
+// legitimately begins with other bracketed text is left alone, and a marker
+// with no frontmatter behind it (journal-style opening line) is content.
+// ============================================
+const FM_MARKER_TS = /\d{4}-\d{2}-\d{2}([@T ]\d{2}:\d{2}(:\d{2})?)?/;
+const FM_MARKER_CHUNK = /chunk_[a-z0-9]+/;
+const FM_STAMP_NOTE = 'Context marker(s) were stripped from before the YAML frontmatter. Timestamps and chunk labels are conversation context — never write them into files; a YAML frontmatter block must open at line 1 with exactly "---".';
+
+function isMarkerToken(token) {
+    return FM_MARKER_TS.test(token) || FM_MARKER_CHUNK.test(token);
+}
+
+function stripFrontmatterMarkers(content) {
+    if (typeof content !== 'string') return { content, stripped: [] };
+    const stripped = [];
+    let out = content;
+    // Same-line: '[2026-09-25@22:39] ---' — marker glued onto the opener.
+    out = out.replace(/^[ \t]*(\[[^\]\n]+\])[ \t]*(?=---[ \t]*(?:\r?\n|$))/, (m, tok) => {
+        if (!isMarkerToken(tok)) return m;
+        stripped.push(tok);
+        return '';
+    });
+    // Own-line: marker line(s) directly above the '---' opener.
+    out = out.replace(/^((?:[ \t]*\[[^\]\n]+\][ \t]*\r?\n)+)(?=[ \t]*---[ \t]*(?:\r?\n|$))/, (m, block) => {
+        const lines = block.split(/\r?\n/).filter(l => l.trim() !== '');
+        if (!lines.every(l => isMarkerToken(l.replace(/[ \t]/g, '')))) return m;
+        stripped.push(...lines.map(l => l.trim()));
+        return '';
+    });
+    return { content: out, stripped };
+}
+
+// Shared flag for the tool result: the model sees the note in-band and does
+// not repeat the marker in its next write.
+function guardFields(guard) {
+    if (!guard.stripped.length) return {};
+    LOG.warn('stripped context marker(s) before YAML frontmatter', { markers: guard.stripped }, 'StorageTools');
+    return { stripped: guard.stripped, note: FM_STAMP_NOTE };
+}
+
+// ============================================
 // Tool definitions
 // ============================================
 
@@ -103,7 +150,7 @@ const TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'storage_write',
-            description: `${SERVER_EXEC_NOTE}\n\nWrite a file to workshop storage — FULL-FILE REPLACEMENT. "content" must be the ENTIRE file content, not a section. Writing a partial update destroys all other content. For targeted edits use storage_replace; for adding to the end use storage_append. Parent directories are created automatically. Self-verifying: the file is re-statted after writing and the verified byte count is returned.`,
+            description: `${SERVER_EXEC_NOTE}\n\nWrite a file to workshop storage — FULL-FILE REPLACEMENT. "content" must be the ENTIRE file content, not a section. Writing a partial update destroys all other content. For targeted edits use storage_replace; for adding to the end use storage_append. Parent directories are created automatically. Self-verifying: the file is re-statted after writing and the verified byte count is returned.\n\nNever prepend timestamps, chunk labels or any other bracketed context marker to file content — the chat stamps context automatically, and a marker before a YAML frontmatter block breaks the document. Frontmatter (if any) must open at line 1 with exactly "---". Leading markers are stripped and reported.`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -212,22 +259,27 @@ async function execute(name, args, deps = {}) {
         case 'storage_write': {
             if (typeof args.content !== 'string') throw new Error('storage_write: content (string) required');
             const abs = safeResolve(args.path);
+            const guard = stripFrontmatterMarkers(args.content);
             const backup = backupIfExists(abs, args.path);
             fs.mkdirSync(path.dirname(abs), { recursive: true });
-            fs.writeFileSync(abs, args.content, 'utf8');
+            fs.writeFileSync(abs, guard.content, 'utf8');
             const out = statOut(abs);
             LOG.info('storage_write', { path: args.path, bytes: out.bytes }, 'StorageTools');
-            return jsonResult({ ok: true, path: args.path, ...(backup ? { previousVersion: backup } : {}), ...out });
+            return jsonResult({ ok: true, path: args.path, ...(backup ? { previousVersion: backup } : {}), ...out, ...guardFields(guard) });
         }
 
         case 'storage_append': {
             if (typeof args.content !== 'string') throw new Error('storage_append: content (string) required');
             const abs = safeResolve(args.path);
+            // Frontmatter guard only when this append CREATES the file — a
+            // marker prepended to an existing journal is a legitimate stamp.
+            const fresh = !fs.existsSync(abs) || fs.statSync(abs).size === 0;
+            const guard = fresh ? stripFrontmatterMarkers(args.content) : { content: args.content, stripped: [] };
             fs.mkdirSync(path.dirname(abs), { recursive: true });
-            fs.appendFileSync(abs, args.content, 'utf8');
+            fs.appendFileSync(abs, guard.content, 'utf8');
             const out = statOut(abs);
             LOG.info('storage_append', { path: args.path, bytes: out.bytes }, 'StorageTools');
-            return jsonResult({ ok: true, path: args.path, ...out });
+            return jsonResult({ ok: true, path: args.path, ...out, ...guardFields(guard) });
         }
 
         case 'storage_list': {
@@ -285,11 +337,12 @@ async function execute(name, args, deps = {}) {
             } else {
                 next = content.slice(0, idx) + replacement + content.slice(idx + effectiveMarker.length);
             }
+            const guard = stripFrontmatterMarkers(next);
             const backup = backupIfExists(abs, args.path);
-            fs.writeFileSync(abs, next, 'utf8');
+            fs.writeFileSync(abs, guard.content, 'utf8');
             const out = statOut(abs);
             LOG.info('storage_replace', { path: args.path, occurrence, bytes: out.bytes }, 'StorageTools');
-            return jsonResult({ ok: true, path: args.path, occurrence, ...(backup ? { previousVersion: backup } : {}), ...out });
+            return jsonResult({ ok: true, path: args.path, occurrence, ...(backup ? { previousVersion: backup } : {}), ...out, ...guardFields(guard) });
         }
 
         case 'storage_delete': {
