@@ -205,6 +205,17 @@
                                 <textarea rows="6" placeholder="Optional system instructions..."></textarea>
                             </nui-textarea>
                         </div>
+
+                        <!-- App — reload the page in place. An installed web app
+                             (iOS home screen) has no browser reload button, so a
+                             wedged client or freshly shipped code could otherwise
+                             not be picked up without deleting and re-adding it. -->
+                        <div class="sidebar-section">
+                            <label>App</label>
+                            <nui-button id="reload-app-btn" variant="outline">
+                                <button type="button"><nui-icon name="sync"></nui-icon>Reload App</button>
+                            </nui-button>
+                        </div>
                     </div>
                     
                     <!-- TTS Tab -->
@@ -321,6 +332,28 @@
                                     <button type="button">Cancel</button>
                                 </nui-button>
                             </div>
+                            <!-- Assistant Dock — desktop addon bar docked above input-row -->
+                            <div class="assistant-dock" id="assistant-dock" hidden>
+                                <div class="assistant-dock-status">
+                                    <span class="assistant-pulse-orb" id="assistant-dock-orb" data-state="listening"></span>
+                                    <span class="assistant-dock-state" id="assistant-dock-state">Listening</span>
+                                </div>
+                                <div class="assistant-dock-transcript" id="assistant-dock-transcript" title="Live speech transcript">
+                                    <span class="transcript-placeholder">Speak naturally…</span>
+                                </div>
+                                <div class="assistant-dock-activity" id="assistant-dock-activity" hidden></div>
+                                <div class="assistant-dock-actions">
+                                    <nui-button id="assistant-dock-stop-btn" class="icon-only" title="Interrupt / Stop speech">
+                                        <button type="button" aria-label="Stop"><nui-icon name="pause"></nui-icon></button>
+                                    </nui-button>
+                                    <nui-button id="assistant-dock-expand-btn" class="icon-only" title="Full hands-free view">
+                                        <button type="button" aria-label="Expand"><nui-icon name="open_in_full"></nui-icon></button>
+                                    </nui-button>
+                                    <nui-button id="assistant-dock-exit-btn" class="icon-only" title="Exit assistant mode">
+                                        <button type="button" aria-label="Exit"><nui-icon name="close"></nui-icon></button>
+                                    </nui-button>
+                                </div>
+                            </div>
                             <!-- Input Row -->
                             <div class="input-row">
                                 <div id="overall-context-progress-wrap" class="context-progress-wrap">
@@ -346,26 +379,61 @@
                             <input type="file" id="file-input" accept="image/*" multiple hidden>
                             <input type="file" id="import-chat-input" accept=".json" hidden>
                         </footer>
-                        <!-- Assistant mode — phone-first hands-free overlay over the whole pane.
-                             Direct child of .chat-pane (position: relative): inset:0 must pin to
-                             the pane, NOT to the footer (position: relative there would shrink it
-                             to the composer box and push all content below the fold). -->
+                        <!-- Assistant mode — phone-first dedicated hands-free overlay.
+                             Direct child of .chat-pane (position: relative): inset:0 pins to
+                             the pane. Full screen on mobile or when expanded from desktop dock. -->
                         <div class="assistant-view" id="assistant-view" hidden>
-                            <nui-button id="assistant-exit-btn" class="icon-only assistant-exit" title="Exit assistant mode">
-                                <button type="button" aria-label="Exit assistant mode"><nui-icon name="close"></nui-icon></button>
-                            </nui-button>
-                            <div class="assistant-state" id="assistant-state">LISTENING</div>
-                            <div class="assistant-hint" id="assistant-hint">say "ok kimi"</div>
-                            <div class="assistant-text" id="assistant-text"></div>
-                            <div class="assistant-actions" id="assistant-actions" hidden>
-                                <nui-button id="assistant-discard-btn" title="Discard">
-                                    <button type="button">Discard</button>
+                            <div class="assistant-view-header">
+                                <nui-button id="assistant-collapse-btn" class="icon-only" title="Show chat history">
+                                    <button type="button" aria-label="Show chat"><nui-icon name="chat"></nui-icon></button>
                                 </nui-button>
-                                <nui-button id="assistant-send-btn" variant="primary" title="Send">
-                                    <button type="button">Send</button>
+                                <div class="assistant-view-title">Hands-Free Assistant</div>
+                                <nui-button id="assistant-exit-btn" class="icon-only assistant-exit" title="Exit assistant mode">
+                                    <button type="button" aria-label="Exit assistant mode"><nui-icon name="close"></nui-icon></button>
                                 </nui-button>
                             </div>
-                            <div class="assistant-reply" id="assistant-reply"></div>
+
+                            <div class="assistant-hero">
+                                <div class="assistant-orb-container">
+                                    <div class="assistant-orb" id="assistant-orb" data-state="listening">
+                                        <div class="orb-ring ring-1"></div>
+                                        <div class="orb-ring ring-2"></div>
+                                        <div class="orb-core">
+                                            <nui-icon id="assistant-orb-icon" name="headphones"></nui-icon>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="assistant-state" id="assistant-state">LISTENING</div>
+                                <div class="assistant-hint" id="assistant-hint">Speak naturally — say "stop" to interrupt</div>
+                            </div>
+
+                            <div class="assistant-transcript-box">
+                                <div class="assistant-transcript-label">You</div>
+                                <div class="assistant-text" id="assistant-text"></div>
+                            </div>
+
+                            <!-- Working state: what the assistant is doing right now
+                                 (thinking preview / tool name / writing). Keeps a long
+                                 multi-tool turn from reading as silence. -->
+                            <div class="assistant-activity" id="assistant-activity" hidden>
+                                <span class="assistant-activity-spinner"></span>
+                                <span class="assistant-activity-text" id="assistant-activity-text"></span>
+                            </div>
+
+                            <!-- Tool log: one line per tool call this turn, the mobile
+                                 counterpart of the desktop tool bubbles. -->
+                            <div class="assistant-tool-log" id="assistant-tool-log" hidden></div>
+
+                            <div class="assistant-reply-box">
+                                <div class="assistant-reply-label">Assistant</div>
+                                <div class="assistant-reply" id="assistant-reply"></div>
+                            </div>
+
+                            <div class="assistant-mobile-controls">
+                                <nui-button id="assistant-stop-btn" variant="outline" title="Interrupt / Stop">
+                                    <button type="button"><nui-icon name="pause"></nui-icon> Stop</button>
+                                </nui-button>
+                            </div>
                         </div>
                     </div>
                     

@@ -937,99 +937,537 @@ nui-code pre {
     color: var(--color-highlight);
 }
 
-/* Assistant mode — phone-first hands-free overlay over the chat pane.
-   Big state word, big utterance text, big touch targets: built for a phone
-   lying on the table, not for reading at arm's length. */
+/* Assistant Dock — Desktop addon bar docked above composer */
+.assistant-dock {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-space-half);
+    padding: calc(var(--nui-space-quarter) * 1.5) var(--nui-space-half);
+    margin-bottom: var(--nui-space-half);
+    background: var(--color-shade2);
+    border: var(--border-thickness) solid var(--border-shade1);
+    border-radius: var(--border-radius2);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    animation: assistant-slide-up 0.2s ease-out;
+}
+
+.assistant-dock[hidden] {
+    display: none;
+}
+
+@keyframes assistant-slide-up {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.assistant-dock-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.2rem 0.6rem;
+    background: var(--color-shade3);
+    border-radius: 999px;
+    flex-shrink: 0;
+}
+
+.assistant-pulse-orb {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-highlight);
+    display: inline-block;
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.assistant-pulse-orb[data-state="listening"] {
+    background: #4caf50;
+    box-shadow: 0 0 6px #4caf50aa;
+    animation: orb-breathe 2s infinite ease-in-out;
+}
+
+.assistant-pulse-orb[data-state="transcribing"] {
+    background: #ff9800;
+    box-shadow: 0 0 8px #ff9800cc;
+    animation: orb-pulse 0.8s infinite ease-in-out;
+}
+
+.assistant-pulse-orb[data-state="evaluating"] {
+    background: #2196f3;
+    box-shadow: 0 0 8px #2196f3cc;
+    animation: orb-pulse 0.6s infinite ease-in-out;
+}
+
+.assistant-pulse-orb[data-state="speaking"] {
+    background: var(--nui-accent, #ab47bc);
+    box-shadow: 0 0 8px var(--nui-accent, #ab47bcaa);
+    animation: orb-wave 1.2s infinite ease-in-out;
+}
+
+.assistant-pulse-orb[data-state="ducked"] {
+    background: #ffb74d;
+    box-shadow: 0 0 4px #ffb74daa;
+}
+
+.assistant-pulse-orb[data-state="interrupted"],
+.assistant-pulse-orb[data-state="off"] {
+    background: var(--text-color-dim);
+    box-shadow: none;
+    animation: none;
+}
+
+.assistant-dock-state {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-color-dim);
+}
+
+.assistant-dock-transcript {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--font-size-small);
+    color: var(--text-color);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-inline: 0.25rem;
+}
+
+.assistant-dock-transcript .transcript-placeholder {
+    color: var(--color-text-muted);
+    font-style: italic;
+}
+
+/* Live activity in the dock: what the assistant is doing right now. */
+.assistant-dock-activity {
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 40%;
+    font-size: var(--font-size-xsmall);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-inline: 0.5rem;
+    border-inline-start: var(--border-thickness) solid var(--border-shade1);
+}
+
+.assistant-dock-activity[hidden] {
+    display: none;
+}
+
+.assistant-dock-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+}
+
+@keyframes orb-breathe {
+    0%, 100% { transform: scale(1); opacity: 0.8; }
+    50% { transform: scale(1.3); opacity: 1; }
+}
+
+@keyframes orb-pulse {
+    0%, 100% { transform: scale(0.9); opacity: 0.7; }
+    50% { transform: scale(1.4); opacity: 1; }
+}
+
+@keyframes orb-wave {
+    0% { transform: scale(1); opacity: 0.7; }
+    50% { transform: scale(1.35); opacity: 1; }
+    100% { transform: scale(1); opacity: 0.7; }
+}
+
+/* Assistant mode — phone-first dedicated hands-free overlay over the chat pane.
+   Centered breathing orb, big typography, readable at table distance. */
 .assistant-view {
     position: absolute;
     inset: 0;
     z-index: 30;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 2rem 1.25rem;
+    background: var(--color-base);
+    /* A fixed frame, not a scrolling page: the controls must never be pushed
+       off-screen by a long reply, so scrolling lives in the panels below.
+       Safe-area aware — on a notched phone a plain padding left the content
+       hard against the edge, and `inset: 0` can sit slightly wider than the
+       visual viewport, so horizontal overflow is clipped rather than scrolled. */
+    box-sizing: border-box;
+    max-width: 100%;
+    padding-block: 1rem calc(1rem + env(safe-area-inset-bottom, 0px));
+    padding-inline: calc(1.25rem + env(safe-area-inset-left, 0px))
+                    calc(1.25rem + env(safe-area-inset-right, 0px));
     gap: 0.75rem;
-    background: var(--color-shade1);
-    text-align: center;
-    overflow-y: auto;
+    overflow: hidden;
+    animation: assistant-fade-in 0.25s ease-out;
+}
+
+@keyframes assistant-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 .assistant-view[hidden] {
     display: none;
 }
 
-.assistant-exit {
-    position: absolute;
-    top: 0.75rem;
-    right: 0.75rem;
+.assistant-view-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    flex-shrink: 0;
 }
 
-.assistant-state {
-    margin-top: 8vh;
-    font-size: clamp(2rem, 8vw, 3.5rem);
-    font-weight: 700;
-    letter-spacing: 0.04em;
+.assistant-view-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
     color: var(--text-color-dim);
 }
 
-.assistant-view[data-state="capturing"] .assistant-state,
-.assistant-view[data-state="awake"] .assistant-state {
-    color: var(--color-highlight);
+.assistant-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-top: 2vh;
+    flex-shrink: 0;
 }
 
-.assistant-view[data-state="speaking"] .assistant-state {
-    color: var(--nui-accent, var(--color-highlight));
+.assistant-orb-container {
+    width: 120px;
+    height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    margin-bottom: 1rem;
+}
+
+.assistant-orb {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-shade2);
+    border: 2px solid var(--border-shade2);
+    transition: all 0.3s ease;
+}
+
+.assistant-orb .orb-core {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-highlight);
+    font-size: 2rem;
+    z-index: 2;
+}
+
+.assistant-orb .orb-ring {
+    position: absolute;
+    inset: -12px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    opacity: 0;
+    transition: all 0.3s ease;
+}
+
+.assistant-orb .orb-ring.ring-2 {
+    inset: -24px;
+}
+
+/* State-specific Orb Styling */
+.assistant-orb[data-state="listening"] {
+    border-color: #4caf50;
+    box-shadow: 0 0 20px #4caf5044;
+}
+.assistant-orb[data-state="listening"] .orb-core {
+    color: #81c995;
+}
+.assistant-orb[data-state="listening"] .orb-ring.ring-1 {
+    border-color: #4caf5055;
+    animation: orb-ring-expand 2.5s infinite ease-out;
+}
+
+.assistant-orb[data-state="transcribing"] {
+    border-color: #ff9800;
+    box-shadow: 0 0 25px #ff980066;
+}
+.assistant-orb[data-state="transcribing"] .orb-core {
+    color: #ffb74d;
+}
+.assistant-orb[data-state="transcribing"] .orb-ring.ring-1 {
+    border-color: #ff980077;
+    animation: orb-ring-expand 1.2s infinite ease-out;
+}
+.assistant-orb[data-state="transcribing"] .orb-ring.ring-2 {
+    border-color: #ff980033;
+    animation: orb-ring-expand 1.2s infinite ease-out 0.4s;
+}
+
+.assistant-orb[data-state="evaluating"] {
+    border-color: #2196f3;
+    box-shadow: 0 0 25px #2196f366;
+}
+.assistant-orb[data-state="evaluating"] .orb-core {
+    color: #64b5f6;
+    animation: orb-spin 2s linear infinite;
+}
+
+.assistant-orb[data-state="speaking"] {
+    border-color: var(--nui-accent, #ab47bc);
+    box-shadow: 0 0 30px var(--nui-accent, #ab47bc66);
+}
+.assistant-orb[data-state="speaking"] .orb-core {
+    color: var(--nui-accent, #ce93d8);
+}
+.assistant-orb[data-state="speaking"] .orb-ring.ring-1 {
+    border-color: var(--nui-accent, #ab47bc77);
+    animation: orb-ring-expand 1.4s infinite ease-out;
+}
+.assistant-orb[data-state="speaking"] .orb-ring.ring-2 {
+    border-color: var(--nui-accent, #ab47bc33);
+    animation: orb-ring-expand 1.4s infinite ease-out 0.5s;
+}
+
+.assistant-orb[data-state="ducked"] {
+    border-color: #ffb74d;
+    box-shadow: 0 0 15px #ffb74d44;
+}
+
+/* Interrupted — the turn was cut off. Muted, stopped, unmistakable. */
+.assistant-orb[data-state="interrupted"] {
+    border-color: var(--color-error, #d32f2f);
+    box-shadow: 0 0 12px rgba(211, 47, 47, 0.35);
+    animation: none;
+}
+
+.assistant-orb[data-state="interrupted"] .orb-core {
+    color: var(--color-error, #ef5350);
+}
+
+.assistant-orb[data-state="interrupted"] .orb-ring {
+    opacity: 0;
+    animation: none;
+}
+
+.assistant-view[data-state="interrupted"] .assistant-state {
+    color: var(--color-error, #ef5350);
+}
+
+@keyframes orb-ring-expand {
+    0% { transform: scale(0.85); opacity: 0.8; }
+    100% { transform: scale(1.3); opacity: 0; }
+}
+
+@keyframes orb-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.assistant-state-badge {
+    font-size: clamp(1.4rem, 5vw, 2rem);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--text-color);
+    text-transform: uppercase;
 }
 
 .assistant-hint {
-    font-size: 1.05rem;
+    font-size: 0.95rem;
     color: var(--text-color-dim);
+    margin-top: 0.25rem;
     min-height: 1.4em;
+    text-align: center;
 }
 
 .assistant-hint.error {
     color: var(--color-error, #d32f2f);
 }
 
+.assistant-transcript-box,
+.assistant-reply-box {
+    /* border-box: these declare width:100% AND carry padding + border. Sized
+       content-box they overflowed the frame by exactly their padding (41px on a
+       390px phone), which clipped the right edge — `overflow: hidden` on the
+       frame hid the scrollbar without fixing the lost content. */
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 44rem;
+    margin-inline: auto;
+    background: var(--color-shade1);
+    border: var(--border-thickness) solid var(--border-shade1);
+    border-radius: var(--border-radius2);
+    padding: 1rem 1.25rem;
+    text-align: left;
+    /* Flex children so the panel can scroll its own contents instead of
+       growing and shoving the controls down the screen. */
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* The utterance is usually short — cap it so a rambling one cannot eat the
+   reply's space, and let it scroll itself. */
+.assistant-transcript-box {
+    flex: 0 1 auto;
+    max-height: 24vh;
+    overflow-y: auto;
+}
+
+/* The reply takes whatever is left and scrolls inside its own box. */
+.assistant-reply-box {
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+/* Activity strip — the working indicator that makes a long tool turn visible. */
+.assistant-activity {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    max-width: 44rem;
+    margin-inline: auto;
+    padding: 0.6rem 1.25rem;
+    background: var(--color-shade2);
+    border: var(--border-thickness) solid var(--border-shade1);
+    border-radius: var(--border-radius2);
+    font-size: var(--font-size-small);
+    color: var(--text-color-dim);
+    flex-shrink: 0;
+}
+
+.assistant-activity[hidden] {
+    display: none;
+}
+
+.assistant-activity-spinner {
+    flex-shrink: 0;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 50%;
+    border: 2px solid var(--border-shade2);
+    border-top-color: var(--color-highlight);
+    animation: assistant-spin 0.9s linear infinite;
+}
+
+@keyframes assistant-spin {
+    to { transform: rotate(360deg); }
+}
+
+.assistant-activity-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Tool log — compact lines, one per tool call this turn. */
+.assistant-tool-log {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 44rem;
+    margin-inline: auto;
+    max-height: 18vh;
+    overflow-y: auto;
+    font-size: var(--font-size-xsmall);
+    color: var(--text-color-dim);
+    flex-shrink: 0;
+}
+
+.assistant-tool-log[hidden] {
+    display: none;
+}
+
+.assistant-tool-log .tool-log-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.2rem 0.25rem;
+    border-bottom: var(--border-thickness) solid var(--border-shade1);
+}
+
+.assistant-tool-log .tool-log-name {
+    font-weight: 600;
+    color: var(--text-color);
+    flex-shrink: 0;
+}
+
+.assistant-tool-log .tool-log-status {
+    color: var(--color-text-muted);
+}
+
+.assistant-tool-log .tool-log-preview {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.assistant-transcript-label,
+.assistant-reply-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-color-dim);
+    margin-bottom: 0.5rem;
+}
+
 .assistant-text {
-    font-size: clamp(1.35rem, 5vw, 2.2rem);
+    font-size: clamp(1.2rem, 4vw, 1.8rem);
     line-height: 1.35;
-    max-width: 42rem;
+    color: var(--text-color);
+    min-height: 2em;
     white-space: pre-wrap;
 }
 
-.assistant-text:empty {
-    display: none;
-}
-
-.assistant-actions {
-    display: flex;
-    gap: 1rem;
-    margin-top: 0.5rem;
-}
-
-.assistant-actions[hidden] {
-    display: none;
-}
-
-.assistant-actions button {
-    font-size: 1.15rem;
-    padding: 0.75rem 1.75rem;
+.assistant-text:empty::before {
+    content: "Listening for speech…";
+    color: var(--color-text-muted);
+    font-style: italic;
 }
 
 .assistant-reply {
-    margin-top: auto;
-    padding-top: 1.5rem;
-    font-size: 1.05rem;
+    font-size: clamp(1rem, 3.5vw, 1.3rem);
     line-height: 1.5;
     color: var(--text-color-dim);
-    max-width: 42rem;
+    min-height: 2.5em;
     white-space: pre-wrap;
-    cursor: pointer;
+    /* Its own scroll, filling the box — `max-height` here fought the flex layout
+       and left the control row below the fold on a phone. */
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
-.assistant-reply:empty {
-    display: none;
+.assistant-reply:empty::before {
+    content: "Replies appear here…";
+    color: var(--color-text-muted);
+    font-style: italic;
+}
+
+.assistant-mobile-controls {
+    display: flex;
+    justify-content: center;
+    padding-top: 0.25rem;
+    width: 100%;
+    /* Pinned: the frame does not scroll, so this row is always on screen. */
+    flex-shrink: 0;
+}
+
+.assistant-mobile-controls button {
+    font-size: 1.15rem;
+    padding: 0.8rem 2.5rem;
 }
 
 .input-row {

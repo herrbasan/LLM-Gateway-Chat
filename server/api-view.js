@@ -38,6 +38,24 @@ function withTimestamp(content, createdAt) {
     return formatMessageTs(createdAt) + clean;
 }
 
+// Input-source tag (2026-09-20). Voice formatting is a per-MESSAGE property, not
+// a per-session one: a hands-free turn deserves spoken prose, the next typed turn
+// deserves normal formatting, and one blanket session block made the model answer
+// everything in speech style. Only the SPEAKING case is tagged — an untagged user
+// message is typed by definition, so the common case pays no tokens for a tag it
+// does not need.
+//
+// The tag goes AFTER the timestamp, preserving the convention every other message
+// follows (`[ts] …`). Inserted by position rather than by call order so it cannot
+// end up leading the line if the two helpers are ever composed differently.
+const VOICE_TAG = '[voice] ';
+const TS_PREFIX = /^(\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*)/;
+function withInputSource(content, msg) {
+    if (!content || msg?.voice !== true) return content;
+    const m = content.match(TS_PREFIX);
+    return m ? m[1] + VOICE_TAG + content.slice(m[1].length) : VOICE_TAG + content;
+}
+
 // Strip base64 data from tool args for API messages
 function sanitizeToolArgs(args) {
     if (!args || typeof args !== 'object') return args;
@@ -194,7 +212,7 @@ function buildApiMessages(messages, options = {}) {
                 ? atts.filter(att => att.dataUrl || att.url || att._file)
                 : [];
 
-            const cleanUserContent = withTimestamp(msg.content, msg.createdAt);
+            const cleanUserContent = withInputSource(withTimestamp(msg.content, msg.createdAt), msg);
 
             if (validAttachments.length > 0) {
                 const gatewayImageUrls = validAttachments
@@ -369,4 +387,4 @@ function buildApiMessages(messages, options = {}) {
     return { messages: merged, chunkTable: new Map(), chunkContents: new Map(), chunkStats: null, rawMessages: merged };
 }
 
-module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef };
+module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, withInputSource, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef };

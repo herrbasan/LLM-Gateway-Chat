@@ -28,6 +28,11 @@ const { Readable } = require('stream');
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const HANDSHAKE_TIMEOUT_MS = 10000;
 const MAX_HANDSHAKE_BYTES = 16384;
+// REST legs must settle or the client hangs in 'connecting' forever: the SDK
+// awaits the session fetch before it opens the WS, and a crash-restarting nVoice
+// can accept the socket without ever answering. The WS handshake is already
+// bounded (HANDSHAKE_TIMEOUT_MS) — this is the same guarantee for REST.
+const REST_TIMEOUT_MS = 8000;
 
 const WS_PATHS = new Set(['/v1/realtime/ws', '/v1/wakeword/ws']);
 const REST_PATHS = new Set(['GET /v1/realtime/sessions', 'POST /v1/audio/cleanup']);
@@ -50,7 +55,7 @@ function createRelay({ cfg, getAuthUser, requireAuth, L }) {
             return;
         }
 
-        const init = { method: req.method, headers: {} };
+        const init = { method: req.method, headers: {}, signal: AbortSignal.timeout(REST_TIMEOUT_MS) };
         if (req.method !== 'GET' && req.method !== 'HEAD') {
             const chunks = [];
             for await (const chunk of req) chunks.push(chunk);
@@ -62,9 +67,14 @@ function createRelay({ cfg, getAuthUser, requireAuth, L }) {
         try {
             upstream = await fetch(sttBase() + upstreamPath + url.search, init);
         } catch (e) {
-            L().warn('STT proxy: nVoice unreachable', { error: e.message }, 'STT');
-            res.writeHead(502, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `nVoice unreachable: ${e.message}` }));
+            const timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
+            if (timedOut) {
+                L().warn('STT proxy: nVoice REST timeout', { path: upstreamPath, timeoutMs: REST_TIMEOUT_MS }, 'STT');
+            } else {
+                L().warn('STT proxy: nVoice unreachable', { error: e.message }, 'STT');
+            }
+            res.writeHead(timedOut ? 504 : 502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: timedOut ? `nVoice timed out after ${REST_TIMEOUT_MS}ms` : `nVoice unreachable: ${e.message}` }));
             return;
         }
 

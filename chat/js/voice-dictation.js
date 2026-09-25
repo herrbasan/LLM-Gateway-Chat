@@ -15,6 +15,9 @@ export function createVoiceDictation() {
     let client = null;
     let state = 'idle'; // idle | connecting | recording | cleaning
     let cancelPending = false;
+    // Set while WE are tearing the session down, so the SDK's 'disconnected'
+    // event is not mistaken for a lost connection.
+    let discarding = false;
     let audioDeviceId = null; // STT settings tab — applied to the next session
     const listeners = {};
     const emit = (ev, data) => (listeners[ev] || []).slice().forEach((cb) => cb(data));
@@ -35,21 +38,62 @@ export function createVoiceDictation() {
             else emit('provisional', { text: d.text });
         });
         client.on('error', (e) => emit('error', { error: e?.message || String(e) }));
-        try {
-            await client.start(); // includes the mic-permission prompt — can sit for a while
-        } catch (e) {
-            // start() can fail AFTER the mic was granted (e.g. relay down on the
-            // session fetch) — disconnect or the track stays open and the
-            // browser's mic indicator never goes out.
+        // A dropped socket (nVoice restart, iOS suspending a home-screen app) used
+        // to leave dictation stuck in 'recording' with the mic button dead, and
+        // the only way out was a page reload — which an installed web app does not
+        // offer. Notice it, say so, and return to idle so a tap retries.
+        client.on('disconnected', () => {
+            if (state === 'idle' || state === 'cleaning') return;  // our own teardown
+            if (discarding) return;
+            const wasRecording = state === 'recording';
             client?.disconnect();
             client = null;
             state = 'idle';
             emit('state', { state });
-            throw e;
+            emit('error', {
+                error: wasRecording
+                    ? 'Voice connection lost — nothing was transcribed. Tap the mic to start again'
+                    : 'Voice connection lost — tap the mic to retry',
+            });
+        });
+        try {
+            await client.start(); // includes the mic-permission prompt — can sit for a while
+        } catch (e) {
+            // Same stale-device case as the assistant: the SDK requests a saved mic
+            // with `deviceId: { exact: ... }`, and a device that is gone (routine on
+            // iOS, where device ids are not stable) throws OverconstrainedError.
+            // Retry on the default mic, loudly, rather than leaving dictation dead.
+            const staleDevice = e?.name === 'OverconstrainedError' && !!audioDeviceId;
+            if (staleDevice) {
+                client.setAudioDevice(null);
+                audioDeviceId = null;
+                try {
+                    await client.start();
+                } catch (e2) {
+                    discarding = true;
+                    client?.disconnect();
+                    client = null;
+                    discarding = false;
+                    state = 'idle';
+                    emit('state', { state });
+                    throw e2;
+                }
+                emit('error', { error: 'Saved microphone unavailable — using the default mic' });
+            } else {
+                discarding = true;
+                client?.disconnect();
+                client = null;
+                discarding = false;
+                state = 'idle';
+                emit('state', { state });
+                throw e;
+            }
         }
         if (cancelPending) { // cancelled while the permission prompt was open
+            discarding = true;
             client.disconnect();
             client = null;
+            discarding = false;
             state = 'idle';
             emit('state', { state });
             return;
@@ -73,7 +117,9 @@ export function createVoiceDictation() {
         try {
             if (raw) cleaned = await c.cleanup(raw, 'clean');
         } finally {
+            discarding = true;
             c.disconnect();
+            discarding = false;
         }
         state = 'idle';
         emit('state', { state });
@@ -83,8 +129,10 @@ export function createVoiceDictation() {
     function cancel() {
         if (state === 'idle' || state === 'cleaning') return;
         if (state === 'connecting') { cancelPending = true; return; }
+        discarding = true;
         client?.disconnect();
         client = null;
+        discarding = false;
         state = 'idle';
         emit('state', { state });
     }

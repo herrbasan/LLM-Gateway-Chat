@@ -112,10 +112,14 @@ function buildMcpResourceContext(resources = [], templates = []) {
 
 const MEMORY_REMINDER = '\n\n## Memory Tools — Use Proactively\n\nThis chat app has persistent memory. Start every session with `memory.overview` to see what is already known, then use the tools below.\n\n- `memory.overview` — See your current memory map and top-priority facts. Run this at the start of each session.\n- `memory.store` — Save anything useful: user preferences, project facts, decisions, failures, plans, context. Store aggressively.\n- `memory.recall` — Search memory by meaning. Use before big decisions or when you need prior context.\n- `memory.get` — Retrieve one specific memory by ID.\n- `memory.list` — Browse all memories, optionally filtered by category.\n- `memory.update` / `memory.forget` — Edit or remove outdated memories.\n\nGuideline: Begin with `memory.overview`. If something would help future-you give a better answer, store it. If you need prior context, recall it.';
 
-const VOICE_MODE_BLOCK = '\n\n## VOICE MODE — Hands-Free Assistant\n\nThis conversation is in hands-free voice mode: the user SPEAKS their messages and LISTENS to your replies read aloud — they usually cannot see the screen. Write every reply for the ear:\n\n- Plain prose only. No markdown, lists, tables, code blocks, emoji, or URLs. If you need structure, use short spoken-style sentences ("First ... Then ... Finally ...").\n- Keep it short. Spoken time is expensive — answer the point, skip preamble and recap. If a full answer is long, give the headline and offer to go deeper.\n- Never reference anything visual: no "as shown above", "see the image", "click", or pointing at formatting.\n- Write for speech: spell out numbers, dates, and abbreviations the way they should be read aloud.\n- If a request genuinely needs a visual artifact (code, a document, a table), say so in one sentence and offer to prepare it for later viewing — do not dump it into the reply.';
+// Input-source tags (2026-09-20). Was a session-wide VOICE_MODE_BLOCK: it told
+// the model the WHOLE conversation was spoken, so every reply came back as short
+// unformatted prose even when the user typed. Format now follows the SOURCE OF
+// THE MESSAGE, which api-view stamps per message.
+const INPUT_SOURCE_BLOCK = '\n\n## INPUT SOURCE TAGS — voice vs typed\n\nEvery user message is tagged with how it was produced:\n\n- `[voice] ` — the user SPOKE it. They are hands-free and will HEAR your reply read aloud; assume they cannot see the screen for that turn.\n- no tag — the user TYPED it on a screen and is reading your reply.\n\nMatch your reply to the tag on the LATEST user message:\n\n- `[voice]` — write for the ear. Plain prose only: no markdown, lists, tables, code blocks, emoji or URLs. No visual references ("as shown above", "see the link"). Spell numbers, dates and abbreviations the way they should be said. Keep it short — the point first, preamble and recap skipped; if the full answer is long, give the headline and offer to go deeper. If a request genuinely needs a visual artifact (code, a document, a table), say so in one sentence and offer to prepare it for later viewing instead of dumping it into the reply.\n- untagged — answer normally, with whatever structure the answer needs: markdown, lists, tables, code blocks are all fine.\n\nThe tag is PER MESSAGE, not a mode for the conversation: a voice message does not make later typed messages spoken, and do not carry spoken style into a typed answer.';
 
 function buildSystemPrompt(ctx = {}) {
-    const { instructions = '', user = {}, sessionPrompt = '', archiveTools = null, mcpResources = null, memoryToolsAvailable = false, substrate = null, voiceMode = false } = ctx;
+    const { instructions = '', user = {}, sessionPrompt = '', archiveTools = null, mcpResources = null, memoryToolsAvailable = false, substrate = null, voiceInput = false } = ctx;
     const metadata = buildMetadataPrefix(user, substrate);
 
     let prompt = instructions ? `${instructions}\n\n${metadata}` : metadata;
@@ -123,8 +127,8 @@ function buildSystemPrompt(ctx = {}) {
         prompt = `${prompt}\n\n${sessionPrompt.trim()}`;
     }
 
-    if (voiceMode) {
-        prompt += VOICE_MODE_BLOCK;
+    if (voiceInput) {
+        prompt += INPUT_SOURCE_BLOCK;
     }
 
     if (archiveTools) {

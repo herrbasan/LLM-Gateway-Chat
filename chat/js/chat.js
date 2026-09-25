@@ -189,12 +189,25 @@ const elements = {
     assistantHint: document.getElementById('assistant-hint'),
     assistantText: document.getElementById('assistant-text'),
     assistantReply: document.getElementById('assistant-reply'),
-    assistantActions: document.getElementById('assistant-actions'),
-    assistantSendBtn: document.getElementById('assistant-send-btn'),
-    assistantDiscardBtn: document.getElementById('assistant-discard-btn'),
     assistantExitBtn: document.getElementById('assistant-exit-btn'),
+    assistantCollapseBtn: document.getElementById('assistant-collapse-btn'),
+    assistantStopBtn: document.getElementById('assistant-stop-btn'),
+    assistantOrb: document.getElementById('assistant-orb'),
+    assistantOrbIcon: document.getElementById('assistant-orb-icon'),
+    assistantDock: document.getElementById('assistant-dock'),
+    assistantDockState: document.getElementById('assistant-dock-state'),
+    assistantDockOrb: document.getElementById('assistant-dock-orb'),
+    assistantDockTranscript: document.getElementById('assistant-dock-transcript'),
+    assistantDockActivity: document.getElementById('assistant-dock-activity'),
+    assistantActivity: document.getElementById('assistant-activity'),
+    assistantActivityText: document.getElementById('assistant-activity-text'),
+    assistantToolLog: document.getElementById('assistant-tool-log'),
+    assistantDockStopBtn: document.getElementById('assistant-dock-stop-btn'),
+    assistantDockExpandBtn: document.getElementById('assistant-dock-expand-btn'),
+    assistantDockExitBtn: document.getElementById('assistant-dock-exit-btn'),
     fileInput: document.getElementById('file-input'),
     importChatInput: document.getElementById('import-chat-input'),
+    reloadAppBtn: document.getElementById('reload-app-btn'),
     importChatBtn: document.getElementById('import-chat-btn'),
     attachmentPreview: document.getElementById('attachment-preview'),
     newChatBtn: document.getElementById('new-chat-btn'),
@@ -349,18 +362,26 @@ function attachRunnerEvents(chatId) {
     if (runnerViews.has(chatId)) return; // idempotent — background chats keep their stream
 
     const container = getOrCreateContainer(chatId);
-    const view = { es: null, running: false, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '', toolBubbles: new Map(), phase: 'Working…', phaseStart: 0, tickTimer: null } };
+    const view = { es: null, running: false, scrollToBottomOnRender: true, streaming: { exchangeId: null, el: null, content: '', reasoningContent: '', toolBubbles: new Map(), phase: 'Working…', phaseStart: 0, tickTimer: null } };
     runnerViews.set(chatId, view);
 
     view.es = runnerClient.attach(chatId, {
         snapshot(snap) {
             const conv = activeConversations.get(chatId);
             if (!conv) return;
+            // A chat that is being OPENED lands at its newest message. Consumed
+            // here, so the post-mutation re-renders (edit/delete) keep whatever
+            // position the reader had instead of yanking them to the bottom.
+            const scrollAfterRender = !!view.scrollToBottomOnRender;
+            view.scrollToBottomOnRender = false;
             conv.exchanges = messagesToExchanges(snap.messages || []);
             // Full re-render (initial attach OR post-mutation refresh/edit).
             _vsDeactivate(container);
             container.replaceChildren();
-            buildHistoricalDomForChat(conv, container).then(() => _vsActivateWhenReady(container));
+            buildHistoricalDomForChat(conv, container).then(() => {
+                if (scrollAfterRender) scrollToBottom(container);
+                _vsActivateWhenReady(container, scrollAfterRender ? () => scrollToBottom(container) : null);
+            });
             if (snap.lastRun?.context) updateOverallContext(snap.lastRun.context);
             _stashContextReport(chatId, { history: snap.contextHistory || [], retirements: snap.meta?.retirements || {} });
             // Authoritative run state — covers a run that started before attach.
@@ -378,6 +399,7 @@ function attachRunnerEvents(chatId) {
         'msg.user'(d) { _runnerUser(chatId, d); },
         'msg.deleted'(d) { _runnerDeleted(chatId, d); },
         'run.end'(d) { _runnerRunEnd(chatId, d); },
+        'run.retry'(d) { _runnerRunRetry(chatId, d); },
         'run.status'(d) { _runnerStatus(chatId, d); },
         'chat.progress'(d) { _runnerChatProgress(chatId, d); },
         'run.state'(d) {
@@ -435,6 +457,10 @@ function _runnerRunStart(chatId, d) {
     scrollToBottom(container);
     _startWaitingTicker(chatId);
     _showActivity('Working…');
+    if (_isAssistantTurn(chatId)) {
+        assistantToolLogClear();
+        assistant.setActivity('Thinking…');
+    }
 }
 
 function _runnerStatus(chatId, d) {
@@ -490,11 +516,39 @@ function _runnerChatProgress(chatId, d) {
     }));
 }
 
+// True when this chat is the visible conversation driven by assistant mode.
+function _isAssistantTurn(chatId) {
+    return !!assistant.running && chatId === assistantChatId && chatId === currentChatId;
+}
+
+// One-line preview of streamed reasoning for the activity strip.
+function _assistantThinking(text) {
+    const clean = String(text || '')
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/[*_`#>]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!clean) return '';
+    return `Thinking: ${clean.length > 160 ? '…' + clean.slice(-160) : clean}`;
+}
+
 function _runnerDelta(chatId, d) {
     const s = _runnerStreaming(chatId);
     if (!s.el) return;
-    if (d.content !== undefined) s.content += d.content;
-    if (d.reasoningContent !== undefined) s.reasoningContent += d.reasoningContent;
+    if (d.content !== undefined) {
+        s.content += d.content;
+        if (_isAssistantTurn(chatId)) {
+            assistant.pushReply(d.content);
+            // Strip the model's mimicked timestamp label from the displayed reply
+            // too — it is not part of what the assistant actually said.
+            if (elements.assistantReply) elements.assistantReply.textContent = assistant.stripTimestamps(s.content);
+        }
+    }
+    if (d.reasoningContent !== undefined) {
+        s.reasoningContent += d.reasoningContent;
+        // Mobile-only: on desktop the chat renders the thinking block already.
+        if (_isAssistantTurn(chatId)) assistant.setActivity(_assistantThinking(s.reasoningContent), { desktop: false });
+    }
     if (s._pending) return;
     s._pending = true;
     const el = s.el;
@@ -522,7 +576,10 @@ function _runnerAssistant(chatId, msg) {
             ex.assistant.streamStats = msg.streamStats || null;
             ex.assistant.model = msg.model || ex.assistant.model || null;
             ex.assistant.embedStatus = msg.embedStatus || 'pending';
-            if (msg.error) ex.assistant.error = true;
+            if (msg.error) {
+                ex.assistant.error = true;
+                ex.assistant.retryable = msg.retryable !== false;
+            }
             ex.assistant.isComplete = true;
             ex.assistant.isStreaming = false;
             ex._asstMsgId = msg.id || null;
@@ -535,10 +592,9 @@ function _runnerAssistant(chatId, msg) {
         finalizeAssistantElement(s.el, s.exchangeId, msg.usage, msg.context, msg.streamStats, conv);
         forceFinalizeMarkdownStream(s.el, msg.content || '', msg.reasoning_content || null);
     }
-    // Assistant mode: auto-speak the reply — the hands-free loop closes. Only
-    // the visible chat speaks (a background chat's run finishing stays silent).
+    // Assistant mode: update the full reply text in the dedicated surface
     if (msg.content && !msg.error && chatId === assistantChatId && chatId === currentChatId) {
-        assistantSpeak(msg.content);
+        if (elements.assistantReply) elements.assistantReply.textContent = assistant.stripTimestamps(msg.content);
     }
 }
 
@@ -553,6 +609,19 @@ function _runnerRunEnd(chatId, d) {
     if (d.finishReason === 'aborted' && s.el) {
         showError(s.el, 'Stopped');
         forceFinalizeMarkdownStream(s.el, s.content, s.reasoningContent);
+    }
+    if (_isAssistantTurn(chatId) && chainDone) {
+        // Flush the tail sentence into the player FIRST, then close the turn —
+        // endTurn decides between 'still speaking' and 'listening' from what is
+        // actually still queued.
+        //
+        // Only when the CHAIN is done: run.end also fires for a tool_calls hop,
+        // where the model stopped mid-answer to call a tool. Flushing there spoke
+        // a truncated fragment and marked the turn finished while the model was
+        // still working; the rest of the reply then arrived as a second run.
+        assistant.flushReply();
+        assistant.setActivity('');
+        assistant.endTurn();
     }
     if (d.context) { updateOverallContext(d.context); _appendContextTurn(chatId, d.context); }
     markChatAsStreaming(chatId, false);
@@ -585,6 +654,16 @@ function _teardownView(chatId) {
         container.remove();
         chatContainers.delete(chatId);
     }
+}
+
+// The runner is retrying a transient gateway failure: clear the dead attempt's
+// partial deltas from the bubble — the retry regenerates from scratch. The
+// phase text ("Retry 2/3 — calling model…") comes via run.status.
+function _runnerRunRetry(chatId, d) {
+    const s = _runnerStreaming(chatId);
+    s.content = '';
+    s.reasoningContent = '';
+    if (s.el) updateAssistantContent(s.el, '', null);
 }
 
 function _runnerError(chatId, d) {
@@ -661,6 +740,10 @@ function _runnerToolStart(chatId, d) {
 
     s.toolBubbles.set(d.toolCallId, { el, exchange });
     _setActivityPhase('Running tool…');
+    if (_isAssistantTurn(chatId)) {
+        assistantToolLogAdd(d.name, 'running…');
+        assistant.setActivity(`Using ${d.name || 'a tool'}…`);
+    }
 }
 
 // tool.progress — live MCP progress notifications (notifications/progress
@@ -700,6 +783,10 @@ function _runnerToolEnd(chatId, d) {
 
     _runnerFinalizeTool(el, status, d.resultMessage || '', d.resultImages || []);
     s.toolBubbles.delete(d.toolCallId);
+    if (_isAssistantTurn(chatId)) {
+        assistantToolLogUpdate(d.name, status === 'error' ? 'failed' : 'done');
+        assistant.setActivity('');
+    }
 }
 
 // Build a tool bubble in "Running" state (matches the retired handleToolExecution
@@ -2178,7 +2265,10 @@ async function startDictation() {
     } catch (e) {
         dictateSnapshot = null;
         const msg = e?.message || String(e);
-        dictationError(/session|fetch|network|503|502/i.test(msg) ? 'Voice backend unavailable' : `Mic error: ${msg}`);
+        dictationError(
+            /session|fetch|network|503|502/i.test(msg) ? 'Voice backend unavailable'
+            : /OverconstrainedError/i.test(msg) ? 'Microphone unavailable — pick another in Settings → STT'
+            : `Mic error: ${msg}`);
     }
 }
 
@@ -2234,59 +2324,159 @@ if (!window.isSecureContext && elements.dictateBtn) {
 }
 
 // ============================================
-// Assistant Mode — hands-free, phone-first overlay. Per-conversation toggle
-// (session.assistantMode, PATCH-persisted; the system prompt carries the
-// voice block server-side while on). One global voice session owned by the
-// visible chat. "ok kimi" → listen → capture → send/stop/cancel; replies
-// auto-speak; "ok kimi" during speech barges in.
+// Assistant Mode — reactive hands-free turn-taking mode.
+// Per-conversation toggle (session.assistantMode, PATCH-persisted; system
+// prompt carries the voice block server-side while on).
+// Responsive presentation:
+//   - Desktop: Compact assistant dock above composer, chat history fully interactive
+//   - Mobile: Dedicated immersive hands-free surface with central pulsating orb
+// Automatic turn-taking gauntlet via nVoice SDK v1.1+ + streaming lookahead sentence TTS.
 // ============================================
 
 const assistant = createVoiceAssistant();
 let assistantChatId = null;   // chat owning the live voice session (one global)
 let assistantUiState = 'listening';
+// null = auto (immersive on mobile, dock on desktop), true = forced immersive,
+// false = forced dock. Collapsing on a phone must land somewhere that still has
+// a way back — the dock carries the expand button.
+let assistantImmersiveMode = null;
+let assistantActivityText2 = '';
+let assistantActivityDesktop = true;
 let wakeLock = null;
 
 const ASSISTANT_STATES = {
-    listening:  ['LISTENING',  'say "ok kimi"'],
-    starting:   ['STARTING',   'opening mic + wake detector…'],
-    awake:      ['AWAKE',      'say "listen" to start'],
-    capturing:  ['CAPTURING',  '"ok kimi send" delivers · "ok kimi stop" holds · "ok kimi cancel" discards'],
-    processing: ['PROCESSING', 'cleaning…'],
-    held:       ['REVIEW',     'send or discard — or say "ok kimi send"'],
-    speaking:   ['SPEAKING',   'say "ok kimi" to interrupt'],
+    off:           ['OFF',          'Assistant disabled', 'headphones'],
+    starting:      ['STARTING',     'Opening microphone and connecting…', 'sync'],
+    listening:     ['LISTENING',    'Speak naturally — say "stop" to interrupt', 'headphones'],
+    transcribing:  ['LISTENING',    'Hearing you…', 'headphones'],
+    thinking:      ['WORKING',      'Working on your request…', 'sync'],
+    speaking:      ['SPEAKING',     'Assistant speaking (say "stop" to interrupt)', 'volume'],
+    ducked:        ['DUCKED',       'Listening… (audio lowered)', 'headphones'],
+    interrupted:   ['INTERRUPTED',  'Stopped — go ahead', 'pause'],
 };
 
-function renderAssistantState(state) {
+function renderAssistantState(state, customHint) {
     assistantUiState = state;
-    const [word, hint] = ASSISTANT_STATES[state] || ASSISTANT_STATES.listening;
-    elements.assistantView.dataset.state = state;
-    elements.assistantState.textContent = word;
-    elements.assistantHint.textContent = hint;
-    elements.assistantHint.classList.remove('error');
+    const [word, defaultHint, iconName] = ASSISTANT_STATES[state] || ASSISTANT_STATES.listening;
+    const hint = customHint || defaultHint;
+
+    // Mobile / immersive view
+    if (elements.assistantView) elements.assistantView.dataset.state = state;
+    if (elements.assistantState) elements.assistantState.textContent = word;
+    if (elements.assistantHint) {
+        elements.assistantHint.textContent = hint;
+        elements.assistantHint.classList.remove('error');
+    }
+    if (elements.assistantOrb) elements.assistantOrb.dataset.state = state;
+    if (elements.assistantOrbIcon && iconName) elements.assistantOrbIcon.setAttribute('name', iconName);
+
+    // Desktop dock view
+    if (elements.assistantDock) elements.assistantDock.dataset.state = state;
+    if (elements.assistantDockOrb) elements.assistantDockOrb.dataset.state = state;
+    if (elements.assistantDockState) elements.assistantDockState.textContent = word;
+}
+
+// What the assistant is doing right now — shown in both surfaces. Without it a
+// long multi-tool turn is indistinguishable from a frozen screen.
+// `desktop` gates the dock only: the chat already renders the thinking block, so
+// the reasoning PREVIEW is mobile-only to avoid showing it twice on desktop.
+function renderAssistantActivity(text, desktop = true) {
+    const shown = String(text || '').trim();
+    assistantActivityText2 = shown;
+    assistantActivityDesktop = desktop;
+    if (elements.assistantActivityText) elements.assistantActivityText.textContent = shown;
+    if (elements.assistantActivity) elements.assistantActivity.hidden = !shown;
+    if (elements.assistantDockActivity) {
+        elements.assistantDockActivity.textContent = desktop ? shown : '';
+        elements.assistantDockActivity.hidden = !(shown && desktop);
+    }
+}
+
+// Tool log — the mobile counterpart of the desktop tool bubbles. One line per
+// tool call, appended live and cleared when the next turn begins.
+function assistantToolLogAdd(name, status) {
+    const box = elements.assistantToolLog;
+    if (!box) return;
+    const line = document.createElement('div');
+    line.className = 'tool-log-line';
+    if (name) line.dataset.tool = name;
+    const nameEl = document.createElement('span');
+    nameEl.className = 'tool-log-name';
+    nameEl.textContent = name || 'tool';
+    const statusEl = document.createElement('span');
+    statusEl.className = 'tool-log-status';
+    statusEl.textContent = status || '';
+    line.append(nameEl, statusEl);
+    box.append(line);
+    box.hidden = false;
+    box.scrollTop = box.scrollHeight;
+}
+
+function assistantToolLogUpdate(name, status) {
+    const box = elements.assistantToolLog;
+    if (!box || !name) return;
+    const lines = box.querySelectorAll('.tool-log-line');
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].dataset.tool === name && !lines[i].dataset.done) {
+            lines[i].dataset.done = '1';
+            const statusEl = lines[i].querySelector('.tool-log-status');
+            if (statusEl) statusEl.textContent = status || 'done';
+            return;
+        }
+    }
+}
+
+function assistantToolLogClear() {
+    const box = elements.assistantToolLog;
+    if (!box) return;
+    box.replaceChildren();
+    box.hidden = true;
 }
 
 // Transient inline error on the hint line — never a modal.
 function assistantError(message) {
-    elements.assistantHint.textContent = message;
-    elements.assistantHint.classList.add('error');
+    if (elements.assistantHint) {
+        elements.assistantHint.textContent = message;
+        elements.assistantHint.classList.add('error');
+    }
+    if (elements.assistantDockTranscript) {
+        elements.assistantDockTranscript.textContent = message;
+    }
     setTimeout(() => {
-        if (elements.assistantHint.classList.contains('error')) renderAssistantState(assistantUiState);
+        if (elements.assistantHint?.classList.contains('error')) {
+            renderAssistantState(assistantUiState);
+        }
     }, 6000);
 }
 
 function renderAssistantChrome() {
     const meta = chatHistory.conversations.find(c => c.id === currentChatId);
     const on = !!(meta && meta.assistantMode);
-    elements.assistantView.hidden = !on;
+    const isMobile = window.matchMedia('(max-width: 640px)').matches;
+    const useImmersive = assistantImmersiveMode === true || (assistantImmersiveMode === null && isMobile);
+
     elements.assistantBtn?.classList.toggle('active', on);
-    if (on && !assistant.running) {
-        // Mode persisted but no live session (page load, or a dead session):
-        // the mic needs a user gesture — the overlay itself is the button.
-        elements.assistantView.dataset.state = 'off';
-        elements.assistantState.textContent = 'ASSISTANT';
-        elements.assistantHint.textContent = 'tap anywhere to start';
+
+    if (!on) {
+        if (elements.assistantDock) elements.assistantDock.hidden = true;
+        if (elements.assistantView) elements.assistantView.hidden = true;
+        return;
+    }
+
+    if (elements.assistantView) elements.assistantView.hidden = !useImmersive;
+    if (elements.assistantDock) elements.assistantDock.hidden = useImmersive;
+    // Re-apply the activity split for whichever surface is now showing.
+    renderAssistantActivity(assistantActivityText2, assistantActivityDesktop);
+
+    if (!assistant.running) {
+        renderAssistantState('off', 'Tap to start assistant');
     }
 }
+
+// Responsive listener for mobile viewport changes
+window.matchMedia('(max-width: 640px)').addEventListener('change', () => {
+    renderAssistantChrome();
+});
 
 async function requestWakeLock() {
     releaseWakeLock();
@@ -2295,7 +2485,13 @@ async function requestWakeLock() {
     document.addEventListener('visibilitychange', reWakeOnVisible);
 }
 function reWakeOnVisible() {
-    if (document.visibilityState === 'visible' && assistantChatId) requestWakeLock();
+    if (document.visibilityState === 'visible' && assistantChatId) {
+        requestWakeLock();
+        // iOS kills a backgrounded home-screen app's socket, and the close event
+        // may never arrive — so verify on return and heal, silently. Reloading is
+        // not an option when the app is installed to the home screen.
+        assistant.recoverIfDead();
+    }
 }
 function releaseWakeLock() {
     try { wakeLock?.release(); } catch { /* already released */ }
@@ -2303,20 +2499,29 @@ function releaseWakeLock() {
     document.removeEventListener('visibilitychange', reWakeOnVisible);
 }
 
-let _assistantTtsWired = false;
-function wireAssistantTts() {
-    if (_assistantTtsWired || !tts) return;
-    _assistantTtsWired = true;
-    tts.on('state', ({ state }) => {
-        if (state === 'idle' && assistantUiState === 'speaking') renderAssistantState('listening');
-    });
+// The engine/voice the assistant should speak with, resolved fresh from the TTS
+// settings at the start of every turn (fail loud — a silent fallback to a
+// different engine is how "I picked F5 but it speaks Kokoro" happens).
+function resolveAssistantTtsVoice() {
+    if (!tts?.resolveVoice) {
+        console.warn('[assistant] TTS controller unavailable — cannot resolve engine/voice');
+        return null;
+    }
+    const resolved = tts.resolveVoice('A');
+    if (!resolved?.voice) {
+        console.warn('[assistant] TTS resolved no voice — speech will fail until the catalog loads');
+        return null;
+    }
+    console.log('[assistant] TTS voice:', resolved.model, '/', resolved.voice);
+    return { model: resolved.model, voice: resolved.voice, speed: tts.speed };
 }
 
 async function startAssistantSession(chatId) {
     if (assistantChatId === chatId && assistant.running) return;
     stopAssistantSession();
+
     try {
-        await assistant.start();
+        await assistant.start({ getTtsVoice: resolveAssistantTtsVoice });
     } catch (e) {
         // Mic/backend failure — do not leave a dead mode persisted.
         const meta = chatHistory.conversations.find(c => c.id === chatId);
@@ -2326,13 +2531,18 @@ async function startAssistantSession(chatId) {
         dictationError(/session|fetch|network|503|502/i.test(msg) ? 'Voice backend unavailable' : `Mic error: ${msg}`);
         return;
     }
+
     assistantChatId = chatId;
     requestWakeLock();
-    wireAssistantTts();
-    elements.assistantText.textContent = '';
-    elements.assistantReply.textContent = '';
-    elements.assistantActions.hidden = true;
+    if (elements.assistantText) elements.assistantText.textContent = '';
+    if (elements.assistantReply) elements.assistantReply.textContent = '';
+    renderAssistantActivity('');
+    assistantToolLogClear();
+    if (elements.assistantDockTranscript) {
+        elements.assistantDockTranscript.innerHTML = '<span class="transcript-placeholder">Speak naturally…</span>';
+    }
     renderAssistantState('listening');
+    renderAssistantChrome();
     loadSttDevices(); // permission granted → device labels available now
 }
 
@@ -2341,59 +2551,18 @@ function stopAssistantSession() {
     assistant.stop();
     assistantChatId = null;
     releaseWakeLock();
-}
-
-// Mobile autoplay policy: programmatic audio (our SSE-triggered TTS replies)
-// is blocked unless a media play happened inside a user gesture on this
-// document. The assistant's own gestures (toggle tap, tap-to-start, reply tap)
-// are the unlock points — play a silent snippet there once.
-let _audioUnlocked = false;
-function _silentWavDataUri() {
-    // 100ms of 8kHz mono 8-bit PCM silence (0x80 = zero amplitude) — built in
-    // code, no asset, always valid WAV.
-    const n = 800;
-    const buf = new Uint8Array(44 + n);
-    const v = new DataView(buf.buffer);
-    const wstr = (o, s) => { for (let i = 0; i < s.length; i++) buf[o + i] = s.charCodeAt(i); };
-    wstr(0, 'RIFF'); v.setUint32(4, 36 + n, true); wstr(8, 'WAVE');
-    wstr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-    v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 8000, true);
-    v.setUint16(32, 1, true); v.setUint16(34, 8, true);
-    wstr(36, 'data'); v.setUint32(40, n, true);
-    buf.fill(0x80, 44);
-    let bin = '';
-    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-    return 'data:audio/wav;base64,' + btoa(bin);
-}
-function unlockAudioPlayback() {
-    if (_audioUnlocked) return;
-    _audioUnlocked = true;
-    try {
-        new Audio(_silentWavDataUri()).play().catch(() => { _audioUnlocked = false; });
-    } catch { _audioUnlocked = false; }
-}
-
-function assistantSpeak(text) {
-    elements.assistantReply.textContent = text;
-    renderAssistantState('speaking');
-    if (!tts) { renderAssistantState('listening'); return; }
-    ttsPlayer?.reveal();
-    tts.speak(text, elements.assistantView);
-    // Autoplay-blocked watchdog (phones): the vendored player swallows the
-    // play() rejection, so detect the silence ourselves and offer a retry —
-    // the reply tap is a gesture and will play.
-    setTimeout(() => {
-        const a = tts?._speechPlayer?.audio;
-        if (a && a.paused && !a.ended && assistantUiState === 'speaking') {
-            assistantError('Audio blocked — tap the reply to play it');
-        }
-    }, 2500);
+    renderAssistantChrome();
 }
 
 async function sendAssistantMessage(text) {
     const chatId = assistantChatId;
     const content = (text || '').trim();
-    if (!chatId || !content || !currentModel) return;
+    // Every early return must close the turn — the controller marked itself busy
+    // when the gauntlet accepted this turn, and nothing else will unmark it.
+    if (!chatId || !content || !currentModel) {
+        assistant.endTurn();
+        return;
+    }
     const container = getOrCreateContainer(chatId);
     container?.querySelector('.welcome-message')?.remove();
     const conv = activeConversations.get(chatId);
@@ -2410,7 +2579,10 @@ async function sendAssistantMessage(text) {
     if (effort && effort !== 'default') sendBody.reasoning_effort = effort;
 
     const res = await runnerClient.send(chatId, sendBody);
-    if (!res.ok) assistantError(res.data?.error || `send failed (${res.status})`);
+    if (!res.ok) {
+        assistantError(res.data?.error || `send failed (${res.status})`);
+        assistant.endTurn();
+    }
 }
 
 async function setAssistantMode(chatId, on) {
@@ -2421,9 +2593,6 @@ async function setAssistantMode(chatId, on) {
     chatHistory._saveList(); // PATCH → session doc + mounted-runner sync (voice block)
     renderAssistantChrome();
     if (on) {
-        // The session start can take seconds (first-ever wake-model load on the
-        // worker) — show the overlay with a STARTING state before awaiting, or
-        // the toggle looks dead.
         renderAssistantState('starting');
         await startAssistantSession(chatId);
     } else {
@@ -2432,67 +2601,140 @@ async function setAssistantMode(chatId, on) {
     }
 }
 
-assistant.on('state', ({ state }) => {
-    if (state === 'awake' && tts?.isActive()) tts.stop(); // barge-in
-    renderAssistantState(state);
-    if (state === 'listening') {
-        elements.assistantText.textContent = '';
-        elements.assistantActions.hidden = true;
+// Wire assistant controller events
+// States that mean a turn is in progress. Only leaving one of these for
+// 'listening' should clear the transcript — a watchdog reset from 'listening'
+// must not wipe the words the user is still speaking.
+const ASSISTANT_TURN_STATES = new Set(['thinking', 'speaking', 'ducked', 'interrupted']);
+let assistantPrevState = null;
+
+function assistantClearTurnSurfaces() {
+    renderAssistantActivity('');
+    if (elements.assistantText) elements.assistantText.textContent = '';
+    if (elements.assistantDockTranscript) {
+        elements.assistantDockTranscript.innerHTML = '<span class="transcript-placeholder">Speak naturally…</span>';
+    }
+}
+
+assistant.on('state', ({ state, hint }) => {
+    const wasTurn = ASSISTANT_TURN_STATES.has(assistantPrevState);
+    renderAssistantState(state, hint);
+    if (state === 'off' || (state === 'listening' && wasTurn)) assistantClearTurnSurfaces();
+    assistantPrevState = state;
+});
+
+assistant.on('activity', ({ text, desktop }) => renderAssistantActivity(text, desktop));
+
+assistant.on('transcript', ({ text, isFinal }) => {
+    if (elements.assistantText) elements.assistantText.textContent = text || '';
+    if (elements.assistantDockTranscript) {
+        if (text) {
+            elements.assistantDockTranscript.textContent = text;
+        } else {
+            elements.assistantDockTranscript.innerHTML = '<span class="transcript-placeholder">Speak naturally…</span>';
+        }
     }
 });
-assistant.on('capture', ({ text }) => { elements.assistantText.textContent = text; });
-assistant.on('hold', ({ text }) => {
-    elements.assistantText.textContent = text;
-    elements.assistantActions.hidden = false;
-});
+
 assistant.on('message', async ({ text }) => {
-    elements.assistantActions.hidden = true;
-    elements.assistantText.textContent = text;
+    if (elements.assistantText) elements.assistantText.textContent = text;
+    if (elements.assistantReply) elements.assistantReply.textContent = '';
+    if (elements.assistantDockTranscript) {
+        elements.assistantDockTranscript.textContent = text;
+    }
     await sendAssistantMessage(text);
 });
-assistant.on('cancel', () => {
-    elements.assistantText.textContent = '';
-    elements.assistantActions.hidden = true;
+
+assistant.on('bargeIn', () => {
+    // User interrupted via keyword (e.g. "stop") — abort runner if currently streaming
+    if (assistantChatId && runnerViews.get(assistantChatId)?.running) {
+        runnerClient.abort(assistantChatId);
+    }
 });
+
 assistant.on('error', ({ error }) => assistantError(error));
 
+// Reload the app in place. The one affordance an installed web app lacks: on iOS
+// a home-screen app has no browser reload button, so a wedged client or newly
+// shipped code had no way in short of deleting and re-adding the icon. Voice
+// sessions are ended first so the microphone is released before the page goes.
+elements.reloadAppBtn?.addEventListener('click', () => {
+    try { stopAssistantSession(); } catch { /* nothing to end */ }
+    if (dictation.state !== 'idle') { try { cancelDictation(); } catch { /* already gone */ } }
+    location.reload();
+});
+
+// Header button toggle. While the mode is ON and the immersive view is
+// collapsed on a phone, this button REOPENS it rather than turning the mode off
+// — the affordance to get the mobile view back must be one that is always on
+// screen, not something inside the surface that was just dismissed.
 elements.assistantBtn?.addEventListener('click', () => {
-    unlockAudioPlayback();
+    assistant.primeTts();
     const meta = chatHistory.conversations.find(c => c.id === currentChatId);
     if (!meta) return;
+    const isMobile = window.matchMedia('(max-width: 640px)').matches;
+    const immersiveHidden = !!elements.assistantView?.hidden;
+    if (meta.assistantMode && isMobile && immersiveHidden) {
+        assistantImmersiveMode = true;
+        renderAssistantChrome();
+        return;
+    }
     setAssistantMode(currentChatId, !meta.assistantMode);
 });
+
+// Exit buttons
 elements.assistantExitBtn?.addEventListener('click', (e) => {
-    e.stopPropagation(); // or the bubbling view click restarts the session
+    e.stopPropagation();
     setAssistantMode(currentChatId, false);
 });
-// Tap-to-start: the overlay itself is the gesture when the mode is on but no
-// session is live (page load, dead session).
+elements.assistantDockExitBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setAssistantMode(currentChatId, false);
+});
+
+// View switching — collapse lands on the dock, which carries the expand button,
+// so the immersive view is always reopenable (including on a phone).
+elements.assistantCollapseBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    assistantImmersiveMode = false;
+    renderAssistantChrome();
+});
+elements.assistantDockExpandBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    assistantImmersiveMode = true;
+    renderAssistantChrome();
+});
+
+// Stop / interrupt buttons — the tap equivalent of the stop word. Both go
+// through the same controller path so the behaviour cannot drift apart.
+function interruptAssistant() {
+    assistant.interrupt('user-tap');
+    if (assistantChatId && runnerViews.get(assistantChatId)?.running) {
+        runnerClient.abort(assistantChatId);
+    }
+}
+elements.assistantDockStopBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    interruptAssistant();
+});
+elements.assistantStopBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    interruptAssistant();
+});
+
+// Tap-to-start when assistant mode is enabled but nothing is live. Also the
+// manual recovery path: if the link died, the tap heals it rather than doing
+// nothing, which is the only in-app restart available to a home-screen app.
 elements.assistantView?.addEventListener('click', () => {
-    unlockAudioPlayback();
+    assistant.primeTts();
+    if (assistant.recoverIfDead()) return;   // healing — do not double-start
     if (!assistant.running) startAssistantSession(currentChatId);
 });
-elements.assistantSendBtn?.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const text = elements.assistantText.textContent;
-    assistant.releaseHeld();
-    elements.assistantActions.hidden = true;
-    renderAssistantState('listening');
-    await sendAssistantMessage(text);
-});
-elements.assistantDiscardBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    assistant.releaseHeld();
-    elements.assistantText.textContent = '';
-    elements.assistantActions.hidden = true;
-    renderAssistantState('listening');
-});
-elements.assistantReply?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    unlockAudioPlayback(); // the tap itself is the gesture that unblocks audio
-    if (tts?.isActive()) { tts.stop(); return; } // tap the reply to stop speech
-    const text = elements.assistantReply.textContent;
-    if (text) assistantSpeak(text); // blocked earlier → retry inside the gesture
+elements.assistantDock?.addEventListener('click', (e) => {
+    if (e.target.closest('button') || e.target.closest('nui-button')) return;
+    assistant.primeTts();
+    if (assistant.recoverIfDead()) return;
+    if (!assistant.running) startAssistantSession(currentChatId);
 });
 
 // Same secure-context rule as dictation — tap explains, not just grey.
@@ -2754,10 +2996,15 @@ function renderConversation() {
 }
 
 // Wait for nui-markdown/nui-code to finish rendering, then activate
-function _vsActivateWhenReady(container) {
+// `onDone` runs after the stage conversion — callers that must land at a
+// specific scroll position need the post-activation hook, because activation
+// re-lays-out the container (normal flow → absolutely positioned stage) and a
+// scroll applied before it does not survive.
+function _vsActivateWhenReady(container, onDone = null) {
     setTimeout(() => {
         requestAnimationFrame(() => {
             _vsActivate(container);
+            if (onDone) onDone();
         });
     }, 300);
 }
@@ -4233,6 +4480,29 @@ function hideCompactionIndicator(el) {
     }
 }
 
+// Failed run → Retry affordance on the error bubble: re-runs the pending
+// user turn server-side (drops the failure note, kicks the runner). Hidden
+// for notes the runner marked non-retryable (no-model, tool-hop cap) — their
+// remedy is not a re-run.
+function _attachRetryControl(el, retryable) {
+    if (el.querySelector('.retry-run')) return;
+    const actions = el.querySelector('.message-actions');
+    if (!actions) return;
+    const btn = document.createElement('nui-button');
+    btn.className = 'action-btn retry-run';
+    btn.title = 'Retry this run';
+    btn.innerHTML = '<button type="button"><nui-icon name="sync"></nui-icon></button>';
+    // Click can only originate from the visible chat — currentChatId at click
+    // time IS the conversation this bubble belongs to.
+    btn.addEventListener('click', () => {
+        runnerClient.retry(currentChatId).catch((err) => {
+            console.error('Retry failed', err);
+            nui.components.dialog.alert('Retry failed', err?.message || 'Unknown error');
+        });
+    });
+    if (retryable) actions.prepend(btn);
+}
+
 function showError(el, message) {
     const contentDiv = el.querySelector('.message-content');
     if (contentDiv) {
@@ -4254,7 +4524,10 @@ function showError(el, message) {
 function finalizeAssistantElement(el, exchangeId, usage = null, contextInfo = null, streamStats = null, conversationRef = null) {
     const convRef = conversationRef || conversation;
     const ex = convRef?.getExchange?.(exchangeId);
-    if (ex?.assistant?.error) el.classList.add('run-error');
+    if (ex?.assistant?.error) {
+        el.classList.add('run-error');
+        _attachRetryControl(el, ex.assistant.retryable !== false);
+    }
     el.dataset.isStreaming = 'false';
     // Remove waiting placeholder — the bubble is now complete or errored
     const waitingEl = el.querySelector('.assistant-waiting');
@@ -4625,9 +4898,16 @@ async function switchChat(targetChatId) {
         _teardownView(id);
     }
 
-    // 6. Activate virtual scroll after container is visible and web components settle
+    // 6. Activate virtual scroll after container is visible and web components settle.
+    //    Opening a chat always lands at the newest message: one scroll now (the
+    //    content is still in normal flow), one after activation re-lays-out the
+    //    container into its positioned stage. The view flag makes an async first
+    //    snapshot scroll too — this chat may have no content yet at this point.
+    const targetView = runnerViews.get(targetChatId);
+    if (targetView) targetView.scrollToBottomOnRender = true;
+    scrollToBottom(targetContainer);
     if (targetContainer.children.length > 0 && !targetContainer.querySelector('.vs-stage')) {
-        _vsActivateWhenReady(targetContainer);
+        _vsActivateWhenReady(targetContainer, () => scrollToBottom(targetContainer));
     }
 
     // Restore the system prompt
