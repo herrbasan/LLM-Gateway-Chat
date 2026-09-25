@@ -1985,6 +1985,25 @@ const routes = {
     }
   },
 
+  // Retry the last failed run: drops the trailing failure note(s) and re-kicks
+  // the chain (the pending user message is still in history).
+  'POST /api/chats/:id/retry': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    try {
+      const r = runner.getRunner(user, dbInstance, params.id);
+      if (r.running) {
+        json(res, { error: 'A run is already in progress.' }, 409, req);
+        return;
+      }
+      json(res, await r.retry(), 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 404, req);
+    }
+  },
+
   // ---- ArenaRunner (Phase D): server-owned autonomous arena ----
   // Start (or restart) the turn loop. Config is already on the session's
   // arenaConfig (set at creation); the body is optional overrides.
@@ -2406,7 +2425,14 @@ const server = http.createServer(async (req, res) => {
       // query on a module URL that other modules import by bare path creates a
       // SECOND module instance (app configures one copy, the other renders).
       // no-store removes both problems: every load gets the file on disk.
-      const CACHEABLE = !/^text\/|javascript|json/.test(mime);
+      //
+      // SVG counts as text here because SVG in this app is CODE, not content: the
+      // Material icon sprite is part of the UI, and the 1h cache it used to get
+      // meant a fixed sprite kept rendering stale for an hour (2026-09-20 — the
+      // mic icon was correct on disk and the browser served the broken copy).
+      // User media is served by the bucket route, which does its own caching, so
+      // nothing that genuinely benefits from a cache is affected.
+      const CACHEABLE = !/^text\/|javascript|json|svg/.test(mime);
       const headers = {
         'Content-Type': mime,
         'Cache-Control': CACHEABLE ? 'public, max-age=3600' : 'no-store'

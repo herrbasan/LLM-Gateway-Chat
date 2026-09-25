@@ -18,7 +18,7 @@
 
 // Event names the runner emits (server fan-out prefixes them with `r.`).
 const EVENT_NAMES = [
-    'snapshot', 'run.start', 'delta', 'tool.start', 'tool.end', 'tool.progress',
+    'snapshot', 'run.start', 'run.retry', 'delta', 'tool.start', 'tool.end', 'tool.progress',
     'msg.assistant', 'msg.user', 'msg.deleted',
     'run.end', 'run.status', 'error', 'embed.status', 'model.changed',
     'chat.progress'
@@ -131,6 +131,12 @@ function abort(chatId) {
     return _api('POST', `/api/chats/${chatId}/abort`);
 }
 
+// Retry the last failed run (the error bubble's Retry button). The server
+// drops the trailing failure note(s) and re-kicks the chain. → { status, ok }
+function retry(chatId) {
+    return _api('POST', `/api/chats/${chatId}/retry`);
+}
+
 // Delete one message (single-author write through the runner).
 function deleteMessage(chatId, messageId) {
     return _api('DELETE', `/api/chats/${chatId}/messages/${encodeURIComponent(messageId)}`);
@@ -150,4 +156,4 @@ function attachListEvents(handlers = {}) {
     return { close: () => { listHandlers.delete(handlers); } };
 }
 
-export const runnerClient = { attach, send, abort, deleteMessage, editMessage, attachListEvents };
+export const runnerClient = { attach, send, abort, retry, deleteMessage, editMessage, attachListEvents };

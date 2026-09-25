@@ -99,6 +99,22 @@ const TTFT_MS = 120000;
 const MAX_TOOL_HOPS_ATTENDED = 200;    // a client is attached (views.size > 0)
 const MAX_TOOL_HOPS_UNATTENDED = 100;  // headless — no view (the BFF case that bit us)
 
+// Transient-failure retry (VS Code Copilot-style): a gateway call that fails
+// with a TRANSIENT error (network blip, stall, TTFT timeout, 408/429/5xx) is
+// retried up to GATEWAY_ATTEMPTS times with linear backoff before the run
+// gives up. Deterministic rejections (400/401/403/404/422 — payload, auth,
+// model errors) never retry: the next attempt fails identically, so retrying
+// is pure waste. When all attempts are spent the run fails loudly as before,
+// and the persisted failure note gets the view's Retry affordance.
+const GATEWAY_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = 1500;
+
+// The HTTP statuses worth another attempt. Other 4xx are deterministic
+// rejections the next attempt would repeat verbatim.
+function isTransientStatus(status) {
+    return status === 408 || status === 429 || status >= 500;
+}
+
 // Pull a readable one-liner out of a gateway/provider error body. The gateway
 // wraps the provider's JSON inside its own message string (double-encoded), so
 // peel layers until the innermost "message" surfaces, then flatten whitespace.
@@ -273,13 +289,17 @@ class Runner {
     // reclaim, restart) got a quiet stop; this makes the failure part of the
     // conversation record. ⚠️ in the content makes it unmistakable; error:true
     // lets the view style the bubble.
-    async _persistFailureNote(detail, { atIdx = null, messageId = null, model = null } = {}) {
+    // retryable marks whether the view should offer the Retry affordance on
+    // this note (default true). Notes whose remedy is NOT a re-run pass false
+    // (no-model → pick a model; tool-hop cap → "continue", not "redo").
+    async _persistFailureNote(detail, { atIdx = null, messageId = null, model = null, retryable = true } = {}) {
         const msg = {
             conversationId: this.conversationId,
             role: 'assistant',
             content: `⚠️ ${detail}`,
             model: model || this.conv?.model || undefined,
-            error: true
+            error: true,
+            retryable
         };
         if (messageId) msg.id = messageId;
         const { message: stored } = atIdx !== null
@@ -497,7 +517,7 @@ class Runner {
                     const tier = this.views.size > 0 ? 'attended' : 'unattended';
                     DEPS.log().warn('Runner tool-hop cap reached', { chatId: this.conversationId, hops, tier, limit }, 'Runner');
                     this.broadcast('error', { code: 'tool-hop-cap', message: `Tool chain stopped after ${limit} hops (${tier}).` });
-                    await this._persistFailureNote(`Tool chain stopped after ${limit} hops (${tier}) — send "continue" to resume.`);
+                    await this._persistFailureNote(`Tool chain stopped after ${limit} hops (${tier}) — send "continue" to resume.`, { retryable: false });
                     break;
                 }
                 more = true;
@@ -534,9 +554,13 @@ class Runner {
             // (5-min TTL cache — same poll the model select uses) so the seat
             // knows its upstream, context window, vision, thinking levels.
             substrate: await this._substrateEntry(turnModel || this.pendingModel || this.session.model || null),
-            // Hands-free assistant mode (per-conversation meta) — the model
-            // answers for the ear (VOICE_MODE_BLOCK). Synced live by PATCH.
-            voiceMode: this.session.assistantMode === true
+            // Input-source tags (per message, 2026-09-20): include the block when
+            // this conversation HAS spoken turns — either because hands-free mode
+            // is on now, or because a voice message is already in the history
+            // (otherwise a later typed-only turn would leave `[voice]` tags in
+            // the payload with nothing explaining them).
+            voiceInput: this.session.assistantMode === true
+                || this.conv.messages.some(m => m.voice === true)
         });
         const { messages, chunkTable, chunkStats, chunkContents, rawMessages } = buildApiMessages(this.conv.messages, {
             systemPrompt,
@@ -725,7 +749,7 @@ class Runner {
         this.pendingModel = null;
         if (!model) {
             this.broadcast('error', { code: 'no-model', message: 'No model selected for this conversation.' });
-            await this._persistFailureNote('No model selected for this conversation — pick a model and resend.');
+            await this._persistFailureNote('No model selected for this conversation — pick a model and resend.', { retryable: false });
             this.broadcast('run.end', { finishReason: 'error', usage: null, context: null, aborted: false, messageId: null });
             return;
         }
@@ -813,70 +837,132 @@ class Runner {
             tools = tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision }));
             this._toolsAdvertised = tools.length > 0;
             this._mcpOrigin = mcpOrigin;
-            this.resetStallTimer();
-            this._ttftTimer = setTimeout(() => {
-                if (this.inFlight && !this.inFlight.firstDeltaAt && !this.inFlight.stalled) {
-                    this.inFlight.stalled = true;
-                    this.inFlight.ttftTimeout = true;
-                    DEPS.log().warn('Runner TTFT timeout', { chatId: this.conversationId, ms: TTFT_MS, model }, 'Runner');
-                    this.inFlight.controller.abort();
-                }
-            }, TTFT_MS);
-            this._status('streaming', 'Calling model…');
+            // ---- gateway call with transient-failure retry (Copilot-style) ----
+            // One request = one attempt. Transient failures (stall, TTFT, network,
+            // 408/429/5xx) loop; deterministic failures and user aborts break out
+            // immediately. A retry regenerates from scratch: the previous
+            // attempt's partial deltas are discarded and the view is told via
+            // run.retry to clear its bubble.
+            let attempt = 0;
+            while (true) {
+                attempt++;
+                // Fresh per-attempt state: a retry must not inherit the dead
+                // attempt's partial deltas or tripped stall flags — and the
+                // previous attempt's TTFT/stall timers must not fire into the
+                // new request (an uncleared TTFT timer would abort attempt N+1
+                // and misclassify it as a stall).
+                clearTimeout(this._stallTimer);
+                clearTimeout(this._ttftTimer);
+                Object.assign(this.inFlight, {
+                    content: '', reasoning_content: '', thinkingSignature: null,
+                    toolCalls: [], usage: null, context: null, finishReason: null,
+                    firstDeltaAt: null, stalled: false, ttftTimeout: false,
+                    streamError: null, controller: new AbortController()
+                });
+                this.resetStallTimer();
+                this._ttftTimer = setTimeout(() => {
+                    if (this.inFlight && !this.inFlight.firstDeltaAt && !this.inFlight.stalled) {
+                        this.inFlight.stalled = true;
+                        this.inFlight.ttftTimeout = true;
+                        DEPS.log().warn('Runner TTFT timeout', { chatId: this.conversationId, ms: TTFT_MS, model, attempt }, 'Runner');
+                        this.inFlight.controller.abort();
+                    }
+                }, TTFT_MS);
+                this._status('streaming', attempt === 1 ? 'Calling model…' : `Retry ${attempt}/${GATEWAY_ATTEMPTS} — calling model…`);
 
-            const resp = await fetch(`${DEPS.gatewayUrl}/v1/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {})
-                },
-                body: JSON.stringify({ model, messages: apiMessages, stream: true, session_id: this.conversationId, ...(tools.length ? { tools } : {}), ...(this.generationParams || {}) }),
-                signal: this.inFlight.controller.signal
-            });
-            if (!resp.ok) {
-                const text = await resp.text().catch(() => '');
-                // FAIL LOUD: a gateway non-2xx is a real error. Log it (nLogger) so
-                // it's never a silent hang, and broadcast to attached views.
-                DEPS.log().error('Gateway error', null, { chatId: this.conversationId, status: resp.status, body: text.slice(0, 1000) }, 'Runner');
-                // Debug capture: the exact payload that failed (thinking-contract hunts)
+                // Non-null → transient failure, loop for the next attempt.
+                let retryReason = null;
                 try {
-                    require('fs').writeFileSync(require('path').join(__dirname, '..', '_scratch', 'last-error-payload.json'),
-                        JSON.stringify({ status: resp.status, model, generationParams: this.generationParams, toolsCount: tools.length, messages: apiMessages }, null, 2));
-                } catch { /* debug only */ }
-                this.broadcast('error', { code: `gateway-${resp.status}`, message: `Gateway ${resp.status}`, raw: text.slice(0, 2000), exchangeId });
-                this.inFlight.errorDetail = `Gateway ${resp.status}: ${errorDetailFromBody(text, 'no error body')}`;
-                outcome = 'error';
-            } else {
-                await this.consume(resp);
-                outcome = this.abortRequested ? 'aborted' : (this.inFlight.finishReason || 'stop');
+                    const resp = await fetch(`${DEPS.gatewayUrl}/v1/chat/completions`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {})
+                        },
+                        body: JSON.stringify({ model, messages: apiMessages, stream: true, session_id: this.conversationId, ...(tools.length ? { tools } : {}), ...(this.generationParams || {}) }),
+                        signal: this.inFlight.controller.signal
+                    });
+                    if (!resp.ok) {
+                        const text = await resp.text().catch(() => '');
+                        // FAIL LOUD: a gateway non-2xx is a real error. Log it (nLogger) so
+                        // it's never a silent hang, and broadcast to attached views.
+                        DEPS.log().error('Gateway error', null, { chatId: this.conversationId, status: resp.status, attempt, body: text.slice(0, 1000) }, 'Runner');
+                        if (isTransientStatus(resp.status) && attempt < GATEWAY_ATTEMPTS) {
+                            retryReason = `gateway ${resp.status}`;
+                        } else {
+                            // Debug capture: the exact payload that failed (thinking-contract
+                            // hunts) — final failures only, retries would spam it.
+                            try {
+                                require('fs').writeFileSync(require('path').join(__dirname, '..', '_scratch', 'last-error-payload.json'),
+                                    JSON.stringify({ status: resp.status, model, generationParams: this.generationParams, toolsCount: tools.length, messages: apiMessages }, null, 2));
+                            } catch { /* debug only */ }
+                            this.broadcast('error', { code: `gateway-${resp.status}`, message: `Gateway ${resp.status}`, raw: text.slice(0, 2000), exchangeId });
+                            this.inFlight.errorDetail = `Gateway ${resp.status}: ${errorDetailFromBody(text, 'no error body')}`;
+                            outcome = 'error';
+                        }
+                    } else {
+                        await this.consume(resp);
+                        outcome = this.abortRequested ? 'aborted' : (this.inFlight.finishReason || 'stop');
+                    }
+                } catch (err) {
+                    if (this.abortRequested) {
+                        outcome = 'aborted';
+                    } else if (this.inFlight?.stalled) {
+                        const stallMsg = this.inFlight.ttftTimeout
+                            ? `No response from gateway within ${TTFT_MS / 1000}s — first token never arrived (hung request).`
+                            : `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`;
+                        DEPS.log().error('Runner stream stalled', null, { chatId: this.conversationId, ttft: this.inFlight.ttftTimeout === true, ms: this.inFlight.ttftTimeout ? TTFT_MS : STREAM_STALL_MS, attempt }, 'Runner');
+                        if (attempt < GATEWAY_ATTEMPTS) {
+                            retryReason = this.inFlight.ttftTimeout ? 'ttft-timeout' : 'stream-stall';
+                        } else {
+                            this.broadcast('error', { code: this.inFlight.ttftTimeout ? 'ttft-timeout' : 'stream-stall', message: stallMsg, exchangeId });
+                            this.inFlight.errorDetail = stallMsg;
+                            outcome = 'error';
+                        }
+                    } else if (err?.name === 'AbortError') {
+                        outcome = 'aborted';
+                    } else {
+                        // Surface the REAL cause — undici wraps a connection failure as
+                        // a bare "fetch failed" TypeError with the underlying reason in
+                        // err.cause (ECONNREFUSED / ECONNRESET / UND_ERR_CONNECT_TIMEOUT…).
+                        // Without it, "fetch failed" stops the run and hides why.
+                        const rootCause = err?.cause
+                            ? (err.cause?.message || err.cause?.code || String(err.cause))
+                            : undefined;
+                        DEPS.log().error('Runner stream error', { chatId: this.conversationId, error: err?.message, cause: rootCause, attempt }, 'Runner');
+                        const detail = rootCause ? `${err?.message || 'stream error'} — cause: ${rootCause}` : (err?.message || 'stream error');
+                        // A connection error WITH a cause is the network class —
+                        // transient, retry. A throw without one is something else
+                        // (bad URL, serialization) — deterministic, fail now.
+                        if (rootCause && attempt < GATEWAY_ATTEMPTS) {
+                            retryReason = rootCause;
+                        } else {
+                            this.broadcast('error', { code: 'stream', message: detail, exchangeId });
+                            this.inFlight.errorDetail = detail;
+                            outcome = 'error';
+                        }
+                    }
+                }
+                if (!retryReason) break;
+                DEPS.log().warn('Transient gateway failure — retrying', { chatId: this.conversationId, attempt, attempts: GATEWAY_ATTEMPTS, reason: retryReason }, 'Runner');
+                this.broadcast('run.retry', { exchangeId, attempt, attempts: GATEWAY_ATTEMPTS, reason: retryReason });
+                await new Promise(r => setTimeout(r, RETRY_BACKOFF_MS * attempt));
+                // Abort during the backoff window: the next attempt must not start.
+                if (this.abortRequested) { outcome = 'aborted'; break; }
             }
         } catch (err) {
-            if (this.abortRequested) {
-                outcome = 'aborted';
-            } else if (this.inFlight?.stalled) {
-                const stallMsg = this.inFlight.ttftTimeout
-                    ? `No response from gateway within ${TTFT_MS / 1000}s — first token never arrived (hung request).`
-                    : `Gateway stream stalled — no data for ${STREAM_STALL_MS / 1000}s.`;
-                DEPS.log().error('Runner stream stalled', null, { chatId: this.conversationId, ttft: this.inFlight.ttftTimeout === true, ms: this.inFlight.ttftTimeout ? TTFT_MS : STREAM_STALL_MS }, 'Runner');
-                this.broadcast('error', { code: this.inFlight.ttftTimeout ? 'ttft-timeout' : 'stream-stall', message: stallMsg, exchangeId });
-                this.inFlight.errorDetail = stallMsg;
-                outcome = 'error';
-            } else if (err?.name === 'AbortError') {
-                outcome = 'aborted';
-            } else {
-                // Surface the REAL cause — undici wraps a connection failure as
-                // a bare "fetch failed" TypeError with the underlying reason in
-                // err.cause (ECONNREFUSED / ECONNRESET / UND_ERR_CONNECT_TIMEOUT…).
-                // Without it, "fetch failed" stops the run and hides why.
-                const rootCause = err?.cause
-                    ? (err.cause?.message || err.cause?.code || String(err.cause))
-                    : undefined;
-                DEPS.log().error('Runner stream error', { chatId: this.conversationId, error: err?.message, cause: rootCause }, 'Runner');
-                const detail = rootCause ? `${err?.message || 'stream error'} — cause: ${rootCause}` : (err?.message || 'stream error');
-                this.broadcast('error', { code: 'stream', message: detail, exchangeId });
-                this.inFlight.errorDetail = detail;
-                outcome = 'error';
-            }
+            // Failure OUTSIDE the retry loop (capability lookup, vision, payload
+            // assembly): one-shot and deterministic — the classification the
+            // old single catch gave every throw. No retry: the next attempt
+            // would throw identically.
+            const rootCause = err?.cause
+                ? (err.cause?.message || err.cause?.code || String(err.cause))
+                : undefined;
+            DEPS.log().error('Runner run error', { chatId: this.conversationId, error: err?.message, cause: rootCause }, 'Runner');
+            const detail = rootCause ? `${err?.message || 'run error'} — cause: ${rootCause}` : (err?.message || 'run error');
+            this.broadcast('error', { code: 'stream', message: detail, exchangeId });
+            this.inFlight.errorDetail = detail;
+            outcome = 'error';
         }
         const f = this.inFlight;
         await this.endRun(outcome);
@@ -1292,6 +1378,33 @@ class Runner {
         this.abortRequested = true;
         this.inFlight.controller.abort();
         return true;
+    }
+
+    // Retry the last failed run (the view's Retry affordance on an error
+    // bubble): drop the trailing persisted failure note(s) and re-kick the
+    // chain — the pending user message is still in history, so runOnce
+    // regenerates the turn. Consecutive failure notes (a failed retry of a
+    // failed run) all go: they are stale markers for the same pending turn.
+    // Tail-only by design: a note buried under newer turns describes a turn
+    // that already has its answer — re-running it would duplicate work.
+    async retry() {
+        if (this.running) throw new Error('A run is already in progress.');
+        this.refresh();
+        const ids = [];
+        for (let i = this.conv.messages.length - 1; i >= 0; i--) {
+            const m = this.conv.messages[i];
+            if (m.role === 'assistant' && m.error === true) { ids.push(m.id); continue; }
+            break;
+        }
+        if (ids.length === 0) throw new Error('Nothing to retry — the last message is not a failed run.');
+        for (const id of ids) {
+            await convStore.deleteConversationMessage(this.ctx(), { conversationId: this.conversationId, messageId: id });
+        }
+        this.refresh(); // conv/session objects are stale after the writes
+        for (const id of ids) this.broadcast('msg.deleted', { messageId: id, role: 'assistant' });
+        this.pendingSends++;
+        this.kick();
+        return { retried: true, removed: ids.length };
     }
 
     // Delete a message (PC): the runner is the single author, so a view deletes

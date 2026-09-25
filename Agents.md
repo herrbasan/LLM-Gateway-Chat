@@ -12,7 +12,7 @@
 ## Session Start (mandatory, before any other work)
 
 1. **Submodule update check:** run `.\sync-submodules.ps1` (double-clickable wrapper: `sync-submodules.cmd`). It attaches each submodule to its tracked branch (declared in `.gitmodules`), fast-forwards it, then commits the pointer bump(s). **Why a script and not automatic:** git pins one commit SHA per submodule — that is what makes a checkout reproducible, and there is no "track latest" mode. A submodule's upstream can move while this repo sits untouched (a push to `nui_wc2` from another machine is invisible here until someone advances the pin). Hooks don't help either — they fire on *your* git actions, and the drift happens over time with no action. So the sync is an explicit step; run it at the start of every work session. **Never replace that fast-forward with `git submodule update --remote`:** it checks each submodule out at a DETACHED HEAD, so the submodule has no branch and no upstream, VS Code has nothing to compare and stays silent, and the local branch rots unseen — `lib/nui_wc2`'s `main` had drifted 28 commits behind before anyone noticed (2026-09-11). Keeping each submodule ON its tracked branch is what makes drift visible: VS Code opens detected submodules as their own repositories and autofetches them, so the parent reports the submodule as modified the moment a branch tip passes the recorded SHA. Divergence fails loud instead of being papered over — nothing here edits a submodule, so local commits or a wrong branch means a human must look. **Checking attachment:** `git submodule status`'s `(heads/main)` parenthetical is `git describe` output and does *not* mean "on that branch" — it is true even in detached HEAD. Use `git -C lib/<name> symbolic-ref -q --short HEAD`. Windows gotcha: a running server keeps ndb's napi `.node` binary locked — stop the server before updating `lib/ndb`, and load-test after: `node -e "require('./lib/ndb/napi')"`.
-2. **Vendored SDK drift check:** diff `lib/tts/nspeech-client.js` against upstream `herrbasan/nSpeech` → `lib/nspeech-client/nspeech-client.js`, and `lib/stt/nvoice-client.js` against the nVoice repo. Update = raw re-copy from upstream, never edit in place.
+2. **Vendored SDK update check:** run `.\sync-vendor.ps1 -CheckOnly` (or double-click `sync-vendor.cmd`). It checks GitHub releases for `herrbasan/nVoice` against `lib/vendor.json` and notifies if an update is available. Run `.\sync-vendor.ps1` to sync release files into `lib/stt/` (`nvoice-client.js`, `tts-player.js`, `README.md`) and record the version. Diff `lib/tts/nspeech-client.js` against upstream `herrbasan/nSpeech` → `lib/nspeech-client/nspeech-client.js` as needed.
 
 ## Operating Rules
 
@@ -67,7 +67,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | `chat/js/mcp-client.js` | MCP SSE connections, tool registry. **Retired** — tools run server-side in the runner |
 | `chat/js/file-store.js` | Attachment upload → `/api/buckets/images/…`, returns lightweight URLs |
 | `chat/js/voice-dictation.js` | Dictation controller (mic button flow): settled finals stream into the input, Done → `/api/stt` cleanup → cleaned text replaces input, Cancel restores snapshot |
-| `chat/js/voice-assistant.js` | Hands-free assistant controller over the nVoice SDK R3 surface (wake → listen → capture → send/stop/cancel → internal cleanup → deliver) |
+| `chat/js/voice-assistant.js` | Reactive assistant controller over nVoice SDK v1.1+ (turn-taking gauntlet, barge-in, ducking, look-ahead sentence TTS) talking to `/api/stt` |
 | `chat/js/preview.js`, `preview-url.js`, `chunk-view.js` | Preview pane + chunk inspection |
 | `chat-arena/js/arena.js` | Arena **spectator view** over the server ArenaRunner (snapshot + events via `/api/chats/:id/events`, start/stop/extend via `/api/arena/:id/*`). Legacy `Participant`/`Arena` classes (lines ~40–1165) are dead orchestration except: summary generation (`summarize`, direct `GatewayClient`) and legacy import — **cutover remnants** |
 
@@ -110,6 +110,7 @@ Incremental events during a run:
 |-------|---------|
 | `msg.user` | message (appended + persisted) |
 | `run.start` | `{exchangeId, model}` |
+| `run.retry` | `{exchangeId, attempt, attempts, reason}` — transient failure, runner re-issues the request; view clears the partial bubble |
 | `delta` | `{content?, reasoningContent?}` — raw rate; the view debounces |
 | `tool.start` | `{toolCallId, name, args}` |
 | `tool.end` | `{toolCallId, name, status, resultMessage}` (result also persisted) |
@@ -117,6 +118,8 @@ Incremental events during a run:
 | `run.end` | `{finishReason, usage, context, aborted?}` |
 | `embed.status` | `{messageId, status}` |
 | `error` | `{code, message, raw?}` — gateway/provider errors relayed faithfully |
+
+**Transient-failure retry (Copilot-style):** the gateway call retries up to `GATEWAY_ATTEMPTS = 3` (`server/runner.js`) on transient errors only — network faults (`err.cause`), stall/TTFT timeouts, HTTP 408/429/5xx. Deterministic rejections (4xx payload/auth/model errors) and user aborts never retry; all spent attempts fail loudly as before. Each retry broadcasts `run.retry` (the view clears the dead attempt's partials) and re-arms the stall/TTFT timers with fresh per-attempt state. When the run still fails, the persisted failure note carries `retryable` (default `true`; `false` for no-model and tool-hop-cap — their remedy is not a re-run) and the view shows a **Retry** button on the error bubble → `POST /retry`, which drops the trailing failure note(s) and re-runs the pending user turn.
 
 Structural mutations (edit/delete/rename/clear): the runner re-broadcasts a full `snapshot`. No fine-grained mutation events. Attach mid-run: the snapshot carries `inFlight`, so the view renders the partial immediately and continues from live deltas. **No replay buffer, no offsets, no streamIds.**
 
@@ -127,6 +130,7 @@ Structural mutations (edit/delete/rename/clear): the runner re-broadcasts a full
 | `POST` | `/api/chats/:id/send` | Append user message + start a run (queued if one is active). Body = raw stored-form fields (`content`, `attachments`, …). Returns `{exchangeId}`. |
 | `GET` | `/api/chats/:id/events` | Attach to the conversation SSE stream (snapshot + live events). |
 | `POST` | `/api/chats/:id/abort` | Abort the active run. |
+| `POST` | `/api/chats/:id/retry` | Retry the last failed run: drop the trailing failure note(s) + re-kick the chain. 409 when a run is active. |
 
 Existing `/api/chats/*` CRUD (list/rename/pin/delete), `/api/search`, `/api/buckets/*`, `/api/user/settings`, `/api/models`, admin — unchanged.
 
@@ -185,7 +189,7 @@ Tools run in the runner, not the browser. `server/mcp-pool.js` (per-user MCP poo
 - **Embedding pipeline** (server-side, stays): fire-and-forget after message POST, startup reconciliation nDB↔nVDB, SSE `embed-status` events, retry with escalating backoff.
 - **Image lifecycle:** base64 intercepted client-side → bucket upload → lightweight URL in message JSON. On chat delete, refs are garbage-collected via `db.releaseFile` (orphans → `.trash`).
 - **Tool execution is server-side** (runner `mcp-pool` + `internal-tools`); the view renders `tool.start`/`tool.end` events. The browser no longer runs tools, assembles system prompts, or orchestrates the gateway — it is a view over the runner's snapshot + event stream.
-- **Voice input is nVoice behind the `/api/stt` relay** (vendored SDK `lib/stt/nvoice-client.js` — update = re-copy from the nVoice repo, never edit in place). Two modes: dictation (mic button, input-integrated) and assistant (per-conversation `assistantMode` meta → phone-first overlay + system-prompt voice block + auto-TTS). `voice: true` stored-form field marks spoken user messages.
+- **Voice input is nVoice behind the `/api/stt` relay** (vendored SDK `lib/stt/nvoice-client.js` and `lib/stt/tts-player.js` via `.\sync-vendor.ps1` — update via script, never edit in place). Two modes: dictation (mic button, input-integrated) and assistant (per-conversation `assistantMode` meta → reactive turn-taking with desktop status dock / mobile hands-free view + system-prompt voice block + sentence-streaming TTS). `voice: true` stored-form field marks spoken user messages.
 
 ## Security
 

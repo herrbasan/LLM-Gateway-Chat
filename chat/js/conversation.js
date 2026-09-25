@@ -79,7 +79,12 @@ export function messagesToExchanges(messages) {
                     if (msg.model) target.model = msg.model;
                     if (msg.embedStatus) target.assistant.embedStatus = msg.embedStatus;
                     if (msg.embedError) target.assistant.embedError = msg.embedError;
-                    if (msg.error) target.assistant.error = true;
+                    if (msg.error) {
+                        target.assistant.error = true;
+                        // Retry affordance is the default for failure notes; the
+                        // runner marks non-retryable ones (no-model, tool-hop cap).
+                        target.assistant.retryable = msg.retryable !== false;
+                    }
                     target.assistant.isComplete = true;
                     target.assistant.isStreaming = false;
                     if (Array.isArray(msg.versions) && msg.versions.length) {

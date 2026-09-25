@@ -95,6 +95,7 @@ architecture rule.
 | `POST` | `/api/chats/:id/send` | Append user message + start a run (queued if one is active). Body = raw stored-form fields (`content`, `attachments`, …). Returns `{exchangeId}`. |
 | `GET` | `/api/chats/:id/events` | Attach to the conversation SSE stream (snapshot + live events). |
 | `POST` | `/api/chats/:id/abort` | Abort the active run. |
+| `POST` | `/api/chats/:id/retry` | Retry the last failed run: drop the trailing failure note(s) (assistant, `error: true`) and re-kick the chain — the pending user message is still in history. 409 when a run is active. |
 
 All cookie-auth (`requireAuth`), per-user DB isolation as today. Existing
 `/api/chats/*` CRUD (list/rename/pin/delete), `/api/search`, `/api/buckets/*`,
@@ -166,6 +167,7 @@ embedStatus included), `inFlight` (if a run is active), `usage/context` of the l
 |-------|---------|-------|
 | `msg.user` | message | appended + persisted |
 | `run.start` | `{exchangeId, model}` | |
+| `run.retry` | `{exchangeId, attempt, attempts, reason}` | transient gateway failure (network, stall, TTFT, 408/429/5xx) — the runner re-issues the request; the view clears the dead attempt's partial deltas |
 | `delta` | `{content?, reasoningContent?}` | raw rate; the view debounces rendering (as today) |
 | `tool.start` | `{toolCallId, name, args}` | |
 | `tool.end` | `{toolCallId, name, status, resultMessage}` | result message also persisted |
