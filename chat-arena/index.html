@@ -346,14 +346,10 @@ Speak naturally as if in a thoughtful conversation.</textarea>
             const app = document.querySelector('nui-app');
 
             switch (action) {
-                case 'toggle-sidebar':
-                    e.preventDefault();
-                    if (app) app.toggleSidebar();
-                    break;
-                case 'toggle-sidebar:right':
-                    e.preventDefault();
-                    if (app) app.toggleSidebar('right');
-                    break;
+                // NOTE: no `toggle-sidebar*` cases here. They are built-in NUI
+                // actions (nui.js builtinActionHandlers) and NUI's document
+                // listener already resolves them; handling them locally too
+                // toggles twice per click, so the pane never appears.
                 case 'toggle-theme':
                     e.preventDefault();
                     if (app) {

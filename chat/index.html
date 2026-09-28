@@ -67,33 +67,6 @@
             </div>
         </nui-app-header>
 
-        <!-- Backend-offline alarm: fixed, loud, non-dismissible while offline.
-             Shown by chat.js when backendClient reports a network failure.
-             The gateway may keep streaming, so this is the ONLY signal that
-             persistence has stopped. Kept out of the normal flow so it can't
-             be missed and doesn't shift layout when it appears. -->
-        <div id="backend-offline-banner" role="alert" aria-live="assertive">
-            <nui-icon name="warning"></nui-icon>
-            <span class="banner-text">
-                <strong>Backend offline — messages are NOT being saved to the server.</strong>
-                The chat still works (streaming is unaffected) and messages are kept locally,
-                but <strong>export your conversation now</strong> to be safe.
-            </span>
-        </div>
-
-        <!-- Session-expired alarm: shown when a 401 nulls backendClient.user.
-             Messages are crash-netted locally and flushed after re-login, but
-             the user must know persistence has stopped and be able to re-open
-             the login dialog after dismissing it. -->
-        <div id="auth-expired-banner" role="alert" aria-live="assertive" data-visible="false">
-            <nui-icon name="warning"></nui-icon>
-            <span class="banner-text">
-                <strong>Session expired — messages are NOT being saved to the server.</strong>
-                They are queued locally and will be stored after you log in again.
-                <button id="relogin-btn" type="button">Log in</button>
-            </span>
-        </div>
-
         <nui-sidebar>
             <div class="sidebar-layout">
                 <div class="sidebar-action-area">
@@ -302,6 +275,38 @@
         </nui-sidebar>
 
         <nui-content>
+            <!-- Alarms live inside <nui-content> so they are not bare children of
+                 <nui-app> (the NUI structure validator warns on those). Both are
+                 position:fixed and no ancestor here creates a containing block for
+                 fixed elements, so they stay pinned to the viewport regardless. -->
+
+            <!-- Backend-offline alarm: fixed, loud, non-dismissible while offline.
+                 Shown by chat.js when backendClient reports a network failure.
+                 The gateway may keep streaming, so this is the ONLY signal that
+                 persistence has stopped. Kept out of the normal flow so it can't
+                 be missed and doesn't shift layout when it appears. -->
+            <div id="backend-offline-banner" role="alert" aria-live="assertive">
+                <nui-icon name="warning"></nui-icon>
+                <span class="banner-text">
+                    <strong>Backend offline — messages are NOT being saved to the server.</strong>
+                    The chat still works (streaming is unaffected) and messages are kept locally,
+                    but <strong>export your conversation now</strong> to be safe.
+                </span>
+            </div>
+
+            <!-- Session-expired alarm: shown when a 401 nulls backendClient.user.
+                 Messages are crash-netted locally and flushed after re-login, but
+                 the user must know persistence has stopped and be able to re-open
+                 the login dialog after dismissing it. -->
+            <div id="auth-expired-banner" role="alert" aria-live="assertive" data-visible="false">
+                <nui-icon name="warning"></nui-icon>
+                <span class="banner-text">
+                    <strong>Session expired — messages are NOT being saved to the server.</strong>
+                    They are queued locally and will be stored after you log in again.
+                    <button id="relogin-btn" type="button">Log in</button>
+                </span>
+            </div>
+
             <nui-main>
                 <!-- Main Chat Area -->
                 <div class="chat-main">
@@ -583,27 +588,12 @@
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-list.js" type="module"></script>
     <script src="js/chat.js" type="module"></script>
-    <script>
-        // NUI specific interactions for app shell
-        document.addEventListener('click', (e) => {
-            const actionEl = e.target.closest('[data-action]');
-            if (!actionEl) return;
-            
-            const action = actionEl.dataset.action;
-            const app = document.querySelector('nui-app');
-            
-            switch (action) {
-                case 'toggle-sidebar':
-                    e.preventDefault();
-                    if(app) app.toggleSidebar();
-                    break;
-                case 'toggle-sidebar:right':
-                    e.preventDefault();
-                    if(app) app.toggleSidebar('right');
-                    break;
-            }
-        });
-    </script>
+
+    <!-- NO local [data-action] delegation here. `toggle-sidebar` and
+         `toggle-sidebar:right` are built-in NUI actions (nui.js
+         builtinActionHandlers), resolved by NUI's own document listener. A
+         local handler runs in addition to it, so every click toggles twice —
+         the pane opens and closes inside the same event and never appears. -->
 
     <nui-dialog id="presets-dialog" mode="page" title="System Prompt Presets" style="--space-page-maxwidth: 90%;">
         <div class="presets-dialog-layout">
