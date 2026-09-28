@@ -15,5 +15,16 @@
         "files": {
             "lib/nspeech-client/nspeech-client.js": "lib/tts/nspeech-client.js"
         }
+    },
+    "nDB": {
+        "repo": "herrbasan/nDB",
+        "tag": "v1.5.0",
+        "version": "1.5.0",
+        "platform": "win32-x64",
+        "updatedAt": "2026-09-28",
+        "assets": {
+            "ndb-node.win32-x64-msvc.node": "lib/ndb/napi/ndb-node.win32-x64-msvc.node",
+            "ndb.exe": "lib/ndb/bin/ndb.exe"
+        }
     }
 }
