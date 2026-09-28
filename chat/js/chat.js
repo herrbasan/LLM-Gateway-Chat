@@ -273,6 +273,11 @@ function _appendContextTurn(chatId, context) {
     _contextReports.set(chatId, entry);
 }
 
+// The streaming cell of a chat's view. Every view is discarded through
+// _dropView, which stops the waiting ticker before the view goes — so a live
+// ticker implies a live view and this dereference is sound. Callers reached
+// from the timer still guard on the CELL: `el` is null once a run ends even
+// though the view lives on.
 function _runnerStreaming(chatId) {
     return runnerViews.get(chatId).streaming;
 }
@@ -638,15 +643,29 @@ function _runnerRunEnd(chatId, d) {
     }
 }
 
+// Drop a chat's view: stop its waiting ticker, close its SSE stream, forget the
+// view. EVERY path that discards a view goes through here.
+//
+// The ticker must die with the view. It captures only the chatId, so a view
+// dropped without stopping it leaves a timer that survives into whatever view
+// replaces it — and once this chat's view is finally gone for good, the timer
+// ticks against nothing: _runnerStreaming dereferences a missing view and the
+// interval throws, once a second, forever ("Cannot read properties of
+// undefined (reading 'streaming')").
+function _dropView(chatId) {
+    const v = runnerViews.get(chatId);
+    if (v?.streaming?.tickTimer) clearInterval(v.streaming.tickTimer);
+    if (v?.es) { try { v.es.close(); } catch {} }
+    runnerViews.delete(chatId);
+    return v;
+}
+
 // Tear down a chat's view: close its SSE stream, drop its hidden DOM
 // container and cached conversation. The chat re-attaches cleanly (fresh
 // snapshot) the next time it is opened. Never tears down the visible chat.
 function _teardownView(chatId) {
     if (chatId === currentChatId) return;
-    const v = runnerViews.get(chatId);
-    if (v?.es) { try { v.es.close(); } catch {} }
-    if (v?.streaming?.tickTimer) clearInterval(v.streaming.tickTimer);
-    runnerViews.delete(chatId);
+    _dropView(chatId);
     activeConversations.delete(chatId);
     const container = chatContainers.get(chatId);
     if (container) {
@@ -860,9 +879,9 @@ function _runnerDeleted(chatId, d) {
 }
 
 function _runnerRefresh(chatId) {
-    const v = runnerViews.get(chatId);
-    if (v?.es) { try { v.es.close(); } catch {} }
-    runnerViews.delete(chatId);
+    // Re-render from a fresh snapshot. The old view must go through _dropView —
+    // skipping it orphaned the waiting ticker onto the replacement view.
+    _dropView(chatId);
     attachRunnerEvents(chatId);
 }
 
@@ -1515,16 +1534,20 @@ async function applyDefaultConfig() {
     // Guarded: a prefs hiccup must never take the rest of init down with it.
     try {
         const savedSttDevice = await storage.getPref('stt-device-id');
-        if (savedSttDevice) {
-            dictation.setAudioDevice(savedSttDevice);
-            assistant.setAudioDevice(savedSttDevice);
-        }
         // A persisted permission doesn't unblind the list on a fresh load —
         // flash the mic once (no prompt, already granted) to unlock names.
         // Without permission this is a no-op; the first voice session's
         // re-enumeration fills the list instead.
         await unlockSttDeviceLabels();
-        loadSttDevices(savedSttDevice || '');
+        // Pin the SDK only to a device that is still present — loadSttDevices
+        // resolves the saved id against the enumerated list and reports what is
+        // actually in effect. nVoice passes { deviceId: { exact } }, so pinning
+        // a vanished mic would fail the next voice session outright.
+        const sttDevice = await loadSttDevices(savedSttDevice || '');
+        if (sttDevice) {
+            dictation.setAudioDevice(sttDevice);
+            assistant.setAudioDevice(sttDevice);
+        }
     } catch (e) {
         console.warn('[STT] settings restore failed:', e);
         loadSttDevices('');
@@ -2166,8 +2189,8 @@ function setupEventListeners() {
 }
 
 /**
- * Delegated click handler: open lightbox for images inside nui-markdown
- * (assistant replies, preview pane) and legacy .chat-attachment images.
+ * Delegated click handler: open the lightbox for images inside nui-markdown
+ * (assistant replies, preview pane) and for message attachments.
  * All images in the same markdown container form one lightbox gallery.
  */
 function onMarkdownImageClick(e) {
@@ -2183,10 +2206,17 @@ function onMarkdownImageClick(e) {
         return;
     }
 
-    const att = img.closest('.chat-attachment');
-    if (att) {
-        const fullSrc = att.dataset.fullSrc;
-        if (fullSrc) nui.components.lightbox.show([{ src: fullSrc, title: att.alt }], 0);
+    // Attachments render inside a declarative <nui-lightbox> that owns their
+    // full-size sources: open() with no items collects them from its own
+    // children (`img[data-lightbox-src]`) and only the index is passed. The
+    // element must be driven, not its images — the addon binds no click of its
+    // own. One delegated opener covers every render path (live and
+    // snapshot-built), so nothing has to re-wire listeners after a re-render.
+    const lb = img.closest('nui-lightbox');
+    if (lb) {
+        const gallery = [...lb.querySelectorAll('img[data-lightbox], [data-lightbox-src]')];
+        const start = gallery.indexOf(img);
+        lb.open([], start >= 0 ? start : 0);
     }
 }
 
@@ -2770,7 +2800,7 @@ async function unlockSttDeviceLabels() {
 
 async function loadSttDevices(savedId) {
     const sel = elements.sttDeviceSelect;
-    if (!sel) return;
+    if (!sel) return null;
     let devices = [];
     try {
         if (navigator.mediaDevices?.enumerateDevices) {
@@ -2783,21 +2813,45 @@ async function loadSttDevices(savedId) {
     } catch { /* enumeration blocked — leave default only */ }
     const items = [{ value: '', label: 'System default' },
         ...devices.map((d, i) => ({ value: d.deviceId, label: d.label || `Microphone ${i + 1}` }))];
-    const current = savedId ?? (sel.getValue?.() ?? sel.querySelector('select')?.value ?? '');
+
+    // savedId: undefined = keep whatever is selected (a re-enumeration after
+    // permission or devicechange must not clobber the live choice); a string =
+    // the id to try to select.
+    const requested = savedId === undefined
+        ? (sel.getValue?.() ?? sel.querySelector('select')?.value ?? '')
+        : savedId;
+
+    // A persisted device id can go stale — the mic was unplugged, or the
+    // browser re-hashed ids. It must never be forced onward: nui-select throws
+    // on an unknown value, and nVoice asks for { deviceId: { exact } }, so a
+    // vanished mic is a hard getUserMedia failure at the next voice session.
+    // An EMPTY list is not evidence of absence though — without permission
+    // every entry had an empty deviceId and was filtered out above. So the id
+    // is only judged when there is a list to judge it against; otherwise it is
+    // kept pinned for the SDK and only the select is reset.
+    const blind = devices.length === 0;
+    const present = devices.some(d => d.deviceId === requested);
+    if (!blind && requested && !present) {
+        console.warn(`[STT] saved microphone ${requested} is no longer present — using System default`);
+    }
+    const inEffect = blind ? requested : (present ? requested : '');
+    const selected = blind ? '' : inEffect;
+
     // nui-select renders its dropdown from its OWN state — writing the inner
     // select's innerHTML leaves the component blind (the bug behind "no mic
     // listed"). setItems/setValue is the contract; inner select is the fallback.
     if (sel.setItems) {
         sel.setItems(items);
-        if (current) sel.setValue(current);
+        sel.setValue(selected);
     } else {
         const inner = sel.querySelector('select');
         if (inner) {
             inner.innerHTML = items.map(it => `<option value="${it.value}">${it.label}</option>`).join('');
-            inner.value = current;
-            if (inner.value !== current) inner.value = '';
+            inner.value = selected;
+            if (inner.value !== selected) inner.value = '';
         }
     }
+    return inEffect;
 }
 
 navigator.mediaDevices?.addEventListener?.('devicechange', () => loadSttDevices());
@@ -3713,18 +3767,11 @@ function renderExchange(exchange, targetContainer = null) {
 
     setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
 
-    // Initialize Lightbox declarative handlers for attached images
-    if (exchange.user?.attachments?.length > 0) {
-        const lightbox = userEl.querySelector('nui-lightbox');
-        if (lightbox) {
-            const imgs = lightbox.querySelectorAll('img');
-            imgs.forEach((img, i) => {
-                img.addEventListener('click', () => {
-                    lightbox.open([], i);
-                });
-            });
-        }
-    }
+    // Attachment images open through the delegated handler on #messages, which
+    // drives the declarative <nui-lightbox> by element. No per-image listeners
+    // here — those were lost whenever the container was rebuilt from a snapshot
+    // (which is how a loaded conversation renders), so attachments worked only
+    // on messages this session had just sent.
 
     // Assistant message (if exists)
     if (exchange.assistant.content || exchange.assistant.isStreaming) {
@@ -4991,12 +5038,9 @@ async function deleteChat(chatId, e) {
     runnerClient.abort(chatId).catch(() => {});
 
     // Close the chat's event stream and drop its view. _teardownView skips
-    // the visible chat, so close explicitly first — a leaked EventSource per
+    // the visible chat, so drop explicitly first — a leaked EventSource per
     // deleted chat exhausts the browser's per-origin connection pool.
-    const v = runnerViews.get(chatId);
-    if (v?.es) { try { v.es.close(); } catch {} }
-    if (v?.streaming?.tickTimer) clearInterval(v.streaming.tickTimer);
-    runnerViews.delete(chatId);
+    _dropView(chatId);
 
     // Clean up multi-conversation state
     activeConversations.delete(chatId);
