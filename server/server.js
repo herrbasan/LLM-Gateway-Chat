@@ -629,7 +629,13 @@ async function proxyStorage(req, res, storagePath) {
 
   let upstream;
   try {
-    upstream = await fetch(target, { method: 'GET' });
+    // Forward the client's Range header: media seeking depends on the storage
+    // server answering 206 with an exact byte span. HEAD is passed through too
+    // so the browser can size a resource without pulling the body.
+    const method = req.method === 'HEAD' ? 'HEAD' : 'GET';
+    const upstreamHeaders = {};
+    if (req.headers.range) upstreamHeaders.Range = req.headers.range;
+    upstream = await fetch(target, { method, headers: upstreamHeaders });
   } catch (e) {
     json(res, { error: `Storage server unreachable: ${e.message}` }, 502, req);
     return;
@@ -639,17 +645,31 @@ async function proxyStorage(req, res, storagePath) {
     return;
   }
 
-  const outHeaders = {
-    'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream'
-  };
-  res.writeHead(200, outHeaders);
-  if (upstream.body) {
-    const stream = Readable.fromWeb(upstream.body);
-    stream.on('error', (e) => { logger?.error('Storage proxy stream failed', e, { storagePath }, 'Storage'); stream.destroy(); res.destroy(); });
-    stream.pipe(res);
-  } else {
-    res.end();
+  // Propagate the headers that make a response correctly sized and seekable.
+  // Content-Length in particular MUST pass through: the previous version sent
+  // only Content-Type, so Node fell back to chunked transfer encoding and the
+  // browser reported a NaN duration with an empty seekable range (no seek bar).
+  // The status passes through unchanged (206 for a satisfied range, else 200).
+  const outHeaders = {};
+  const upstreamEncoding = upstream.headers.get('content-encoding');
+  for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag']) {
+    // A compressed body's Content-Length describes the encoded bytes, not what
+    // fetch hands back after decompression — never forward it alongside a
+    // decoded stream, or the response is truncated/mispaced.
+    if (h === 'content-length' && upstreamEncoding) continue;
+    const v = upstream.headers.get(h);
+    if (v) outHeaders[h] = v;
   }
+  if (!outHeaders['content-type']) outHeaders['content-type'] = 'application/octet-stream';
+  res.writeHead(upstream.status, outHeaders);
+
+  if (req.method === 'HEAD' || !upstream.body) {
+    res.end();
+    return;
+  }
+  const stream = Readable.fromWeb(upstream.body);
+  stream.on('error', (e) => { logger?.error('Storage proxy stream failed', e, { storagePath }, 'Storage'); stream.destroy(); res.destroy(); });
+  stream.pipe(res);
 }
 
 function ttsBase() {
