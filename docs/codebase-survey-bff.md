@@ -251,7 +251,7 @@ Every claim the code contradicts or sharpens:
 | Issue | Title | Channel / module | Where in code |
 |-------|-------|------------------|---------------|
 | #4 | Missing action toolbar on assistant message when a tool call follows | W1 tool-call loop (browser UI) — `chat.js` handleToolExecution / finalizeAssistantElement | chat.js:4570–4660 (tool exchange render + finalize) |
-| #5 | Attachment bucket URLs return 401 to server-side fetches | Backend bucket auth — `GET /api/buckets/*` cookie-required | server.js:968–970 (requireAuth); URLs minted server.js:915 |
+| #5 | Attachment bucket URLs return 401 to server-side fetches | Backend bucket auth — `GET /api/buckets/*` cookie-required | server.js:968–970 (requireAuth); URLs minted server.js:915 — **server-assembled image paths RESOLVED 2026-10-02**: user attachments and tool-result images are both read from nDB and inlined as `data:` URLs in `api-view.buildApiMessages`, so nothing fetches a bucket URL; the route stays cookie-auth'd for browsers |
 | #6 | `chat_archive_update_metadata` stringifies summary | W6 archive tools → `PATCH /api/chats/:id` summary validation | chat.js:126–322 (tool def), backend PATCH server.js:1624–1636 (summary must be object) |
 | #8 | `chat_archive_update_metadata` silently overwrites curated summaries (needs guard + session-ID exposure) | W6 archive tools → `backendClient.updateSession` | chat.js executeLocalTool `chat_archive_update_metadata` handler (~chat.js:550–620) |
 | #9 | Direct vision support broken: vision models get manifest not image | W1 vision-filtering + attachment→gateway image resolution | chat.js:3131–3151 (vision tool filter); conversation.js:553+ (attachment manifest build) |

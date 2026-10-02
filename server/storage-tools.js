@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 
 let ROOT = null;
+let NMEDIA_URL = 'http://localhost:3500';
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
 
 function init({ log, storageRoot }) {
@@ -25,6 +26,7 @@ function init({ log, storageRoot }) {
         throw new Error(`storage-tools: storage root "${root}" does not exist or is not a directory — set MCP_STORAGE_PATH`);
     }
     ROOT = path.resolve(root);
+    NMEDIA_URL = process.env.MCP_NMEDIA_URL || 'http://localhost:3500';
     LOG.info('storage-tools ready', { root: ROOT }, 'StorageTools');
 }
 
@@ -221,6 +223,21 @@ const TOOL_DEFS = [
                 required: ['path']
             }
         }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'image_attach',
+            description: `${SERVER_EXEC_NOTE}\n\nPut one or two images from workshop storage into THIS conversation as REAL image content parts — you see the pixels (multimodal input), not a description of them. This is the render-inspect loop: render something (e.g. workshop media.process: SVG diagram → PNG), attach it, LOOK at it, fix it, re-render — no human in the middle. Also for screenshots a browser tool took, keyframes pulled from video, or generated images you need to verify.\n\nTRANSIENT by design: the image lives for the current run only; later turns see only the text stub, which names the source path — re-attach by path when you need to look again. Guardrails: storage-relative paths only, at most 2 images per call, each ≤ 4 MB; anything above 2048 px is auto-downscaled via nMedia before attaching. SVG is refused — rasterize it first.`,
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: 'One storage-relative image path (png/jpg/webp/gif), e.g. "temp/machine-overview.png".' },
+                    paths: { type: 'array', items: { type: 'string' }, maxItems: 2, description: 'Alternatively: 1-2 storage-relative image paths (e.g. two revisions to compare).' },
+                    note: { type: 'string', description: 'Optional context carried in the stub, e.g. "revision 4 — check label overflow".' }
+                }
+            }
+        }
     }
 ];
 
@@ -238,6 +255,54 @@ function jsonResult(obj) {
 }
 
 const READ_CHUNK_THRESHOLD = 32 * 1024;
+
+// ============================================
+// image_attach (#49): pixels into the model's eyes. Reads the image from the
+// storage box on disk (no MCP wire, no base64 in any prompt), auto-downscales
+// > 2048 px via nMedia, and returns MCP-style image content parts — the runner
+// buckets them and the next request carries image_url parts. Transiency is
+// enforced by the runner: image_attach results are flagged and stripped from
+// request-building at the next run start (api-view checks toolImagesStripped).
+// ============================================
+const ATTACH_MAX_BYTES = 4 * 1024 * 1024;
+const ATTACH_MAX_DIMENSION = 2048;
+const IMAGE_MIME_BY_EXT = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+
+// PNG IHDR / JPEG SOFn dimension sniff — enough for the 2048 px rule. Exotic
+// formats return null and skip the downscale path (tolerance with a trace).
+function sniffImageDims(buf) {
+    if (buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50) {
+        return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+    }
+    if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+        let pos = 2;
+        while (pos + 9 < buf.length) {
+            if (buf[pos] !== 0xff) { pos++; continue; }
+            const marker = buf[pos + 1];
+            if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+                return { height: buf.readUInt16BE(pos + 5), width: buf.readUInt16BE(pos + 7) };
+            }
+            pos += 2 + buf.readUInt16BE(pos + 2);
+        }
+    }
+    return null;
+}
+
+async function downscaleViaNMedia(buffer, mime) {
+    const format = mime === 'image/jpeg' ? 'jpeg' : (mime === 'image/webp' ? 'webp' : 'png');
+    const res = await fetch(`${NMEDIA_URL}/v1/process/image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base64: buffer.toString('base64'), max_dimension: ATTACH_MAX_DIMENSION, format, response_type: 'base64' })
+    });
+    if (!res.ok) throw new Error(`nMedia downscale failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+    const data = await res.json();
+    return {
+        buffer: Buffer.from(String(data.base64).replace(/^data:[^;]+;base64,/, ''), 'base64'),
+        width: data.width,
+        height: data.height
+    };
+}
 
 async function execute(name, args, deps = {}) {
     if (!ROOT) throw new Error('storage-tools: not initialized');
@@ -360,6 +425,73 @@ async function execute(name, args, deps = {}) {
             }
             LOG.info('storage_delete', { path: args.path, wasDirectory: st.isDirectory() }, 'StorageTools');
             return jsonResult({ ok: true, deleted: args.path, wasDirectory: st.isDirectory(), ...(backup ? { previousVersion: backup } : {}) });
+        }
+
+        case 'image_attach': {
+            const requested = [];
+            if (typeof args.path === 'string' && args.path.trim()) requested.push(args.path.trim());
+            if (Array.isArray(args.paths)) {
+                for (const p of args.paths) if (typeof p === 'string' && p.trim()) requested.push(p.trim());
+            }
+            if (!requested.length) throw new Error('image_attach: path (string) or paths (array of 1-2) is required');
+            if (requested.length > 2) throw new Error('image_attach: at most 2 images per call — attach in pairs');
+
+            const attached = [];
+            for (const rel of requested) {
+                const ext = path.extname(rel).toLowerCase();
+                const mime = IMAGE_MIME_BY_EXT[ext];
+                if (!mime) {
+                    if (ext === '.svg') {
+                        throw new Error(`image_attach: "${rel}" is SVG — rasterize first (workshop: media.process, SVG → PNG), then attach the PNG`);
+                    }
+                    throw new Error(`image_attach: "${rel}" is not an attachable image type (${Object.values(IMAGE_MIME_BY_EXT).join(', ')})`);
+                }
+                const abs = safeResolve(rel);
+                if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+                    throw new Error(`image_attach: not found in storage: ${rel}`);
+                }
+                let buffer = fs.readFileSync(abs);
+                let dims = sniffImageDims(buffer);
+                let downscaledFrom = null;
+
+                const overBytes = buffer.length > ATTACH_MAX_BYTES;
+                const overDims = dims ? Math.max(dims.width, dims.height) > ATTACH_MAX_DIMENSION : false;
+                if ((overBytes || overDims) && mime !== 'image/gif') {
+                    try {
+                        const r = await downscaleViaNMedia(buffer, mime);
+                        downscaledFrom = dims;
+                        buffer = r.buffer;
+                        dims = { width: r.width, height: r.height };
+                    } catch (e) {
+                        if (buffer.length > ATTACH_MAX_BYTES) {
+                            throw new Error(`image_attach: "${rel}" exceeds the ${Math.round(ATTACH_MAX_BYTES / 1024 / 1024)} MB limit and nMedia downscale failed: ${e.message}`);
+                        }
+                        LOG.warn('image_attach: downscale unavailable — attaching raw', { path: rel, error: e.message }, 'StorageTools');
+                    }
+                } else if (overBytes && mime === 'image/gif') {
+                    throw new Error(`image_attach: "${rel}" is ${buffer.length} bytes — over the ${ATTACH_MAX_BYTES} limit; animated GIFs are not downscaled`);
+                }
+                if (buffer.length > ATTACH_MAX_BYTES) {
+                    throw new Error(`image_attach: "${rel}" is ${buffer.length} bytes after downscale — over the ${ATTACH_MAX_BYTES} limit`);
+                }
+                attached.push({ rel, buffer, mime, dims, downscaledFrom });
+            }
+
+            const note = typeof args.note === 'string' && args.note.trim() ? ` — ${args.note.trim()}` : '';
+            const summary = attached.map(a => {
+                const dimsStr = a.dims ? `${a.dims.width}×${a.dims.height}` : 'dimensions unknown';
+                const kb = `${Math.max(1, Math.round(a.buffer.length / 1024))} KB`;
+                const scale = a.downscaledFrom ? ` (downscaled from ${a.downscaledFrom.width}×${a.downscaledFrom.height})` : '';
+                return `${a.rel} (${dimsStr}, ${kb})${scale}`;
+            }).join(', ');
+            const text = `attached ${summary}${note}. The image is in your context for THIS run; afterwards only this stub remains — re-attach by path when you need to look again.`;
+            LOG.info('image_attach', { paths: attached.map(a => a.rel), bytes: attached.reduce((s, a) => s + a.buffer.length, 0) }, 'StorageTools');
+            return {
+                content: [
+                    { type: 'text', text },
+                    ...attached.map(a => ({ type: 'image', data: a.buffer.toString('base64'), mimeType: a.mime }))
+                ]
+            };
         }
 
         default:

@@ -501,6 +501,7 @@ class Runner {
     }
 
     async runLoop() {
+        await this._stripTransientToolImages();
         let more = this.pendingSends > 0;
         this.pendingSends = 0;
         let hops = 0;
@@ -526,6 +527,28 @@ class Runner {
             if (this.pendingSends > 0) { this.pendingSends = 0; more = true; }
             else more = false;
         }
+    }
+
+    // Transient tool images (image_attach, #49): the pixels exist so the model
+    // can look at its own render DURING a run's hops. When a NEW run starts,
+    // the previous run's attached images stop riding requests — the message
+    // keeps toolImagesStripped so the UI can still show what was attached,
+    // while api-view resolves only unstripped toolImages into image parts.
+    // Stripping here (not per-hop) keeps the image visible across the whole
+    // render→look→fix loop of the run that produced it.
+    async _stripTransientToolImages() {
+        try {
+            this.refresh();
+        } catch { return; } // conversation gone — nothing to strip
+        const messages = this.conv.messages || [];
+        const pending = messages.filter(m => m.role === 'tool' && m.toolImagesTransient === true && Array.isArray(m.toolImages) && m.toolImages.length > 0);
+        if (!pending.length) return;
+        for (const m of pending) {
+            m.toolImagesTransient = undefined;
+            m.toolImagesStripped = true;
+        }
+        this.dbInstance.db.set(this.conv._id, 'messages', messages);
+        DEPS.log().info('Stripped transient tool image(s) at run start', { chatId: this.conversationId, count: pending.length }, 'Runner');
     }
 
     // Assemble the exact outgoing payload (system prompt + chunk-view/dedup/
@@ -1047,6 +1070,7 @@ class Runner {
                     toolArgs: args,
                     toolStatus: status,
                     toolImages: resultImages.length ? resultImages : undefined,
+                    toolImagesTransient: (tc.function.name === 'image_attach' && resultImages.length > 0) ? true : undefined,
                     tool_call_id: tc.id
                 }
             });

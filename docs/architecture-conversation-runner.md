@@ -199,6 +199,16 @@ The survey's "browser-bound tools" (H1) was a retrofit artifact. Server-side, re
 | `attachment_save`, base64 image offload | browser round-trip | internal `db.storeFile` — no HTTP hop; issue #5 (bucket 401s) dissolves because the server reads its own buckets |
 | Preview | DOM | The tool returns data; the *view* renders a preview affordance from `tool.end`. Preview becomes pure view. |
 
+**Bucket images reach the gateway as bytes, not URLs** (2026-10-02). Both
+server-assembled image paths — user attachments and tool-result images
+(`msg.toolImages`, stored by `runner.extractToolResult` as `/api/buckets/...`) —
+are read out of nDB and inlined as base64 `data:` URLs by `api-view.buildApiMessages`.
+A bucket URL handed to the gateway cannot work: the bucket route requires cookie
+auth (issue #5), and on a `localhost` spelling the gateway's SSRF guard rejects it
+before the request is even made — after which the gateway strips the image and the
+model answers blind. Non-bucket remote URLs stay URLs; those are the gateway's to
+fetch, under its own SSRF policy.
+
 Vision-tool filtering (`shouldFilterVisionTools`, issues #9/#11) moves into the
 runner's tool selection.
 
@@ -302,5 +312,9 @@ both get easier: identity attaches at the runner, per-user DBs already isolate.
 - MCP server config migration: browser localStorage → per-user server settings.
 - Batching semantics: how multiple queued user messages are presented to the model
   (separate user turns vs. one merged turn) — pin during PA.
-- Vision/bucket origin: which absolute origin the runner hands the gateway for image
-  URLs (interacts with issue #5 and P2 localhost binding) — deep-dive G4/G6.
+- Vision/bucket origin: **answered for bucket-backed images** (2026-10-02) — the
+  runner hands the gateway bytes (inlined `data:` URLs read from nDB), so no origin
+  is involved and issue #5 does not apply to them. Still open for the *manifest*
+  text, which shows the model a URL it may hand back to a tool: `publicOrigin`
+  (default `http://localhost:${PORT}`) is unreachable from anything but this host,
+  so an absolute LAN origin remains the better spelling there — deep-dive G4/G6.

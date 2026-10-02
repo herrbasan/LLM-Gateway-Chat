@@ -100,24 +100,60 @@ function parseFileRef(_file) {
     return { bucket, id: rest.slice(0, dot), ext: rest.slice(dot + 1) };
 }
 
+// Parse a bucket URL — bare ('/api/buckets/images/43ba3326.jpg') or absolute —
+// → { bucket, id, ext }. Tool-result images are stored in this spelling.
+function parseBucketPath(url) {
+    if (typeof url !== 'string') return null;
+    const m = url.match(/\/api\/buckets\/([^/?#]+)\/([^/?#]+)/);
+    if (!m) return null;
+    const dot = m[2].lastIndexOf('.');
+    if (dot === -1) return null;
+    return { bucket: m[1], id: m[2].slice(0, dot), ext: m[2].slice(dot + 1).toLowerCase() };
+}
+
+// Bucket bytes → data URL, read straight out of nDB. The bucket GET route
+// requires cookie auth (issue #5), so handing the gateway a bucket URL means it
+// 401s — and on a localhost spelling the gateway's SSRF guard rejects it before
+// the request is even made — after which the image is stripped and the model
+// answers blind. Reading internally skips HTTP entirely.
+function bucketDataUrl(bucket, id, ext, mime, readImageBytes) {
+    if (typeof readImageBytes !== 'function') return null;
+    try {
+        const buffer = readImageBytes(bucket, id, ext);
+        if (!buffer) return null;
+        const type = mime || EXT_MIME[ext] || 'application/octet-stream';
+        return `data:${type};base64,${Buffer.from(buffer).toString('base64')}`;
+    } catch (e) {
+        return null; // unreadable file — caller falls back to the URL it had
+    }
+}
+
 // Resolve an attachment to a gateway-safe image source. Bucket-backed images are
-// read INTERNALLY (readImageBytes) and inlined as base64 data URLs — the bucket
-// GET route requires cookie auth (issue #5), so an absolute bucket URL handed to
-// the gateway would 401 when the gateway/adapter fetches it for a vision model.
+// read INTERNALLY (readImageBytes) and inlined as base64 data URLs.
 function resolveImageDataUrl(att, readImageBytes) {
     if (att?.dataUrl && att.dataUrl.startsWith('data:')) return att.dataUrl;
     const ref = parseFileRef(att?._file);
-    if (ref && typeof readImageBytes === 'function') {
-        try {
-            const buffer = readImageBytes(ref.bucket, ref.id, ref.ext);
-            if (buffer) {
-                const mime = att.type || EXT_MIME[ref.ext] || 'application/octet-stream';
-                return `data:${mime};base64,${Buffer.from(buffer).toString('base64')}`;
-            }
-        } catch (e) { /* fall through to URL */ }
+    if (ref) {
+        const inlined = bucketDataUrl(ref.bucket, ref.id, ref.ext, att.type, readImageBytes);
+        if (inlined) return inlined;
     }
     if (att?.url && /^https?:\/\//.test(att.url)) return att.url;
     return null;
+}
+
+// Tool-result images (runner.extractToolResult stores them as bucket URLs) need
+// the same treatment as attachments, or every image a tool returns is dropped
+// before the model sees it. Non-bucket URLs stay URLs: remote images are the
+// gateway's to fetch, under its own SSRF policy.
+function resolveToolImage(url, publicOrigin, readImageBytes) {
+    if (!url || typeof url !== 'string') return null;
+    if (url.startsWith('data:')) return url;
+    const ref = parseBucketPath(url);
+    if (ref) {
+        const inlined = bucketDataUrl(ref.bucket, ref.id, ref.ext, null, readImageBytes);
+        if (inlined) return inlined;
+    }
+    return resolveImageUrl(url, publicOrigin);
 }
 
 // messages: stored-form array (flat, ordered by idx).
@@ -188,9 +224,9 @@ function buildApiMessages(messages, options = {}) {
                     tool_call_id: callId,
                     content: withTimestamp(msg.content, msg.createdAt)
                 };
-                if (msg.toolImages && msg.toolImages.length > 0) {
+                if (msg.toolImages && msg.toolImages.length > 0 && !msg.toolImagesStripped) {
                     const resolvedToolImages = msg.toolImages
-                        .map(u => resolveImageUrl(u, publicOrigin))
+                        .map(u => resolveToolImage(u, publicOrigin, readImageBytes))
                         .filter(u => u !== null);
                     if (resolvedToolImages.length > 0) {
                         toolResultObj.content = [
