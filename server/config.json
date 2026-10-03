@@ -7,9 +7,11 @@
     "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
     "embedApiKey": null,
     "embedDims": 2560,
-    "embedMaxTokens": 25000,
     "embedTokRatio": 2.5,
-    "embedBatchTokenLimit": 29000,
+    "embedChunkTokens": 1024,
+    "embedChunkOverlapTokens": 128,
+    "embedMaxInputTokens": 4000,
+    "embedRequestTokenLimit": 4096,
     "users": [
         {
             "id": "admin-seed-user",

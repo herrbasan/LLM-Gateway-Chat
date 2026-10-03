@@ -14,6 +14,15 @@ const runner = require('./runner');
 const arenaRunner = require('./arena-runner');
 const mcpPool = require('./mcp-pool');
 const sttRelay = require('./stt-relay');
+const {
+    splitTextIntoChunks, minEmbedChunkCount, planEmbedBatches,
+    embedVectorId, deleteEmbedVectors,
+    EMBED_CHUNK_TOKENS: DEFAULT_EMBED_CHUNK_TOKENS,
+    EMBED_CHUNK_OVERLAP_TOKENS: DEFAULT_EMBED_CHUNK_OVERLAP_TOKENS,
+    EMBED_MAX_INPUT_TOKENS: DEFAULT_EMBED_MAX_INPUT_TOKENS,
+    EMBED_REQUEST_TOKENS: DEFAULT_EMBED_REQUEST_TOKENS,
+    EMBED_MAX_CONCURRENCY
+} = require('./embed');
 
 // Load minimal .env natively
 try {
@@ -43,7 +52,20 @@ const USERS_DB_PATH  = process.env.CHAT_USERS_DB       || cfg.usersDbPath       
 const SESSION_TTL    = (cfg.sessionTtlMinutes || 1440) * 60 * 1000;
 const EMBED_URL      = process.env.CHAT_EMBED_URL      || cfg.embedUrl          || 'http://192.168.0.100:3400/v1/embeddings';
 const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   || 2560;
-const EMBED_MAX_TOKENS = parseInt(process.env.CHAT_EMBED_MAX_TOKENS || cfg.embedMaxTokens) || 30000;
+// Chunking caps (see server/embed.js): prefill on the box is quadratic in input
+// length and it serves ONE embedding slot, so a whole-message request costs
+// minutes and queues interactive search behind it. Hard-clamped — a stale config
+// value must not resurrect the 20k-token requests that queued the box on
+// 2026-10-03.
+const EMBED_CHUNK_TOKENS = Math.max(64, parseInt(process.env.CHAT_EMBED_CHUNK_TOKENS || cfg.embedChunkTokens) || DEFAULT_EMBED_CHUNK_TOKENS);
+// Overlap is the one setting where an explicit 0 is meaningful, so it is read
+// without the `|| default` shortcut that would turn 0 into the default.
+const _overlapCfg = process.env.CHAT_EMBED_CHUNK_OVERLAP_TOKENS ?? cfg.embedChunkOverlapTokens;
+const EMBED_CHUNK_OVERLAP_TOKENS = _overlapCfg === undefined || _overlapCfg === null
+    ? DEFAULT_EMBED_CHUNK_OVERLAP_TOKENS
+    : Math.max(0, parseInt(_overlapCfg) || 0);
+const EMBED_MAX_INPUT_TOKENS = Math.min(Math.max(EMBED_CHUNK_TOKENS, parseInt(process.env.CHAT_EMBED_MAX_INPUT_TOKENS || cfg.embedMaxInputTokens) || DEFAULT_EMBED_MAX_INPUT_TOKENS), 32768);
+const EMBED_REQUEST_TOKENS = Math.min(Math.max(EMBED_MAX_INPUT_TOKENS, parseInt(process.env.CHAT_EMBED_REQUEST_TOKENS || cfg.embedRequestTokenLimit) || DEFAULT_EMBED_REQUEST_TOKENS), 8192);
 const EMBED_TOK_RATIO  = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
 const FILES_DIR       = process.env.CHAT_FILES_DIR     || cfg.filesDir           || path.join(path.dirname(path.resolve(USERS_DB_PATH)), 'files');
 // Workshop MCP server — backend-configured like gateway/TTS. The pool falls
@@ -362,7 +384,9 @@ function getOrLoadUserDb(dbPath) {
         vdb,
         embeddingsCol,
         pendingQueue: [],
-        needsFlush: 0
+        needsFlush: 0,
+        embedInFlight: 0,
+        embedWaiters: []
     };
     
     activeDbs.set(dbPath, instance);
@@ -375,7 +399,8 @@ function getOrLoadUserDb(dbPath) {
             const sessions = {};
             for (const s of db.find('_type', 'session')) sessions[s.id] = s;
             const stale = [];
-            const missingStatus = {}; // convNdbId -> Set of msg indices needing status backfill
+            const missingStatus = {}; // convNdbId -> [{ idx, chunks }] needing a status backfill
+            let upgrading = 0;
             for (const c of db.find('_type', 'conversation')) {
                 if (!c.messages) continue;
                 const missing = [];
@@ -388,15 +413,31 @@ function getOrLoadUserDb(dbPath) {
                         // 'failed' messages are retried too (gap filling): transient
                         // provider failures must not become permanent holes.
                         stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-                    } else if (!m.embedStatus || m.embedStatus === 'pending' || m.embedStatus === 'failed') {
-                        // In nVDB but status was never written, still pending, or previously failed — backfill to embedded
-                        missing.push(idx);
+                    } else if (m.embedChunks) {
+                        // Vector(s) present and the chunk count is recorded: healthy,
+                        // unless a previous status write was lost.
+                        if (m.embedStatus !== 'embedded') missing.push({ idx, chunks: m.embedChunks });
+                    } else {
+                        // A vector is present but predates chunking: the old pipeline
+                        // kept one whole-document vector per message and
+                        // middle-truncated anything past 25k tokens, so long content
+                        // is only partly indexed. Re-embed it in chunks.
+                        const need = minEmbedChunkCount(
+                            buildEmbedText(m, sessions[c.id] || {}, idx),
+                            { chunkTokens: EMBED_CHUNK_TOKENS, tokRatio: EMBED_TOK_RATIO }
+                        );
+                        if (need > 1) {
+                            upgrading++;
+                            stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
+                        } else {
+                            missing.push({ idx, chunks: 1 });
+                        }
                     }
                 }
                 if (missing.length > 0) missingStatus[c._id] = missing;
             }
             if (stale.length > 0) {
-                logger.info('Lazy reconciliation', { count: stale.length, dbPath }, 'Server');
+                logger.info('Lazy reconciliation', { count: stale.length, upgradingLegacyVectors: upgrading, dbPath }, 'Server');
                 (async () => {
                     let succeeded = 0;
                     let failed = 0;
@@ -432,9 +473,10 @@ function getOrLoadUserDb(dbPath) {
             }
             if (Object.keys(missingStatus).length > 0) {
                 let count = 0;
-                for (const [convNdbId, indices] of Object.entries(missingStatus)) {
-                    for (const idx of indices) {
+                for (const [convNdbId, entries] of Object.entries(missingStatus)) {
+                    for (const { idx, chunks } of entries) {
                         db.set(convNdbId, `messages.${idx}.embedStatus`, 'embedded');
+                        db.set(convNdbId, `messages.${idx}.embedChunks`, chunks);
                         db.set(convNdbId, `messages.${idx}.embedError`, null);
                         count++;
                     }
@@ -922,16 +964,22 @@ function buildEmbedText(msg, session, msgIdx = -1) {
     return parts.join(' ');
 }
 
-function middleTruncateEmbedText(text) {
-    const estTok = Math.ceil(text.length / EMBED_TOK_RATIO);
-    if (estTok <= EMBED_MAX_TOKENS) return { text, truncated: false };
-    const maxChars = Math.floor(EMBED_MAX_TOKENS * EMBED_TOK_RATIO);
-    const headLen = Math.floor(maxChars * 0.4);
-    const tailLen = maxChars - headLen;
-    return {
-        text: text.slice(0, headLen) + '\n\n[... truncated middle ...]\n\n' + text.slice(-tailLen),
-        truncated: true
-    };
+// Per-DB gate on embedding requests. The box serves ONE embedding slot, so
+// unbounded fan-out (arena turns, bursts of appended messages) only deepens its
+// queue and starves interactive search. The slot is handed straight to the next
+// waiter, so the in-flight count never dips below the limit.
+function acquireEmbedSlot(instance) {
+    if (instance.embedInFlight < EMBED_MAX_CONCURRENCY) {
+        instance.embedInFlight++;
+        return Promise.resolve();
+    }
+    return new Promise(resolve => instance.embedWaiters.push(resolve));
+}
+
+function releaseEmbedSlot(instance) {
+    const next = instance.embedWaiters.shift();
+    if (next) next();
+    else instance.embedInFlight--;
 }
 
 async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _prevFails = 0) {
@@ -956,74 +1004,114 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         throw new Error('Embedding endpoint unavailable — queued for retry');
     }
 
+    // Chunk small: the box's prefill cost is quadratic in input length, so one
+    // whole-message request runs for minutes and queues every interactive lookup
+    // behind it, while the same text as ~1k-token chunks finishes in seconds.
     const rawText = buildEmbedText(msg, session, msgIdx);
-    const { text, truncated } = middleTruncateEmbedText(rawText);
+    const chunkOpts = { chunkTokens: EMBED_CHUNK_TOKENS, tokRatio: EMBED_TOK_RATIO, overlapTokens: EMBED_CHUNK_OVERLAP_TOKENS };
+    let chunks = splitTextIntoChunks(rawText, chunkOpts);
+    let batches = planEmbedBatches(chunks, { maxRequestTokens: EMBED_REQUEST_TOKENS });
 
-    if (truncated) {
-        L().warn('Message truncated for embedding', { msgId: msg.id, charLen: rawText.length, truncLen: text.length }, 'Embed');
+    if (chunks.length > 1) {
+        L().info('Message chunked for embedding', { msgId: msg.id, role: msg.role, charLen: rawText.length, chunks: chunks.length, requests: batches.length }, 'Embed');
     }
 
     let lastError = null;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-            const vectors = await embedBatch([text]);
-            const vector = vectors[0];
-
-            if (!Array.isArray(vector) || vector.length === 0 || vector.length !== EMBEDDING_DIMS) {
-                throw new EmbedError('response', 'invalid_vector_shape');
-            }
-
-            instance.embeddingsCol.insert(msg.id, vector, JSON.stringify({
-                chatId: session.id, msgIdx
-            }));
-            instance.needsFlush++;
-
-            // Mark message as embedded in the conversation doc (atomic field writes — no read-modify-write race)
+    await acquireEmbedSlot(instance);
+    try {
+        for (let attempt = 0; attempt < 3; attempt++) {
+            let inserted = 0;
             try {
-                instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'embedded');
-                instance.db.set(convNdbId, `messages.${msgIdx}.embedAttempts`, attempt + 1);
-                instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, null);
-                embedEvents.emit('status', {
-                    chatId: session.id, msgIdx, messageId: msg.id,
-                    embedStatus: 'embedded', embedError: null
-                });
-            } catch (e) {
-                L().error('Failed to persist embed status', e, { msgId: msg.id, convNdbId }, 'Embed');
-            }
+                for (const batch of batches) {
+                    const vectors = await embedBatch(batch.map(c => c.text));
+                    for (let j = 0; j < batch.length; j++) {
+                        const vector = vectors[j];
+                        if (!Array.isArray(vector) || vector.length === 0 || vector.length !== EMBEDDING_DIMS) {
+                            throw new EmbedError('response', 'invalid_vector_shape');
+                        }
+                        instance.embeddingsCol.insert(embedVectorId(msg.id, batch[j].splitIdx), vector, JSON.stringify({
+                            chatId: session.id, msgIdx, chunk: batch[j].splitIdx
+                        }));
+                        inserted++;
+                    }
+                    instance.needsFlush += batch.length;
+                }
 
-            L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: text.length, attempt: attempt + 1 }, 'Embed');
-            return;
-        } catch (err) {
-            lastError = err;
+                // Drop chunks left over from a longer previous version of this text
+                // (indices at and beyond the new count): a shortened message must not
+                // leave an orphan vector behind.
+                for (let i = chunks.length; i <= chunks.length + 1; i++) {
+                    try { instance.embeddingsCol.delete(embedVectorId(msg.id, i)); } catch (e) {}
+                }
 
-            // Permanent payload problems — retrying cannot help
-            const isTokenOverflow = err.message?.includes('too many') && err.message?.includes('token');
-            const isClientError = err.kind === 'client';
-            if (isTokenOverflow || isClientError) {
-                const reason = isTokenOverflow ? 'too_many_tokens' : (err.message || 'client_error');
-                L().error('Embed permanent failure', err, { msgId: msg.id, kind: err.kind, charLen: text.length }, 'Embed');
+                // Mark message as embedded in the conversation doc (atomic field writes — no read-modify-write race)
                 try {
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, reason);
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'embedded');
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedChunks`, chunks.length);
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedAttempts`, attempt + 1);
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, null);
                     embedEvents.emit('status', {
                         chatId: session.id, msgIdx, messageId: msg.id,
-                        embedStatus: 'failed', embedError: reason
+                        embedStatus: 'embedded', embedError: null
                     });
                 } catch (e) {
-                    L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
+                    L().error('Failed to persist embed status', e, { msgId: msg.id, convNdbId }, 'Embed');
                 }
-                // Do NOT re-queue — this is a content problem, not a transient one
-                return;
-            }
 
-            // Transient — back off before next attempt. Honor Retry-After if given.
-            if (attempt < 2) {
-                const retryAfter = err.retryAfterMs || 0;
-                const delay = Math.max(Math.pow(4, attempt) * 1000, retryAfter);
-                await new Promise(r => setTimeout(r, delay));
+                L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: rawText.length, chunks: chunks.length, requests: batches.length, attempt: attempt + 1 }, 'Embed');
+                return;
+            } catch (err) {
+                lastError = err;
+
+                // Never leave a half-embedded message behind: a partial chunk set is
+                // invisible to the "is a vector present?" health check, which would
+                // then treat the message as complete.
+                if (inserted > 0) {
+                    instance.needsFlush += deleteEmbedVectors(instance.embeddingsCol, msg.id, inserted, null);
+                }
+
+                // Permanent payload problems — retrying cannot help
+                const isTokenOverflow = err.message?.includes('too many') && err.message?.includes('token');
+                const isClientError = err.kind === 'client';
+
+                // A token-ratio miss means the estimate under-counted this text: split
+                // it finer and go again rather than declaring the message unembeddable.
+                if (isTokenOverflow && attempt < 2) {
+                    chunkOpts.chunkTokens = Math.max(64, Math.floor(chunkOpts.chunkTokens / 2));
+                    chunks = splitTextIntoChunks(rawText, chunkOpts);
+                    batches = planEmbedBatches(chunks, { maxRequestTokens: EMBED_REQUEST_TOKENS });
+                    L().warn('Embed input overflowed — re-splitting smaller', { msgId: msg.id, chunkTokens: chunkOpts.chunkTokens, chunks: chunks.length }, 'Embed');
+                    continue;
+                }
+
+                if (isTokenOverflow || isClientError) {
+                    const reason = isTokenOverflow ? 'too_many_tokens' : (err.message || 'client_error');
+                    L().error('Embed permanent failure', err, { msgId: msg.id, kind: err.kind, charLen: rawText.length }, 'Embed');
+                    try {
+                        instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
+                        instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, reason);
+                        embedEvents.emit('status', {
+                            chatId: session.id, msgIdx, messageId: msg.id,
+                            embedStatus: 'failed', embedError: reason
+                        });
+                    } catch (e) {
+                        L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
+                    }
+                    // Do NOT re-queue — this is a content problem, not a transient one
+                    return;
+                }
+
+                // Transient — back off before next attempt. Honor Retry-After if given.
+                if (attempt < 2) {
+                    const retryAfter = err.retryAfterMs || 0;
+                    const delay = Math.max(Math.pow(4, attempt) * 1000, retryAfter);
+                    await new Promise(r => setTimeout(r, delay));
+                }
             }
         }
+    } finally {
+        releaseEmbedSlot(instance);
     }
 
     // Transient failure after all retries — re-queue for the background drain loop.
@@ -2112,7 +2200,7 @@ const routes = {
         if (c.messages) {
           for (const m of c.messages) {
             if (dbInstance.embeddingsCol && m.id) {
-              try { dbInstance.embeddingsCol.delete(m.id); dbInstance.needsFlush++; } catch(e) {}
+              try { dbInstance.needsFlush += deleteEmbedVectors(dbInstance.embeddingsCol, m.id, m.embedChunks, L()); } catch(e) {}
             }
           if (m.attachments) {
             for (const att of m.attachments) {

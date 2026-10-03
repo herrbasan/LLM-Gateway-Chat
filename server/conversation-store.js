@@ -8,6 +8,8 @@
 // Spec: docs/pa-implementation-spec.md (Part 2).
 // ============================================
 
+const { deleteEmbedVectors } = require('./embed');
+
 // Derive the compact `_file` nURI ('bucket:file.ext') from an attachment's
 // URL-ish fields. Returns null when nothing is derivable.
 function deriveFileRef(att) {
@@ -281,11 +283,10 @@ async function deleteConversationMessage(ctx, { conversationId, messageId } = {}
     db.set(session._id, 'messageCount', session.messageCount);
     db.set(session._id, 'updatedAt', session.updatedAt);
 
-    // Drop the embedding vector if one exists (keeps nVDB in step with nDB).
+    // Drop the embedding vector(s) if any exist (keeps nVDB in step with nDB).
     if (ctx.dbInstance.embeddingsCol && removed.id) {
-        try { ctx.dbInstance.embeddingsCol.delete(removed.id); ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) + 1; } catch (e) {
-            log.warn('Embed vector delete failed', { sessionId: conversationId, messageId, error: e.message }, 'Message');
-        }
+        ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) +
+            deleteEmbedVectors(ctx.dbInstance.embeddingsCol, removed.id, removed.embedChunks, log);
     }
 
     log.info('Message deleted', { sessionId: conversationId, messageId, role: removed.role, remaining: conv.messages.length }, 'Message');
@@ -312,7 +313,8 @@ async function editUserMessageAndTruncate(ctx, { conversationId, messageId, cont
     const target = conv.messages[pos];
     if (target.role !== 'user') throw new Error(`editUserMessageAndTruncate: only user messages are editable (${messageId} is ${target.role})`);
 
-    const removedIds = conv.messages.slice(pos + 1).map(m => m.id);
+    const removed = conv.messages.slice(pos + 1);
+    const removedIds = removed.map(m => m.id);
     target.content = content;
     target.updatedAt = new Date().toISOString();
     conv.messages = conv.messages.slice(0, pos + 1);
@@ -330,10 +332,9 @@ async function editUserMessageAndTruncate(ctx, { conversationId, messageId, cont
     db.set(session._id, 'updatedAt', session.updatedAt);
 
     if (ctx.dbInstance.embeddingsCol) {
-        for (const id of removedIds) {
-            try { ctx.dbInstance.embeddingsCol.delete(id); ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) + 1; } catch (e) {
-                log.warn('Edit-truncate embed delete failed', { sessionId: conversationId, messageId: id, error: e.message }, 'Message');
-            }
+        for (const m of removed) {
+            ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) +
+                deleteEmbedVectors(ctx.dbInstance.embeddingsCol, m.id, m.embedChunks, log);
         }
     }
 

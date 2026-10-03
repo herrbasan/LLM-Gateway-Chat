@@ -1,13 +1,23 @@
 // ============================================
-// Embedding Pipeline — Direct text embedding
+// Embedding Pipeline — chunked bulk backfill
 //
-//   node embed.js                            # embed via Gateway (default, cloud)
-//   node embed.js --wrapper                   # embed via Fatten wrapper (backup)
-//   node embed.js --openrouter                # embed via OpenRouter directly
+//   node backfill-embed.js                    # embed via Gateway (default, cloud)
+//   node backfill-embed.js --wrapper          # embed via Fatten wrapper (direct)
+//   node backfill-embed.js --openrouter       # embed via OpenRouter directly
+//   node backfill-embed.js --rechunk-large    # re-chunk messages still held as
+//                                             #   one whole-document vector
+//   node backfill-embed.js --retry-failed     # retry 'failed' / stale 'pending'
+//   node backfill-embed.js --concurrency=2    # max embedding requests in flight
 //
-// Benchmarks (Qwen3-4B, 500c real text):
-//   50 texts: ~5.5s (110ms/text) — tokenization not a bottleneck
-//   Throughput: 9 texts/sec (wrapper serializes)
+// Chunking contract (2026-10-03): the embedding box runs ONE slot and prefill
+// cost is quadratic in input length, so a 20k-token request decays to ~60 tok/s
+// (6-8 min) and queues every interactive lookup behind it, while ~1k-token
+// requests run at ~600 tok/s. This job therefore never sends more than
+// CHUNK_TOKENS_CFG per input and packs several chunks per request, bounded by
+// REQUEST_TOKENS_CFG and --concurrency. Measured on Qwen3-Embedding-4B (f16):
+//   ~1k tokens   -> ~600 tok/s -> ~2 s per embed
+//   ~3.4k tokens -> ~580 tok/s -> ~6 s per embed
+//   ~20k tokens  -> ~62 tok/s  -> 6-8 min per embed
 // ============================================
 
 const fs = require('fs');
@@ -15,7 +25,24 @@ const path = require('path');
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
-const { buildEmbedText, chunkTextForEmbedding, fetchRetry, EMBEDDING_DIMS, BATCH_TOKEN_LIMIT, TOK_CHARS_RATIO, sleep } = require('./embed');
+const { buildEmbedText, splitTextIntoChunks, minEmbedChunkCount, planEmbedBatches, embedVectorId, fetchRetry, EMBEDDING_DIMS, TOK_CHARS_RATIO, EMBED_CHUNK_TOKENS, EMBED_CHUNK_OVERLAP_TOKENS, EMBED_MAX_INPUT_TOKENS, EMBED_REQUEST_TOKENS, EMBED_MAX_CONCURRENCY, sleep } = require('./embed');
+
+// Load minimal .env natively (same loader as server.js). Without it the default
+// Gateway route has no GATEWAY_API_KEY and every request 401s — which is why
+// this script only ever worked through --wrapper before.
+try {
+    const envStr = fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf8');
+    for (const line of envStr.split('\n')) {
+        const match = line.match(/^\s*([\w_]+)\s*=\s*(.*)?\s*$/);
+        if (match) {
+            const key = match[1];
+            let val = match[2] || '';
+            val = val.replace(/\s*#.*$/, ''); // strip trailing comments
+            val = val.replace(/^(['"])(.*)\1$/, '$2').trim(); // strip quotes
+            if (!(key in process.env)) process.env[key] = val;
+        }
+    }
+} catch (e) { /* ignore missing .env */ }
 
 // ============================================
 // Config — loaded from server/config.json with env overrides
@@ -48,7 +75,17 @@ const MODEL_HEADERS = {
 const NDB_PATH = process.env.CHAT_NDB_PATH || cfg.ndbPath || path.join(__dirname, 'data', 'chat_app', 'data.jsonl');
 const NVDB_DIR = process.env.CHAT_NVDB_DIR || cfg.nvdbDir || 'server/data/nvdb';
 const PROGRESS_FILE = path.join(path.dirname(NDB_PATH), 'embed-progress.json');
-const BATCH_TOKEN_LIMIT_CFG = parseInt(process.env.CHAT_EMBED_BATCH_TOKENS || cfg.embedBatchTokenLimit) || BATCH_TOKEN_LIMIT;
+const CHUNK_TOKENS_CFG = Math.max(64, parseInt(process.env.CHAT_EMBED_CHUNK_TOKENS || cfg.embedChunkTokens) || EMBED_CHUNK_TOKENS);
+// Overlap is the one setting where an explicit 0 is meaningful, so it is read
+// without the `|| default` shortcut that would turn 0 into the default.
+const _overlapCfg = process.env.CHAT_EMBED_CHUNK_OVERLAP_TOKENS ?? cfg.embedChunkOverlapTokens;
+const OVERLAP_TOKENS_CFG = _overlapCfg === undefined || _overlapCfg === null
+    ? EMBED_CHUNK_OVERLAP_TOKENS
+    : Math.max(0, parseInt(_overlapCfg) || 0);
+const MAX_INPUT_TOKENS_CFG = Math.min(Math.max(CHUNK_TOKENS_CFG, parseInt(process.env.CHAT_EMBED_MAX_INPUT_TOKENS || cfg.embedMaxInputTokens) || EMBED_MAX_INPUT_TOKENS), 32768);
+// Hard-clamped: a stale 29k value in config must not resurrect whole-document
+// requests — that is what queued the embedding box for hours on 2026-10-03.
+const REQUEST_TOKENS_CFG = Math.min(Math.max(MAX_INPUT_TOKENS_CFG, parseInt(process.env.CHAT_EMBED_REQUEST_TOKENS || cfg.embedRequestTokenLimit) || EMBED_REQUEST_TOKENS), 8192);
 
 // ============================================
 // CLI
@@ -61,6 +98,7 @@ function parseArgs() {
         wrapper: false,
         openrouter: false,
         batchSize: 100,
+        concurrency: 1,
         rechunkLarge: false,
         retryFailed: false,
         dryRun: false,
@@ -75,6 +113,7 @@ function parseArgs() {
         else if (arg === '--retry-failed') opts.retryFailed = true;
         else if (arg === '--dry-run') opts.dryRun = true;
         else if (arg.startsWith('--batch-size=')) opts.batchSize = parseInt(arg.split('=')[1], 10);
+        else if (arg.startsWith('--concurrency=')) opts.concurrency = parseInt(arg.split('=')[1], 10);
     }
 
     return opts;
@@ -180,9 +219,14 @@ async function run() {
     const docs = db.iter();
     // Gather all messages from conversation documents
     const messages = [];
+    let toolSkipped = 0;
     for (const c of docs.filter(d => d._type === 'conversation')) {
         if (!c.messages) continue;
         for (const m of c.messages) {
+            // Tool payloads are deliberately not indexed — same rule as
+            // embedMessageAsync and the startup reconciliation. They are huge
+            // JSON blobs: embedding them wastes box time and pollutes search.
+            if (m.role === 'tool') { toolSkipped++; continue; }
             m._sessionId = c.id; // attach sessionId for buildText
             messages.push(m);
         }
@@ -190,50 +234,50 @@ async function run() {
     const sessions = {};
     for (const s of docs.filter(d => d._type === 'session')) sessions[s.id] = s;
 
-    // By default, do not re-embed if vector exists in nVDB or progress file
+    // Build the embed text once per message: the chunker, the size estimate and
+    // the request planner all work off this.
+    const withText = messages.map(m => {
+        const text = buildEmbedText(m, sessions[m._sessionId]);
+        return { msg: m, text, tokEst: Math.ceil(text.length / TOK_CHARS_RATIO) };
+    });
+    const chunkOpts = { chunkTokens: CHUNK_TOKENS_CFG, tokRatio: TOK_CHARS_RATIO, overlapTokens: OVERLAP_TOKENS_CFG };
+
+    // Default runs heal genuine gaps only: a message with no vector at all (or
+    // one the progress file already vouches for). Upgrading an already-embedded
+    // message to chunked vectors is a deliberate pass (--rechunk-large), not
+    // something every run decides to redo — that would re-embed the whole long
+    // archive on every invocation.
     const progress = (!opts.rechunkLarge) ? loadProgress() : {};
 
     let already = 0;
-    const todo = [];
+    let todo = [];
 
-    for (const m of messages) {
-        if (!opts.rechunkLarge && (col.get(m.id) || progress[m.id])) {
-            already++;
-        } else {
-            todo.push(m);
-        }
-    }
-
-    // --rechunk-large: specifically target messages that were previously crippled by old middle-truncation
     if (opts.rechunkLarge) {
-        const withEst = todo.map(m => {
-            const text = buildEmbedText(m, sessions[m._sessionId]);
-            return { msg: m, text, tokEst: Math.ceil(text.length / TOK_CHARS_RATIO) };
-        });
-        const oldLimit = 5000;  // The old threshold where data was destructively deleted
-        const affected = withEst.filter(w => w.tokEst > oldLimit);
-        todo.length = 0;
-        for (const w of affected) todo.push(w.msg);
-        const skipped = withEst.length - todo.length;
-        logger.info('Rechunk-large mode', { inNVDB: withEst.length, affected: todo.length, unchanged: skipped }, 'Embed');
-    }
-
-    // --retry-failed: scan nDB for failed + stale pending messages (ignore nVDB)
-    if (opts.retryFailed) {
+        // Messages already embedded but held as one whole-document vector, i.e.
+        // too long to be a single chunk — exactly what the old pipeline sent as
+        // one huge request (or middle-truncated past 25k tokens).
+        todo = withText.filter(w => col.get(w.msg.id) && minEmbedChunkCount(w.text, chunkOpts) > 1);
+        already = withText.length - todo.length;
+        logger.info('Rechunk-large mode', { total: withText.length, needsChunking: todo.length, unchanged: already }, 'Embed');
+    } else if (opts.retryFailed) {
         const STALE_MS = 5 * 60 * 1000;
         const now = Date.now();
-        const failed = messages.filter(m => {
+        todo = withText.filter(({ msg: m }) => {
             if (m.embedStatus === 'failed') return true;
             if (m.embedStatus === 'pending' && (now - new Date(m.createdAt).getTime()) > STALE_MS) return true;
             return false;
         });
-        already = messages.length - failed.length;
-        todo.length = 0;
-        for (const m of failed) todo.push(m);
-        logger.info('Retry-failed mode', { total: messages.length, failedStale: todo.length, ok: already }, 'Embed');
+        already = withText.length - todo.length;
+        logger.info('Retry-failed mode', { total: withText.length, failedStale: todo.length, ok: already }, 'Embed');
+    } else {
+        for (const w of withText) {
+            if (col.get(w.msg.id) || progress[w.msg.id]) already++;
+            else todo.push(w);
+        }
+        logger.info('Gap heal', { gaps: todo.length, alreadyEmbedded: already }, 'Embed');
     }
 
-    logger.info('Embedding stats', { total: messages.length, done: already, todo: todo.length }, 'Embed');
+    logger.info('Embedding stats', { total: messages.length, toolsSkipped: toolSkipped, done: already, todo: todo.length }, 'Embed');
 
     if (todo.length === 0) {
         logger.info('Nothing to embed — all messages already embedded', {}, 'Embed');
@@ -241,41 +285,46 @@ async function run() {
         return;
     }
 
-    // Pre-build texts and estimate tokens
-    const withText = todo.map(m => {
-        const text = buildEmbedText(m, sessions[m._sessionId]);
-        return { msg: m, text, tokEst: Math.ceil(text.length / TOK_CHARS_RATIO) };
-    });
-
-    // Dynamic batch sizing: stay under BATCH_TOKEN_LIMIT
-    const batches = [];
-    let currentBatch = [], currentTokens = 0;
-
-    for (const originalItem of withText) {
-        const chunks = chunkTextForEmbedding(originalItem, logger);
-        
-        for(const item of chunks) {
-            if (currentBatch.length > 0 && currentTokens + item.tokEst > BATCH_TOKEN_LIMIT_CFG) {
-                batches.push(currentBatch);
-                currentBatch = [];
-                currentTokens = 0;
-            }
-
-            currentBatch.push(item);
-            currentTokens += item.tokEst;
+    // Chunk every message, then pack the chunks into small requests. ~1k-token
+    // inputs run at ~600 tok/s on the box; 20k-token inputs at ~60.
+    const chunkItems = [];
+    const needChunks = new Map();
+    for (const w of todo) {
+        const chunks = splitTextIntoChunks(w.text, chunkOpts);
+        let charOffset = 0;
+        for (let splitIdx = 0; splitIdx < chunks.length; splitIdx++) {
+            const c = chunks[splitIdx];
+            chunkItems.push({ msg: w.msg, text: c.text, tokEst: c.tokEst, splitIdx, charOffset });
+            charOffset += c.text.length;
         }
+        needChunks.set(w.msg.id, chunks.length);
     }
-    if (currentBatch.length > 0) batches.push(currentBatch);
 
-    const totalTokEst = batches.reduce((sum, batch) => sum + batch.reduce((s, b) => s + b.tokEst, 0), 0);
-    logger.info('Batches', { count: batches.length, totalTokEst: (totalTokEst / 1000).toFixed(0) + 'k', limit: BATCH_TOKEN_LIMIT_CFG }, 'Embed');
+    const batches = planEmbedBatches(chunkItems, { maxRequestTokens: REQUEST_TOKENS_CFG });
 
-    let embedded = 0;
-    let failed = 0;
+    const totalTokEst = chunkItems.reduce((sum, c) => sum + c.tokEst, 0);
+    const largestInput = chunkItems.reduce((max, c) => Math.max(max, c.tokEst), 0);
+    logger.info('Batches', {
+        messages: todo.length,
+        chunks: chunkItems.length,
+        batches: batches.length,
+        totalTokEst: (totalTokEst / 1000).toFixed(0) + 'k',
+        chunkTokens: CHUNK_TOKENS_CFG,
+        requestTokens: REQUEST_TOKENS_CFG,
+        largestInput,
+        concurrency: Math.min(Math.max(1, opts.concurrency || 1), EMBED_MAX_CONCURRENCY)
+    }, 'Embed');
+
+    const CONCURRENCY = Math.min(Math.max(1, opts.concurrency || 1), EMBED_MAX_CONCURRENCY);
+    let embedded = 0;   // chunks embedded
+    let failed = 0;     // chunks failed
     const batchTimes = [];
+    const doneChunks = new Map();
+    let nextBatch = 0;
+    let completedBatches = 0;
+    const wallStart = Date.now();
 
-    for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i];
+    async function runBatch(i, batch) {
         const texts = batch.map(b => b.text);
         const batchTokens = batch.reduce((s, b) => s + b.tokEst, 0);
         const batchStart = Date.now();
@@ -286,19 +335,21 @@ async function run() {
         try {
             for (let truncAttempt = 0; truncAttempt <= 2; truncAttempt++) {
                 try {
+                    // opts.retries drives fetchRetry's own backoff — a batch that
+                    // fails on a busy/timeout blip must not silently drop work.
                     embeddings = opts.dryRun
                         ? batchTexts.map(() => new Array(EMBEDDING_DIMS).fill(0))
-                        : await embedFn(batchTexts, 0); // no inner retry, we handle retry
+                        : await embedFn(batchTexts, opts.retries);
                     break;
                 } catch (err) {
-                    // Progressive truncation for "too large" errors on single-text batches
-                    if (batch.length === 1 && err.message.includes('too large') && truncAttempt < 2) {
-                        const prevLen = batchTexts[0].length;
-                        batchTexts[0] = batchTexts[0].slice(0, Math.floor(prevLen * 0.65));
+                    // A chunk that still overflows the box is a token-ratio miss,
+                    // not a content problem: shrink it and try again.
+                    if (err.message.includes('too large') && truncAttempt < 2) {
+                        const shrink = t => t.slice(0, Math.floor(t.length * 0.65));
+                        batchTexts = batchTexts.length === 1 ? [shrink(batchTexts[0])] : batchTexts.map(shrink);
+                        logger.warn('Chunk too large — shrunk for retry', { batch: i + 1, chars: batchTexts[0].length, attempt: truncAttempt + 1 }, 'Embed');
                         continue;
                     }
-                    // On last attempt (or multi-text batch), rethrow
-                    if (truncAttempt === 2) throw err;
                     throw err;
                 }
             }
@@ -312,17 +363,22 @@ async function run() {
                 for (let j = 0; j < batch.length; j++) {
                     const b = batch[j];
                     const m = b.msg;
-                    // Prevent ID collisions in nVDB for split messages
-                    const vectorId = b.splitIdx > 0 ? `${m.id}_${b.splitIdx}` : m.id;
-                    col.insert(vectorId, embeddings[j], JSON.stringify({
+                    // One vector per chunk: chunk 0 keeps the bare message id, so
+                    // single-chunk messages are indistinguishable from before.
+                    col.insert(embedVectorId(m.id, b.splitIdx), embeddings[j], JSON.stringify({
                         chatId: m._sessionId, msgIdx: m.idx, chunk: b.splitIdx, charOffset: b.charOffset
                     }));
                 }
             }
 
             for (const b of batch) {
-                // Only mark as fully complete if it is the final chunk
-                if (b.isLastChunk) progress[b.msg.id] = true;
+                // Mark complete only once every chunk of the message landed: with
+                // concurrent batches, "the last chunk finished" proves nothing
+                // about the earlier ones.
+                const id = b.msg.id;
+                const done = (doneChunks.get(id) || 0) + 1;
+                doneChunks.set(id, done);
+                if (done >= needChunks.get(id)) progress[id] = true;
             }
             embedded += batch.length;
 
@@ -336,33 +392,50 @@ async function run() {
         batchTimes.push(batchMs);
         saveProgress(progress);
 
-        const avgMs = batchTimes.reduce((a, b) => a + b, 0) / batchTimes.length;
-        const eta = batches.length - (i + 1) > 0
-            ? ((avgMs * (batches.length - i - 1)) / 1000).toFixed(0) + 's'
+        completedBatches++;
+        const wallSec = (Date.now() - wallStart) / 1000;
+        const rate = wallSec > 0 ? (embedded / wallSec).toFixed(1) : '0';
+        const remaining = chunkItems.length - embedded;
+        const eta = remaining > 0 && embedded > 0
+            ? ((remaining / (embedded / wallSec)) / 60).toFixed(1) + 'min'
             : 'done';
 
         process.stdout.write(
-            `\r  ${embedded}/${todo.length} | Failed: ${failed} | ` +
-            `Batch ${i + 1}/${batches.length} ${(batchMs / 1000).toFixed(1)}s ` +
-            `(${batchTokens}tk, ${(batch.length / batchMs * 1000).toFixed(0)} msg/s) | ETA: ${eta}`
+            `\r  chunks ${embedded}/${chunkItems.length} | Failed: ${failed} | ` +
+            `Batch ${completedBatches}/${batches.length} ${(batchMs / 1000).toFixed(1)}s ` +
+            `(${batchTokens}tk, ${rate} chunk/s) | ETA: ${eta}   `
         );
     }
+
+    // Bounded fan-out: the box has ONE embedding slot, so extra workers only keep
+    // its queue fed — they do not add throughput.
+    await Promise.all(Array.from(
+        { length: Math.min(CONCURRENCY, batches.length) },
+        async () => {
+            while (nextBatch < batches.length) {
+                const idx = nextBatch++;
+                await runBatch(idx, batches[idx]);
+            }
+        }
+    ));
+    process.stdout.write('\n');
 
     const elapsed = (Date.now() - startTime) / 1000;
     const avgBatchMs = batchTimes.reduce((a, b) => a + b, 0) / batchTimes.length;
 
     logger.info('Embedding pipeline complete', {
         route,
-        embedded,
-        failed,
+        messages: todo.length,
+        chunksEmbedded: embedded,
+        chunksFailed: failed,
         time: elapsed.toFixed(1),
-        speed: (embedded / elapsed).toFixed(1),
+        chunksPerSec: (embedded / elapsed).toFixed(1),
         avgBatch: (avgBatchMs / 1000).toFixed(1),
         batches: batchTimes.length
     }, 'Embed');
 
     if (failed > 0) {
-        logger.warn('Some embeddings failed — run again with --retry-failed', { failed }, 'Embed');
+        logger.warn('Some embeddings failed — run again with --retry-failed', { chunksFailed: failed }, 'Embed');
     }
 
     if (!opts.dryRun) {

@@ -79,8 +79,10 @@ Browser (view) ──► chat backend ──► LLM Gateway / MCP tools / nSpeec
     "port": 8080,
     "embedUrl": "http://192.168.0.100:3400/v1/embeddings",
     "embedDims": 2560,
-    "embedMaxTokens": 25000,
-    "embedBatchTokenLimit": 29000,
+    "embedChunkTokens": 1024,
+    "embedChunkOverlapTokens": 128,
+    "embedMaxInputTokens": 4000,
+    "embedRequestTokenLimit": 4096,
     "sessionTtlMinutes": 1440,
     "users": [
         {
