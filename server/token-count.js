@@ -54,8 +54,26 @@ function reasoningOf(m, model) {
     return t;
 }
 
+// Tool definitions ride as a top-level `tools` array, NOT inside messages —
+// so counting only apiMessages silently omits them. They occupy the same
+// context window as message text, which makes an uncounted toolset a silent
+// under-report of exactly the number the pill exists to show: the MCP pool
+// alone advertises dozens of tools with multi-line descriptions.
+function countTools(tools, model) {
+    if (!Array.isArray(tools) || tools.length === 0) return 0;
+    let t = 0;
+    for (const tool of tools) {
+        t += 4; // per-tool framing, same allowance as per-message
+        // Wire shapes differ (OpenAI {type,function:{...}} vs Anthropic
+        // {name,description,input_schema}); both are serialized JSON on the
+        // wire, so count the serialized form rather than picking a shape.
+        t += encode(JSON.stringify(tool), model);
+    }
+    return t;
+}
+
 // Count the full assembled apiMessages array — every field that goes on the wire.
-function countApiMessages(apiMessages, model) {
+function countApiMessages(apiMessages, model, tools) {
     let total = 3; // request formatting overhead (matches gateway heuristic)
     for (const m of apiMessages) {
         total += 4; // per-message role/formatting overhead
@@ -63,13 +81,13 @@ function countApiMessages(apiMessages, model) {
         total += reasoningOf(m, model);
         if (m.tool_calls) total += encode(JSON.stringify(m.tool_calls), model);
     }
-    return total;
+    return total + countTools(tools, model);
 }
 
 // Per-request breakdown: role/field token counts + a per-message table, so the
 // console shows EXACTLY what was sent and where the tokens are. Verification
 // tool for the context pill — answers "is this number real" by inspection.
-function breakdownApiMessages(apiMessages, model) {
+function breakdownApiMessages(apiMessages, model, tools) {
     const rows = [];
     let content = 0, reasoning = 0, toolCalls = 0, overhead = 3;
     apiMessages.forEach((m, i) => {
@@ -80,11 +98,13 @@ function breakdownApiMessages(apiMessages, model) {
         content += c; reasoning += r; toolCalls += t;
         rows.push({ i, role: m.role, content: c, reasoning: r, toolCalls: t, total: c + r + t + 4 });
     });
+    const toolDefs = countTools(tools, model);
     return {
-        total: 3 + overhead - 3 + content + reasoning + toolCalls,
-        byField: { content, reasoning, toolCalls, overhead },
+        total: content + reasoning + toolCalls + overhead + toolDefs,
+        byField: { content, reasoning, toolCalls, toolDefs, overhead },
+        toolCount: Array.isArray(tools) ? tools.length : 0,
         messages: rows
     };
 }
 
-module.exports = { countApiMessages, breakdownApiMessages, encode };
+module.exports = { countApiMessages, breakdownApiMessages, countTools, encode };

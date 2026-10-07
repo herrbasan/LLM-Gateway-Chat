@@ -398,13 +398,15 @@ class Runner {
         let windowSize = lastAssistant?.context?.window_size ?? null;
         try {
             const { apiMessages, rawMessages } = await this._assemblePayload();
-            realUsed = countApiMessages(apiMessages, this.session.model);
-            rawUsed = countApiMessages(rawMessages, this.session.model);
-            if (windowSize == null) {
-                const models = await getModels();
-                windowSize = models.find(m => m.id === this.session.model)?.capabilities?.contextWindow ?? null;
-            }
-        } catch (e) {
+                    const models = await getModels();
+                    const entry = models.find(m => m.id === this.session.model);
+                    const tools = await this._assembleTools(entry?.capabilities?.vision === true);
+                    realUsed = countApiMessages(apiMessages, this.session.model, tools);
+                    rawUsed = countApiMessages(rawMessages, this.session.model, tools);
+                    if (windowSize == null) {
+                        windowSize = entry?.capabilities?.contextWindow ?? null;
+                    }
+                } catch (e) {
             DEPS.log().warn('Snapshot context count failed', { chatId: this.conversationId, error: e.message }, 'Runner');
         }
         const realContext = realUsed == null ? (lastAssistant?.context ?? null) : {
@@ -524,9 +526,24 @@ class Runner {
                 more = true;
                 continue;
             }
-            if (this.pendingSends > 0) { this.pendingSends = 0; more = true; }
+            if (this.pendingSends > 0) {
+                this.pendingSends = 0;
+                // A send that arrived mid-run is usually already answered: the
+                // next tool hop's payload included it. Another turn then sends a
+                // history ending on the model's own answer — nothing to answer
+                // (kimi-k3 empty → 502 ×3, DeepSeek 400; 2026-10-04).
+                more = this._hasUnansweredTurn();
+                if (!more) DEPS.log().info('Queued send already answered — no extra turn', { chatId: this.conversationId }, 'Runner');
+            }
             else more = false;
         }
+    }
+
+    // The stored history ends on something the model has not answered yet.
+    _hasUnansweredTurn() {
+        this.refresh();
+        const messages = this.conv.messages;
+        return messages.length > 0 && messages[messages.length - 1].role !== 'assistant';
     }
 
     // Transient tool images (image_attach, #49): the pixels exist so the model
@@ -556,6 +573,33 @@ class Runner {
     // runOnce (the live turn) and buildSnapshot (the on-load context figure), so
     // the pill counts the SAME thing whether the conversation is fresh-loaded or
     // mid-stream — fixing the load-vs-live divergence (#10).
+    // PB-b: internal tools (archive/browser_fetch/attachment_save, retirement in
+    // chunkTransform chats) + the user's MCP tools (pool auto-connects lazily),
+    // vision-filtered like the client. Extracted so runOnce and buildSnapshot
+    // count the SAME toolset — the pill must not read differently on load than
+    // on send, which is the one regression this pipeline already suffered once.
+    //
+    // pool must be defined HERE — the _assemblePayload extraction (394f965)
+    // moved the original declaration away and 04a415d fixed mcpOrigin but left
+    // this dangling: every turn since logged "MCP pool unavailable: pool is not
+    // defined" and ran tool-less.
+    async _assembleTools(modelSupportsVision) {
+        const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        let tools = internalTools.getToolDefs({ chunkTransform: this.session.chunkTransform === true });
+        let mcpTools = [];
+        try {
+            mcpTools = await pool.getFormattedTools();
+        } catch (e) {
+            DEPS.log().warn('MCP pool unavailable', { chatId: this.conversationId, error: e.message }, 'Runner');
+        }
+        // Vision-tool gating on capability alone. The old [Auto-vision: marker
+        // sniff was dead — nothing produced that marker between the rework and
+        // the server-side auto-vision restore (2026-08-29). Vision model → sees
+        // images natively, vision tools are redundant indirection → filtered.
+        // Non-vision model → tools kept as the fallback path. (#21 / #18)
+        return tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision }));
+    }
+
     async _assemblePayload(turnModel = null) {
         const [instructions, chunkView] = await Promise.all([
             DEPS.getInstructions(),
@@ -711,8 +755,12 @@ class Runner {
     // turn's prefix survive from last turn). reasoningStripped is not reported
     // here: the reasoning policy is gateway-side (§3) and invisible to the
     // runner — reasoningTokens (what's ON the wire) is the honest number.
-    _contextReport({ apiMessages, rawMessages, chunkStats, breakdown, model }) {
-        const rawTokens = countApiMessages(rawMessages, model);
+    _contextReport({ apiMessages, rawMessages, chunkStats, breakdown, model, tools }) {
+            // Tools count on BOTH sides. raw is "the same request before the
+            // measures ran" — the toolset is not a measure, it ships either way.
+            // Counting it on one side only would let the delta read as negative
+            // savings on a turn where dedup saved less than the toolset costs.
+            const rawTokens = countApiMessages(rawMessages, model, tools);
         // Cache hint: per-message hashes compared against last turn at the same
         // indices. Append-only history → all previous messages match → 'stable'.
         // A mutation (retirement, edit, reasoning change) breaks at its index —
@@ -814,52 +862,39 @@ class Runner {
             this.inFlight.apiMessages = apiMessages;
 
             // Verification log: the full token breakdown of what's actually sent,
-            // so the console shows exactly where the tokens are each turn.
-            {
-                const b = breakdownApiMessages(apiMessages, model);
-                this.inFlight.contextReport = this._contextReport({ apiMessages, rawMessages, chunkStats, breakdown: b, model });
-                const head = `[token-count] ${this.conversationId.slice(-8)} turn payload: ${b.total} tok ` +
-                    `(content ${b.byField.content} + reasoning ${b.byField.reasoning} + toolCalls ${b.byField.toolCalls} + overhead ${b.byField.overhead}) across ${apiMessages.length} msgs`;
-                console.log(head); // stdout — visible in the nPM console, not just the JSON log
-                DEPS.log().info(head, null, 'Runner');
-                for (const row of b.messages) {
-                    DEPS.log().info(`[token-count]   msg[${row.i}] ${row.role}: total=${row.total} (content=${row.content} reasoning=${row.reasoning} toolCalls=${row.toolCalls})`, null, 'Runner');
-                }
-            }
+                        // so the console shows exactly where the tokens are each turn.
+                        // Runs AFTER the tool assembly below — tool definitions are part of
+                        // the payload and must be in the count (see token-count.countTools).
 
-            // Keep the model's true window for the context denominator. (The
-            // used_tokens figure is computed at run end from the full stored
-            // history — see endRun — not from this dedup'd request payload.)
-            try {
-                const modelsForWindow = await getModels();
-                const win = modelsForWindow.find(m => m.id === model)?.capabilities?.contextWindow;
-                if (win) this.inFlight.realWindowSize = win;
-            } catch { /* window lookup is cosmetic — the count is the fix */ }
+                        // Keep the model's true window for the context denominator. The
+                        // used_tokens figure is computed at run end from this same dedup'd
+                        // request payload (see endRun) — that is the limit-relevant number.
+                        try {
+                            const modelsForWindow = await getModels();
+                            const win = modelsForWindow.find(m => m.id === model)?.capabilities?.contextWindow;
+                            if (win) this.inFlight.realWindowSize = win;
+                        } catch { /* window lookup is cosmetic — the count is the fix */ }
 
-            // PB-b: internal tools (archive/browser_fetch/attachment_save,
-            // retirement in chunkTransform chats) + the user's MCP tools
-            // (pool auto-connects lazily), vision-filtered like the client.
-            // pool must be defined HERE — the _assemblePayload extraction
-            // (394f965) moved the original declaration away and 04a415d fixed
-            // mcpOrigin but left this dangling: every turn since logged
-            // "MCP pool unavailable: pool is not defined" and ran tool-less.
-            const pool = mcpPool.getForUser(this.user, this.dbInstance);
-            let tools = internalTools.getToolDefs({ chunkTransform: this.session.chunkTransform === true });
-            let mcpTools = [];
-            try {
-                mcpTools = await pool.getFormattedTools();
-            } catch (e) {
-                DEPS.log().warn('MCP pool unavailable', { chatId: this.conversationId, error: e.message }, 'Runner');
-            }
-            // Vision-tool gating on capability alone (lookup done above, before
-            // assembly). The old [Auto-vision: marker sniff was dead — nothing
-            // produced that marker between the rework and the server-side
-            // auto-vision restore (2026-08-29). Vision model → sees images
-            // natively, vision tools are redundant indirection → filtered.
-            // Non-vision model → tools kept as the fallback path. (#21 / #18)
-            tools = tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision }));
-            this._toolsAdvertised = tools.length > 0;
-            this._mcpOrigin = mcpOrigin;
+            // PB-b: internal tools + the user's MCP tools, vision-filtered like the client.
+                        const tools = await this._assembleTools(modelSupportsVision);
+                        this._toolsAdvertised = tools.length > 0;
+                        this._mcpOrigin = mcpOrigin;
+
+                        // Tools are part of the request payload, so the count that drives the
+                        // pill has to see them. Captured on inFlight because endRun owns the
+                        // authoritative number and the tools are gone by then.
+                        this.inFlight.tools = tools;
+                        {
+                            const b = breakdownApiMessages(apiMessages, model, tools);
+                            this.inFlight.contextReport = this._contextReport({ apiMessages, rawMessages, chunkStats, breakdown: b, model, tools });
+                            const head = `[token-count] ${this.conversationId.slice(-8)} turn payload: ${b.total} tok ` +
+                                `(content ${b.byField.content} + reasoning ${b.byField.reasoning} + toolCalls ${b.byField.toolCalls} + toolDefs ${b.byField.toolDefs} + overhead ${b.byField.overhead}) across ${apiMessages.length} msgs + ${b.toolCount} tools`;
+                            console.log(head); // stdout — visible in the nPM console, not just the JSON log
+                            DEPS.log().info(head, null, 'Runner');
+                            for (const row of b.messages) {
+                                DEPS.log().info(`[token-count]   msg[${row.i}] ${row.role}: total=${row.total} (content=${row.content} reasoning=${row.reasoning} toolCalls=${row.toolCalls})`, null, 'Runner');
+                            }
+                        }
             // ---- gateway call with transient-failure retry (Copilot-style) ----
             // One request = one attempt. Transient failures (stall, TTFT, network,
             // 408/429/5xx) loop; deterministic failures and user aborts break out
@@ -1306,7 +1341,7 @@ class Runner {
         let context = f.context || null;
         if (f.apiMessages) {
             const windowSize = f.realWindowSize || context?.window_size || null;
-            const used = countApiMessages(f.apiMessages, f.model);
+            const used = countApiMessages(f.apiMessages, f.model, f.tools);
             context = {
                 window_size: windowSize,
                 used_tokens: used,
@@ -1426,6 +1461,9 @@ class Runner {
         }
         this.refresh(); // conv/session objects are stale after the writes
         for (const id of ids) this.broadcast('msg.deleted', { messageId: id, role: 'assistant' });
+        // The failed run may have been one that should never have started (a
+        // queued send already answered): removing its note is the whole repair.
+        if (!this._hasUnansweredTurn()) return { retried: false, removed: ids.length };
         this.pendingSends++;
         this.kick();
         return { retried: true, removed: ids.length };
