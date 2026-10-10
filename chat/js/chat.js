@@ -39,6 +39,10 @@ window._mcpTracePersist = (entry) => {
 
 // Config values with defaults
 const CONFIG = window.CHAT_CONFIG || {};
+
+// All app icon-only buttons carry explicit aria-labels (audited 2026-10-10);
+// silence nui's a11y auto-label warnings (autoLabel stays on as safety net).
+window.nui?.configure?.({ a11y: { warnings: 'silent' } });
 const DEFAULT_MODEL = CONFIG.defaultModel || '';
 const DEFAULT_TEMPERATURE = CONFIG.defaultTemperature ?? 0.7;
 const DEFAULT_MAX_TOKENS = CONFIG.defaultMaxTokens || '';
@@ -1010,7 +1014,7 @@ function _decoratePreviewToolButton(toolEl, toolName, args) {
     btn.className = 'action-btn reopen-preview';
     btn.setAttribute('variant', 'icon');
     btn.setAttribute('title', 'Show in preview');
-    btn.innerHTML = '<button type="button"><nui-icon name="article"></nui-icon></button>';
+    btn.innerHTML = '<button type="button" aria-label="Show in preview"><nui-icon name="article"></nui-icon></button>';
     btn.addEventListener('click', (e) => {
         e.stopPropagation();
         // show() is async now (url mode fetches) — don't let a failed re-fetch
@@ -1073,7 +1077,7 @@ function buildExchangeElement(exchange) {
                     <nui-icon name="extension"></nui-icon>
                     <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
-                    <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
+                    <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button" aria-label="Delete Tool Call"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
                 <div class="tool-notifications" style="display: ${isError ? 'block' : 'none'};">${errorSummaryHtml}</div>
                 <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
@@ -1163,8 +1167,8 @@ function buildExchangeElement(exchange) {
         </div>
         <div class="message-content">${userContent}</div>
         <div class="message-actions-user">
-            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
-            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
+            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button" aria-label="Edit Message"><nui-icon name="edit"></nui-icon></button></nui-button>
+            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button" aria-label="Delete Message"><nui-icon name="delete"></nui-icon></button></nui-button>
         </div>
     `;
     userEl.querySelector('.edit-message')?.addEventListener('click', () => startEditMode(exchange.id, 'user'));
@@ -1711,7 +1715,7 @@ function renderPresetList() {
         item.innerHTML =
             `<span class="preset-item-name">${escapeHtml(p.name)}</span>` +
             `<span class="preset-item-actions">` +
-                `<nui-button data-delete-preset="${p.id}"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>` +
+                `<nui-button data-delete-preset="${p.id}" title="Delete Preset"><button type="button" aria-label="Delete Preset"><nui-icon name="delete"></nui-icon></button></nui-button>` +
             `</span>`;
         item.addEventListener('click', (e) => {
             if (e.target.closest('[data-delete-preset]')) return;
@@ -3653,7 +3657,7 @@ function renderExchange(exchange, targetContainer = null) {
                     <nui-icon name="extension"></nui-icon>
                     <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
-                    <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
+                    <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button" aria-label="Delete Tool Call"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
                 <div class="tool-notifications" style="display: ${isError ? 'block' : 'none'};">${errorSummaryHtml2}</div>
                   <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
@@ -3752,8 +3756,8 @@ function renderExchange(exchange, targetContainer = null) {
         </div>
         <div class="message-content">${userContent}</div>
         <div class="message-actions-user">
-            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
-            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
+            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button" aria-label="Edit Message"><nui-icon name="edit"></nui-icon></button></nui-button>
+            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button" aria-label="Delete Message"><nui-icon name="delete"></nui-icon></button></nui-button>
         </div>
     `;
 
@@ -3832,11 +3836,11 @@ function createAssistantElement(exchangeId, timestamp = '', modelName = '') {
             </div>
         </div>
         <div class="message-actions">
-            <nui-button class="action-btn speaker" title="Read Aloud"><button type="button"><nui-icon name="headphones"></nui-icon></button></nui-button>
+            <nui-button class="action-btn speaker" title="Read Aloud"><button type="button" aria-label="Read Aloud"><nui-icon name="headphones"></nui-icon></button></nui-button>
             <div class="spacer"></div>
-            <nui-button class="action-btn copy-message" title="Copy Message"><button type="button"><nui-icon name="content_copy"></nui-icon></button></nui-button>
-            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button"><nui-icon name="edit"></nui-icon></button></nui-button>
-            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button"><nui-icon name="delete"></nui-icon></button></nui-button>
+            <nui-button class="action-btn copy-message" title="Copy Message"><button type="button" aria-label="Copy Message"><nui-icon name="content_copy"></nui-icon></button></nui-button>
+            <nui-button class="action-btn edit-message" title="Edit Message"><button type="button" aria-label="Edit Message"><nui-icon name="edit"></nui-icon></button></nui-button>
+            <nui-button class="action-btn delete-message" title="Delete Message"><button type="button" aria-label="Delete Message"><nui-icon name="delete"></nui-icon></button></nui-button>
         </div>
     `;
 
@@ -4538,7 +4542,7 @@ function _attachRetryControl(el, retryable) {
     const btn = document.createElement('nui-button');
     btn.className = 'action-btn retry-run';
     btn.title = 'Retry this run';
-    btn.innerHTML = '<button type="button"><nui-icon name="sync"></nui-icon></button>';
+    btn.innerHTML = '<button type="button" aria-label="Retry this run"><nui-icon name="sync"></nui-icon></button>';
     // Click can only originate from the visible chat — currentChatId at click
     // time IS the conversation this bubble belongs to.
     btn.addEventListener('click', () => {
@@ -5605,7 +5609,7 @@ function renderChatTabItem(chat) {
     if (isActive) {
         const optionsBtn = document.createElement('nui-button');
         optionsBtn.className = 'chat-history-item-action';
-        optionsBtn.innerHTML = '<button type="button"><nui-icon name="edit"></nui-icon></button>';
+        optionsBtn.innerHTML = '<button type="button" aria-label="Chat Options"><nui-icon name="edit"></nui-icon></button>';
         optionsBtn.title = 'Chat Options';
         optionsBtn.addEventListener('click', (e) => {
             e.stopPropagation();
