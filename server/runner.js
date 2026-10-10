@@ -42,12 +42,14 @@ function canonicalizeStorageUrls(content, mcpOrigin) {
 // `chat.send` dispatcher call is in flight.
 const CHAT_STATUS_POLL_MS = 2000;
 
+const { gatewayIdentityHeaders } = require('./gateway-identity.js');
+
 // Model capabilities cache (vision filter) — gateway /v1/models, 5 min TTL.
 let _modelsCache = { at: 0, models: [] };
 async function getModels() {
     if (Date.now() - _modelsCache.at < 5 * 60 * 1000 && _modelsCache.models.length) return _modelsCache.models;
     const resp = await fetch(`${DEPS.gatewayUrl}/v1/models`, {
-        headers: DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {}
+        headers: { ...gatewayIdentityHeaders(), ...(DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {}) }
     });
     if (!resp.ok) throw new Error(`gateway /v1/models ${resp.status}`);
     const data = await resp.json();
@@ -935,6 +937,7 @@ class Runner {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
+                            ...gatewayIdentityHeaders(this.conversationId),
                             ...(DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {})
                         },
                         body: JSON.stringify({ model, messages: apiMessages, stream: true, session_id: this.conversationId, ...(tools.length ? { tools } : {}), ...(this.generationParams || {}) }),

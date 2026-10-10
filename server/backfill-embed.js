@@ -156,7 +156,7 @@ async function embedViaWrapper(texts, retries) {
 async function embedViaGateway(texts, retries) {
     const body = { input: texts, dimensions: EMBEDDING_DIMS };
     if (GATEWAY_MODEL) body.model = GATEWAY_MODEL;
-    const headers = { 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json', ...require('./gateway-identity').gatewayIdentityHeaders() };
     if (EMBED_API_KEY) headers['Authorization'] = `Bearer ${EMBED_API_KEY}`;
     const result = await fetchRetry(GATEWAY_URL, {
         method: 'POST',

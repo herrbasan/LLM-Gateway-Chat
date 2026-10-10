@@ -72,10 +72,12 @@ const FILES_DIR       = process.env.CHAT_FILES_DIR     || cfg.filesDir          
 // back to this when a user has no own mcp-servers entry (the normal case).
 const MCP_URL         = process.env.MCP_URL            || cfg.mcpUrl             || null;
 
+const { gatewayIdentityHeaders } = require('./gateway-identity.js');
 const EMBED_API_KEY = process.env.GATEWAY_API_KEY || cfg.embedApiKey || null;
 
 const EMBED_HEADERS = {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    ...gatewayIdentityHeaders()
 };
 if (EMBED_API_KEY) {
     EMBED_HEADERS['Authorization'] = `Bearer ${EMBED_API_KEY}`;
@@ -1385,7 +1387,7 @@ const routes = {
     try {
       const gwKey = process.env.GATEWAY_API_KEY || null;
       const r = await fetch(`${process.env.LLM_GATEWAY_URL || cfg.gatewayUrl || 'http://127.0.0.1:3400'}/v1/models`, {
-        headers: gwKey ? { Authorization: `Bearer ${gwKey}` } : {}
+        headers: { ...gatewayIdentityHeaders(), ...(gwKey ? { Authorization: `Bearer ${gwKey}` } : {}) }
       });
       if (!r.ok) { json(res, { error: `gateway ${r.status}` }, 502, req); return; }
       const data = await r.json();

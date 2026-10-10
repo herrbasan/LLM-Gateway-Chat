@@ -10,6 +10,7 @@
 // ============================================
 
 const convStore = require('./conversation-store');
+const { gatewayIdentityHeaders } = require('./gateway-identity');
 
 let DEPS = null;
 // deps = { gatewayUrl, gatewayKey, embedMessageAsync, log }
@@ -293,6 +294,7 @@ class ArenaRunner {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    ...gatewayIdentityHeaders(this.conversationId),
                     ...(DEPS.gatewayKey ? { Authorization: `Bearer ${DEPS.gatewayKey}` } : {})
                 },
                 body: JSON.stringify(body),
