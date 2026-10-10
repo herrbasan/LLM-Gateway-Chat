@@ -34,6 +34,7 @@ export function messagesToExchanges(messages) {
         let regularExchange = null;
         let lastToolExchange = null;
         const pendingTools = new Map();
+        const groupExchanges = [];
 
         for (const msg of group) {
             if (msg.role === 'user') {
@@ -60,7 +61,7 @@ export function messagesToExchanges(messages) {
                     user: { role: 'user', content: '', attachments: [] },
                     assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
                 };
-                exchanges.push(toolEx);
+                groupExchanges.push(toolEx);
                 lastToolExchange = toolEx;
             } else if (msg.role === 'assistant') {
                 const content = (msg.content || '').trim();
@@ -98,7 +99,7 @@ export function messagesToExchanges(messages) {
         }
 
         for (const [toolName, toolMsg] of pendingTools) {
-            exchanges.push({
+            groupExchanges.push({
                 id: 'ex_' + (Date.now() + Math.random()),
                 timestamp: toolMsg.timestamp || Date.now(),
                 type: 'tool',
@@ -108,10 +109,15 @@ export function messagesToExchanges(messages) {
                 assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
             });
         }
-        if (regularExchange) exchanges.push(regularExchange);
+        if (regularExchange) groupExchanges.push(regularExchange);
+        // Timestamps order a turn's own pieces (the user exchange is built last
+        // but belongs first). Across turns the stored order is the truth: a
+        // message typed mid-run is older than the tool results stored after it.
+        groupExchanges.sort((a, b) => a.timestamp - b.timestamp);
+        exchanges.push(...groupExchanges);
     }
 
-    return exchanges.sort((a, b) => a.timestamp - b.timestamp);
+    return exchanges;
 }
 
 export class Conversation {
