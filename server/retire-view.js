@@ -158,25 +158,32 @@ function tombstoneText(distill, msgIdx, kind) {
 }
 
 const RETIREMENT_CONVENTION_PARAGRAPH =
-    'This conversation supports context retirement. Every message in the ' +
-    'transcript is numbered: the [mN] marker at the start of a message is its ' +
-    'address, and N counts messages from the start (0-based). You may retire ' +
-    'messages you have fully consumed with context_retire(messages, distill): ' +
-    'their full text — tool results, your own reasoning and prose, user text — ' +
-    'leaves your context on the next request and your distillation stays in ' +
-    'place as a tombstone. Retire WHOLE messages; there is no finer granularity. ' +
-    'Write distillations as your future working memory: the key facts, figures, ' +
-    'decisions, and open items you would need to decide whether restoring the ' +
-    'original is worth it. A vague distillation ("discusses infrastructure") ' +
-    'is a failed retirement — if you cannot distill it specifically, you have ' +
-    'not consumed it; do not retire it. Use context_units() to list what is ' +
-    'retirable and what is already retired — NEVER guess or reconstruct ' +
-    'message numbers from memory; count them from the [mN] markers you can see. ' +
-    'Retire in BATCHES (one call, many indexes or ranges like "30-44"), not one ' +
-    'message per turn: each retirement rewrites mid-history content and ' +
-    'invalidates the provider prompt cache from that point. Partial success is ' +
-    'normal: unrecognized indexes are skipped and reported, the rest retire. ' +
-    'context_unretire(messages) restores full text; "all" restores everything.';
+    'This conversation supports context retirement: messages you name leave ' +
+    'your context on the next request, and your distillation stays in their ' +
+    'place as a tombstone. Every message is numbered — the [mN] marker at the ' +
+    'start of a message is its address, N counts from the start (0-based). ' +
+    'Retirement is an EXCEPTIONAL measure, not routine hygiene: full context ' +
+    'is your best working material, and retiring has a real cost — it rewrites ' +
+    'mid-history content, which invalidates the provider\'s KV cache at the ' +
+    'first tombstone, so every token after it is billed as brand-new input on ' +
+    'the next request. One retirement makes one request more expensive and ' +
+    'every request after it cheaper. Retire ONLY when the context is genuinely ' +
+    'running low (the context indicator approaching the window) or when the ' +
+    'user asks for a more focused context. Do not retire preemptively, tidily, ' +
+    'or on your own initiative otherwise. When you do retire: whole messages ' +
+    'only (tool results, your reasoning and prose, user text together), in ONE ' +
+    'batched call (indexes or ranges like "30-44") — separate calls each pay ' +
+    'the cache re-entry again. Write ' +
+    'distillations as your future working memory — key facts, figures, ' +
+    'decisions, open items, enough to decide whether restoring the original ' +
+    'is worth it; a vague distillation ("discusses infrastructure") is a ' +
+    'failed retirement — if you cannot distill it specifically, you have not ' +
+    'consumed it; do not retire it. Use context_units() ' +
+    'to list what is retirable and already retired — NEVER guess or ' +
+    'reconstruct message numbers from memory; count them from the [mN] ' +
+    'markers you can see. Partial success is normal: unrecognized indexes ' +
+    'are skipped and reported, the rest retire. context_unretire(messages) ' +
+    'restores full text; "all" restores everything.';
 
 // ---- the transform -------------------------------------------------------
 // Applied inside api-view's per-message projection loop, on the STORED
