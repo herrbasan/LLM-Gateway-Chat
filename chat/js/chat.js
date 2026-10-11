@@ -52,65 +52,6 @@ const TTS_SPEED = CONFIG.ttsSpeed ?? 1.0;
 const BACKEND_URL = CONFIG.backendUrl !== undefined ? CONFIG.backendUrl : 'http://localhost:3500';
 const BACKEND_API_KEY = CONFIG.backendApiKey || '';
 
-// ============================================
-// Chunk savings pill (header widget)
-// ============================================
-// Per-chat accumulator: chars the transform removed from outgoing payloads,
-// shown as estimated tokens (chars/3.5, consistent with our other estimates).
-// In-memory only — testing-phase widget, no persistence.
-const _chunkSavings = { chatId: null, charsSaved: 0, displayed: 0, animFrame: null };
-
-function updateChunkSavingsPill(stats) {
-    if (!stats || !currentChatId) return;
-    if (_chunkSavings.chatId !== currentChatId) {
-        _chunkSavings.chatId = currentChatId;
-        _chunkSavings.charsSaved = 0;
-        _chunkSavings.displayed = 0;
-        _chunkSavings.lastAt = 0;
-    }
-    // updateUsageDisplay fires from multiple paths per request (progress
-    // events + finalize). The stats object carries `at` (set once per
-    // getMessagesForApi call) — accumulate each request exactly once.
-    if (stats.at && stats.at === _chunkSavings.lastAt) return;
-    if (stats.at) _chunkSavings.lastAt = stats.at;
-    const saved = Math.max(0, (stats.bytesIn || 0) - (stats.bytesOut || 0));
-    _chunkSavings.charsSaved += saved;
-
-    const pill = document.getElementById('chunk-savings-pill');
-    const valueEl = document.getElementById('chunk-savings-value');
-    if (!pill || !valueEl) return;
-    if (_chunkSavings.charsSaved <= 0) return;
-
-    pill.style.display = 'inline-flex';
-    const target = Math.round(_chunkSavings.charsSaved / 3.5);
-
-    // Count-up animation toward the new total
-    if (_chunkSavings.animFrame) cancelAnimationFrame(_chunkSavings.animFrame);
-    const start = _chunkSavings.displayed;
-    const delta = target - start;
-    if (delta <= 0) return;
-    const t0 = performance.now();
-    const DURATION = 900;
-    const step = (t) => {
-        const p = Math.min(1, (t - t0) / DURATION);
-        const eased = 1 - Math.pow(1 - p, 3);
-        _chunkSavings.displayed = Math.round(start + delta * eased);
-        valueEl.textContent = _chunkSavings.displayed.toLocaleString();
-        if (p < 1) {
-            _chunkSavings.animFrame = requestAnimationFrame(step);
-        } else {
-            _chunkSavings.animFrame = null;
-            pill.classList.remove('pulse');
-            void pill.offsetWidth; // restart animation
-            pill.classList.add('pulse');
-        }
-    };
-    _chunkSavings.animFrame = requestAnimationFrame(step);
-
-    const refs = (stats.exactDupes || 0) + (stats.nearDupes || 0);
-    pill.title = `Chunk dedup — ~${target.toLocaleString()} tokens kept out of requests this chat.\nLast request: ${(stats.bytesOut / 1000).toFixed(0)}K sent vs ${(stats.bytesIn / 1000).toFixed(0)}K raw, ${refs} reference${refs === 1 ? '' : 's'}.`;
-}
-
 // Resolve the configured MCP server origin — the single source of truth for
 // how THIS client reaches the workshop (LAN IP locally, dyndns remotely).
 // Never hardcode a storage/MCP host: derive it from the user's configured
@@ -268,7 +209,6 @@ function _appendContextTurn(chatId, context) {
         rawTokens: context.raw_tokens,
         wireTokens: context.used_tokens,
         reasoningTokens: context.reasoning_tokens ?? 0,
-        dedupSavedBytes: context.savings?.dedup_bytes ?? 0,
         retiredSavedBytes: context.savings?.retired_bytes ?? 0,
         retiredCount: context.savings?.retired_count ?? 0,
         cacheHint: context.cache_hint ?? null
@@ -3896,15 +3836,10 @@ function updateUsageDisplay(el, contextData, usageData = null, streamStats = nul
             text += ` | ${streamStats.ttftMs}ms TTFT`;
         }
 
-        // Chunk-store: show what was actually sent after dedup (if the
-        // per-chat transform is enabled and produced stats this request).
-        const chunkStats = conversation?._lastChunkStats;
-        if (chunkStats) {
-            const savedPct = chunkStats.bytesIn ? Math.round((1 - chunkStats.bytesOut / chunkStats.bytesIn) * 100) : 0;
-            const outK = (chunkStats.bytesOut / 1000).toFixed(0);
-            const inK = (chunkStats.bytesIn / 1000).toFixed(0);
-            text += ` | dedup: ${outK}K/${inK}K chars (-${savedPct}%), ${chunkStats.exactDupes + chunkStats.nearDupes} refs`;
-            updateChunkSavingsPill(chunkStats);
+        // Retirement: show what the transform saved this request (when the
+        // per-chat retirement is enabled and reported savings).
+        if (contextData.savings && contextData.savings.retired_bytes > 0) {
+            text += ` | retired: ${(contextData.savings.retired_bytes / 1000).toFixed(0)}K chars, ${contextData.savings.retired_count} tombstoned`;
         }
 
         // Only update if value changed - prevents tooltip flicker
@@ -3916,7 +3851,7 @@ function updateUsageDisplay(el, contextData, usageData = null, streamStats = nul
         let debugText = [];
         for (const [key, val] of Object.entries(contextData)) {
             if (key !== 'isEstimate') {
-                debugText.push(`${key}: ${val}`);
+                debugText.push(`${key}: ${val !== null && typeof val === 'object' ? JSON.stringify(val) : val}`);
             }
         }
         const newTitle = debugText.length > 0 ? debugText.join('\n') : '';
@@ -4108,9 +4043,8 @@ function buildContextDetailHtml(contextData) {
 
     // Latest turn savings breakdown.
     const last = history[history.length - 1];
-    if (last && (last.dedupSavedBytes > 0 || last.retiredSavedBytes > 0)) {
+    if (last && last.retiredSavedBytes > 0) {
         html += `<div class="ctx-section"><div class="ctx-section-title">Savings (latest turn)</div>` +
-            `<div class="ctx-tip-row"><span>dedup</span><b>−${fmtK(last.dedupSavedBytes)}B</b></div>` +
             `<div class="ctx-tip-row"><span>retired</span><b>−${fmtK(last.retiredSavedBytes)}B (${last.retiredCount})</b></div></div>`;
     }
 
@@ -4121,9 +4055,10 @@ function buildContextDetailHtml(contextData) {
         const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const rows = rList.map(r => {
             const when = r.at ? new Date(r.at).toLocaleDateString() : '';
-            return `<div class="ctx-retire-row"><b>${esc(r.label || 'chunk')}</b><span>${esc(r.distill)}</span><i>${esc(when)}</i></div>`;
+            const name = r.msgIdx != null ? `m${r.msgIdx}` : (r.label || 'retired');
+            return `<div class="ctx-retire-row"><b>${esc(name)}</b><span>${esc(r.distill)}</span><i>${esc(when)}</i></div>`;
         }).join('');
-        html += `<div class="ctx-section"><div class="ctx-section-title">Retired chunks (${rList.length})</div>${rows}</div>`;
+        html += `<div class="ctx-section"><div class="ctx-section-title">Retired messages (${rList.length})</div>${rows}</div>`;
     }
 
     return `<div class="ctx-detail">${html}</div>`;
@@ -4149,11 +4084,8 @@ function buildContextTooltipHtml(contextData) {
         if (contextData.raw_tokens != null) row('Raw (no measures)', fmtK(contextData.raw_tokens));
         if (contextData.reasoning_tokens != null && contextData.reasoning_tokens > 0) row('Reasoning on wire', fmtK(contextData.reasoning_tokens));
         const s = contextData.savings;
-        if (s && (s.dedup_bytes > 0 || s.retired_bytes > 0)) {
-            const parts = [];
-            if (s.dedup_bytes > 0) parts.push(`dedup −${fmtK(s.dedup_bytes)}B`);
-            if (s.retired_bytes > 0) parts.push(`retired −${fmtK(s.retired_bytes)}B (${s.retired_count})`);
-            row('Savings', parts.join(' · '));
+        if (s && s.retired_bytes > 0) {
+            row('Savings', `retired −${fmtK(s.retired_bytes)}B (${s.retired_count})`);
         }
         if (contextData.cache_hint) row('Cache prefix', contextData.cache_hint);
     }
@@ -4911,8 +4843,8 @@ async function switchChat(targetChatId) {
     conversation = conv;
     attachRunnerEvents(targetChatId);
 
-    // Per-chat chunk-transform flag (chunk-store: lossless payload dedup).
-    // Lives on the session doc; consulted by getMessagesForApi at send time.
+    // Per-chat retirement flag (positional tombstones — retire-view.js).
+    // Lives on the session doc; consulted by the runner at assembly time.
     const chatMeta = chatHistory.conversations.find(c => c.id === targetChatId);
     conv.chunkTransform = !!(chatMeta && chatMeta.chunkTransform);
 
@@ -4921,15 +4853,6 @@ async function switchChat(targetChatId) {
     if (assistantChatId && assistantChatId !== targetChatId) stopAssistantSession();
     if (chatMeta?.assistantMode) await startAssistantSession(targetChatId);
     renderAssistantChrome();
-
-    // Savings pill follows the chat: reset accumulator + visibility.
-    const pill = document.getElementById('chunk-savings-pill');
-    if (pill) {
-        _chunkSavings.chatId = targetChatId;
-        _chunkSavings.charsSaved = 0;
-        _chunkSavings.displayed = 0;
-        pill.style.display = 'none';
-    }
 
     // 3. (Removed — the runner owns session identity; no client session ID.)
 

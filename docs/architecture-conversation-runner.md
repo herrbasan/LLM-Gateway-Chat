@@ -57,8 +57,8 @@ user message and all completed messages are already persisted).
 1. View sends a message → runner appends it (stored form), persists via the shared
    append helper (embed fires), broadcasts `msg.user`.
 2. Runner builds the API payload: ported `getMessagesForApi` (conversation.js:553–668,
-   incl. tool-result backfill) + ported `buildChunkView` transform (chat/js/chunk-view.js,
-   ~300 lines dependency-free, honors the per-chat toggle) + `thinking_signature`
+   incl. tool-result backfill) + retirement transform (`server/retire-view.js` — [mN]
+   markers + tombstones, honors the per-chat toggle; §2.3a) + `thinking_signature`
    propagation.
 3. POST to gateway `/v1/chat/completions` (SSE, server-held Bearer). Deltas accumulate
    into `inFlight` and broadcast as `delta` events.
@@ -108,8 +108,10 @@ at implementation time).
 - `getMessagesForApi` + message versioning → `server/api-view.js` (from conversation.js,
   incl. tool-result backfill and the version tree — regenerate/switch-version state
   moves to the runner).
-- `buildChunkView` → `server/chunk-view.js` (verbatim port; toggle lives in conversation meta).
-  The chunk table lives here — `context_retire`/`unretire` operate on it server-side.
+- `buildChunkView` → was `server/chunk-view.js`; **replaced 2026-10-11 by `server/retire-view.js`**
+  (retire-only: positional `[mN]` addressing, tombstones, no labels/dedup/diffs — see §2.3a).
+  `context_retire`/`unretire`/`context_units` resolve message indexes against the stored
+  conversation directly; no chunk table exists.
 - **System-prompt assembly** → `server/system-prompt.js` (from chat.js
   `getSystemPromptWithMetadata`, chat.js:2569): prime-directive blob (the server already
   fetches it for config generation, server.js:2160), metadata prefix, user prompt,
@@ -119,6 +121,40 @@ at implementation time).
 - MCP client → `server/mcp/` (from chat/js/mcp-client.js — fetch-based SSE reader +
   JSON-RPC POST; Node ≥18 fetch works the same). MCP server list moves from browser
   localStorage to per-user server-side settings.
+
+### 2.3a Retirement transform (2026-10-11 rework — issues #52/#53)
+
+The chunk-store machinery (content-hash labels, exact/near dedup, Jaccard scan, diff
+chains) was removed: replayed across all 111 chunked sessions it saved 1.0 MB total
+(0 on the analytical sessions that hurt) while the retirement tombstones saved 6.1 MB,
+and the label idiom caused the #52 failure mode (the model confabulated 36 hash ids
+from memory; one unknown id discarded the whole call).
+
+What replaced it (`server/retire-view.js`):
+
+- **Positional addressing.** In retirement chats the outgoing payload stamps every
+  message `[mN]` (N = index in the stored `messages[]`). `context_retire(messages,
+  distill)` takes indexes and ranges ("30-44") — whole messages retire (tool result,
+  reasoning, prose, user text, write-args — every retirable field of the message).
+  There is no label table anywhere; resolution hashes the stored fields at call time.
+  Partial success: unrecognized indexes are skipped and reported, the rest retire.
+  `context_units()` enumerates everything retirable/retired.
+- **Hash-keyed persistence (compat).** The retirements map stays keyed by content
+  hash (`fnv1a`), byte-identical to the old engine's key forms (tool results hash the
+  timestamped API form; write-args hash the raw field value), so retirements made
+  under the chunk system keep tombstoning. Edits/deletions can never shift a
+  tombstone onto the wrong content.
+- **Reasoning is retirable** — the dominant mass (14.4 MB riding across all sessions
+  vs 6.1 MB saved by everything else combined). Policy is per-message and
+  self-describing: unsigned reasoning → tombstone replaces the value (field stays —
+  echo contracts hold); signed reasoning (`thinking_signature`) → dropped together
+  with its signature (prior-turn thinking may be dropped, never edited). The live
+  chain (last user message and everything after) is never touched.
+- **Dedup stays dead on purpose.** It pays only on re-read workloads; retirement is
+  the lever that matters. If that changes, re-derive from the archived chunk era
+  (docs/_Archive/plan-context-cost-and-reporting.md) — do not resurrect labels.
+- The `chunkTransform` session flag keeps its stored name (111 sessions carry it);
+  it now means "retirement transform on".
 
 ### 2.4 Versioning — durable variants (deep-dive §6)
 
@@ -195,7 +231,7 @@ The survey's "browser-bound tools" (H1) was a retrofit artifact. Server-side, re
 | `chat_archive_*` | browser → backend REST | internal calls into the same handlers the REST routes wrap |
 | `browser_fetch` | browser fetch (CORS-bound) | Node fetch — LAN + internet. Log every call. (Family trust model; note as the one place CORS used to be an accidental guard.) |
 | `saveToStorage` | browser PUT → MCP storage box | server PUT to the storage box (same LAN) |
-| `context_retire`/`unretire` | browser, reads `_lastChunkTable` | server-side — the chunk table lives with the ported transform (§2.3) |
+| `context_retire`/`unretire` | browser, reads `_lastChunkTable` | server-side — positional resolution against the stored conversation (§2.3a) |
 | `attachment_save`, base64 image offload | browser round-trip | internal `db.storeFile` — no HTTP hop; issue #5 (bucket 401s) dissolves because the server reads its own buckets |
 | Preview | DOM | The tool returns data; the *view* renders a preview affordance from `tool.end`. Preview becomes pure view. |
 

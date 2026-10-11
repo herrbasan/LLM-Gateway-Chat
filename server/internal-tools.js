@@ -11,6 +11,8 @@
 // ============================================
 
 const storageTools = require('./storage-tools');
+const retireView = require('./retire-view');
+const { formatMessageTs } = require('./api-view');
 
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
 // List-event emitter (issue #33): metadata mutations broadcast chat.updated so
@@ -227,7 +229,7 @@ const ARCHIVE_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'browser_fetch',
-            description: `${SERVER_EXEC_NOTE}\\n\\nDirect HTTP fetch from the chat backend — no MCP JSON-RPC size limits, no CORS. Use this to download a file or resource from ANY URL when the response may be too large for MCP (typically capped around 64 KB). Works for storage files, LAN addresses, and public internet URLs alike.\\n\\n**Binary upload**: use body_type="data_url" with a data URL body to send binary data to HTTP endpoints (e.g. PUT /storage/* on the MCP server). NOTE: to save a chat attachment to workshop storage, use attachment_save instead — it handles the transfer in one call.\\n\\n**Response handling**: small text (≤ 32 KB) is returned inline. Text larger than 32 KB is auto-CHUNKED (bucketFile + chunk count; read chunks via bucket_file/chunk, retire consumed chunks with context_retire). Binary types (images, PDFs, audio, etc.) are uploaded to the chat's bucket and a \\/api\\/buckets\\/images\\/... URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when storage_read returns a relative path pointer (prepend your MCP origin and fetch it).`,
+            description: `${SERVER_EXEC_NOTE}\\n\\nDirect HTTP fetch from the chat backend — no MCP JSON-RPC size limits, no CORS. Use this to download a file or resource from ANY URL when the response may be too large for MCP (typically capped around 64 KB). Works for storage files, LAN addresses, and public internet URLs alike.\\n\\n**Binary upload**: use body_type="data_url" with a data URL body to send binary data to HTTP endpoints (e.g. PUT /storage/* on the MCP server). NOTE: to save a chat attachment to workshop storage, use attachment_save instead — it handles the transfer in one call.\\n\\n**Response handling**: small text (≤ 32 KB) is returned inline. Text larger than 32 KB is auto-paged into a bucket file (bucketFile + page count; read pages via bucket_file/chunk) — once fully consumed, retire those result messages with context_retire (their [mN] indexes). Binary types (images, PDFs, audio, etc.) are uploaded to the chat's bucket and a \\/api\\/buckets\\/images\\/... URL is returned instead.\\n\\n**When to use**: whenever you already have a direct URL and expect the payload to exceed MCP limits, or when storage_read returns a relative path pointer (prepend your MCP origin and fetch it).`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -296,7 +298,7 @@ const ARCHIVE_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'chat_archive_get_session',
-            description: `${SERVER_EXEC_NOTE}\\n\\nRetrieve a specific conversation session by ID. Results over 32 KB are auto-CHUNKED like browser_fetch (returns bucketFile + chunk count; page with browser_fetch bucket_file/chunk and retire consumed chunks with context_retire) — a full session can be far larger than your context window, so never try to inline it whole.\\n\\nTo process session data with a forge tool: (1) call this tool to get session data, (2) call storage.write to persist it, (3) pass the storage URL as forge.call payload.\\n\\nWhen saveToStorage is true, this tool writes the full session JSON directly to workshop storage and returns ONLY the URL — use this when you need to pass large session data to a forge tool that would overflow the context window.`,
+            description: `${SERVER_EXEC_NOTE}\\n\\nRetrieve a specific conversation session by ID. Results over 32 KB are auto-paged into a bucket file like browser_fetch (bucketFile + page count; read pages with browser_fetch bucket_file/chunk) — a full session can be far larger than your context window, so never try to inline it whole. Once consumed, retire those result messages with context_retire (their [mN] indexes).\\n\\nTo process session data with a forge tool: (1) call this tool to get session data, (2) call storage.write to persist it, (3) pass the storage URL as forge.call payload.\\n\\nWhen saveToStorage is true, this tool writes the full session JSON directly to workshop storage and returns ONLY the URL — use this when you need to pass large session data to a forge tool that would overflow the context window.`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -422,14 +424,21 @@ const RETIREMENT_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'context_retire',
-            description: `${SERVER_EXEC_NOTE}\\n\\nRetire chunks you have fully consumed. Their full text leaves your context on the next request; your distillation stays in their place as a tombstone.\\n\\nWrite distillations as your future working memory: key facts, figures, decisions, open items, and anything you would need to decide whether restoring the original is worth it. A vague distillation ("discusses infrastructure") is a failed retirement — if you cannot distill it specifically, you have not consumed it; do not retire it.\\n\\nRetire in BATCHES, not one chunk per turn: each retirement rewrites mid-history content and invalidates the provider's prompt cache from that point. Note chunks as consumed during the turn, then retire them together.\\n\\nThe original always stays intact in canonical history — context_unretire(chunk_ids) restores full text on the next request.`,
+            description: `${SERVER_EXEC_NOTE}\\n\\nRetire messages you have fully consumed — their full text (tool results, your reasoning and prose, user text) leaves your context on the next request; your distillation stays in its place as a tombstone. Address messages by the [mN] marker each one carries in the transcript — COUNT them from what you see, never reconstruct from memory. Use context_units() to list what exists.\\n\\nWrite distillations as your future working memory: key facts, figures, decisions, open items, and anything you would need to decide whether restoring the original is worth it. A vague distillation ("discusses infrastructure") is a failed retirement — if you cannot distill it specifically, you have not consumed it; do not retire it.\\n\\nRetire in BATCHES: each retirement rewrites mid-history content and invalidates the provider's prompt cache from that point. Partial success is normal — unrecognized indexes are skipped and reported, the rest retire. The original always stays intact in canonical history; context_unretire restores full text.`,
             parameters: {
                 type: 'object',
                 properties: {
-                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to retire, e.g. ["chunk_2x4f8k1a9z3q", "chunk_7hm2p9w1x4vb"]. Batch multiple ids in one call.' },
-                    distill: { type: 'string', description: 'Your distillation of what to keep from these chunks: key facts, decisions, open items — written for your future self.' }
+                    messages: {
+                        anyOf: [
+                            { type: 'integer', description: 'A single message index, e.g. 42' },
+                            { type: 'array', items: { anyOf: [{ type: 'integer' }, { type: 'string' }] }, description: 'Indexes and/or ranges, e.g. [30, 31, "40-55"]' },
+                            { type: 'string', description: 'A range, e.g. "30-44"' }
+                        ],
+                        description: 'Message indexes to retire (the N in each message\'s [mN] marker). A number, a "from-to" range string, or a mixed array of both.'
+                    },
+                    distill: { type: 'string', description: 'Your distillation of what to keep from these messages: key facts, decisions, open items — written for your future self.' }
                 },
-                required: ['chunk_ids', 'distill']
+                required: ['messages', 'distill']
             }
         }
     },
@@ -437,14 +446,29 @@ const RETIREMENT_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'context_unretire',
-            description: `${SERVER_EXEC_NOTE}\\n\\nRestore previously retired chunks — their full text returns to your context on the next request. Use when a tombstone's distillation is insufficient for the current task.`,
+            description: `${SERVER_EXEC_NOTE}\\n\\nRestore previously retired messages — their full text returns to your context on the next request. Use when a tombstone's distillation is insufficient for the current task. Pass "all" to restore everything.`,
             parameters: {
                 type: 'object',
                 properties: {
-                    chunk_ids: { type: 'array', items: { type: 'string' }, description: 'Chunk labels to restore, e.g. ["chunk_2x4f8k1a9z3q"].' }
+                    messages: {
+                        anyOf: [
+                            { type: 'integer' },
+                            { type: 'array', items: { anyOf: [{ type: 'integer' }, { type: 'string' }] } },
+                            { type: 'string', enum: ['all'], description: 'Restore every retired message' }
+                        ],
+                        description: 'Message indexes (the N in [mN] markers), a range like "30-44", or "all".'
+                    }
                 },
-                required: ['chunk_ids']
+                required: ['messages']
             }
+        }
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'context_units',
+            description: `${SERVER_EXEC_NOTE}\\n\\nList every message of this conversation with its retirable content: index, kinds (tool-result / reasoning / prose / user / args), sizes, and retirement state. Use this BEFORE retiring to count exact [mN] indexes from ground truth instead of reconstructing them from memory, and to review what is already tombstoned.`,
+            parameters: { type: 'object', properties: {}, required: [] }
         }
     }
 ];
@@ -477,7 +501,7 @@ function filterVisionTools(tools, { modelSupportsVision = false } = {}) {
 // Execution. ctx = {
 //   user, dbInstance, conversationId, log,
 //   mcpOrigin,                 // workshop origin (storage PUTs) | null
-//   chunkTable,                // Map<label, hash> from the last assembly (retirement)
+//   getStoredMessages,         // () => stored messages array (fresh read) | null
 //   getRetirements,            // () => session.retirements (fresh read)
 //   setRetirements,            // async (map) => persists to the session doc
 //   embedDeps: { embedBatch, embedAvailable }
@@ -485,8 +509,41 @@ function filterVisionTools(tools, { modelSupportsVision = false } = {}) {
 // Returns MCP-style { content: [{type:'text'|'image', ...}] }.
 // ============================================
 
+// Positional selector parsing: number | "from-to" | mixed array →
+// { idxs: [...], bad: [...] } (unparseable/out-of-range entries, verbatim).
+function parseSelector(raw, maxIdx) {
+    const idxs = [];
+    const bad = [];
+    const push = (n) => {
+        if (Number.isInteger(n) && n >= 0 && n <= maxIdx) idxs.push(n);
+        else bad.push(String(n));
+    };
+    const one = (v) => {
+        if (typeof v === 'number') return push(v);
+        if (typeof v === 'string' && /^\s*\d+\s*-\s*\d+\s*$/.test(v)) {
+            const [a, b] = v.split('-').map(s => parseInt(s.trim(), 10));
+            if (a <= b && a >= 0 && b <= maxIdx) { for (let i = a; i <= b; i++) idxs.push(i); }
+            else bad.push(v.trim());
+            return;
+        }
+        if (typeof v === 'string' && /^\s*\d+\s*$/.test(v)) return push(parseInt(v.trim(), 10));
+        bad.push(String(v).slice(0, 40));
+    };
+    if (Array.isArray(raw)) raw.forEach(one);
+    else if (typeof raw === 'string' && raw.trim() === 'all') return { all: true, idxs: [], bad: [] };
+    else one(raw);
+    return { all: false, idxs: [...new Set(idxs)].sort((a, b) => a - b), bad };
+}
+
+// Live-chain rule, identical to the projection's: the last user message and
+// everything after it is the current exchange — never retirable.
+function lastUserIdx(msgs) {
+    for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i]?.role === 'user') return i;
+    return msgs.length;
+}
+
 async function executeInternalTool(name, args, ctx) {
-    const { user, dbInstance, conversationId, mcpOrigin, publicOrigin, chunkTable, embedDeps } = ctx;
+    const { user, dbInstance, conversationId, mcpOrigin, publicOrigin, embedDeps } = ctx;
     const { db } = dbInstance;
     if (!user || !dbInstance) throw new Error(`${name}: ctx.user and ctx.dbInstance required`);
 
@@ -671,33 +728,87 @@ async function executeInternalTool(name, args, ctx) {
 
         case 'context_retire':
         case 'context_unretire': {
-            if (!chunkTable || chunkTable.size === 0) {
-                throw new Error(`${name}: no chunks exist in this conversation yet — nothing can be retired.`);
-            }
-            const ids = Array.isArray(args.chunk_ids) ? args.chunk_ids : [];
-            if (ids.length === 0) throw new Error(`${name}: chunk_ids must be a non-empty array.`);
-            const unknown = ids.filter(id => !chunkTable.has(id));
-            if (unknown.length > 0) {
-                throw new Error(`${name}: unknown chunk id(s): ${unknown.join(', ')}. Valid ids in the current view: ${[...chunkTable.keys()].join(', ')}`);
+            const msgs = ctx.getStoredMessages ? ctx.getStoredMessages() : null;
+            if (!msgs) throw new Error(`${name}: conversation not loaded — nothing can be retired.`);
+            const selector = parseSelector(args.messages, msgs.length - 1);
+            if (selector.idxs.length === 0 && !selector.all) {
+                const badNote = selector.bad.length > 0 ? ` Unrecognized: ${selector.bad.join(', ')}.` : '';
+                throw new Error(`${name}: no valid message indexes in request. Message indexes are 0-based, from the [mN] markers in the transcript; valid range here is 0-${msgs.length - 1}. Call context_units() to list them.${badNote}`);
             }
             const retiring = name === 'context_retire';
             const distill = String(args.distill || '').trim();
             if (retiring && distill.length < 20) {
                 throw new Error('context_retire: distill is too short to be useful working memory (<20 chars). Write the key facts, decisions, and open items your future self needs.');
             }
+            const liveFrom = lastUserIdx(msgs);
             const retirements = { ...(ctx.getRetirements ? ctx.getRetirements() : {}) };
-            for (const id of ids) {
-                const hash = chunkTable.get(id);
-                if (retiring) retirements[hash] = { distill, at: new Date().toISOString(), label: id };
-                else delete retirements[hash];
+            const applied = [];   // { msg, kinds: [...], bytes }
+            const skipped = [];   // { msg, reason }
+            if (selector.all) {
+                // unretire-all only (retire requires explicit indexes).
+                if (retiring) throw new Error('context_retire: "all" is not accepted for retiring — name the indexes or ranges explicitly.');
+                const n = Object.keys(retirements).length;
+                for (const k of Object.keys(retirements)) delete retirements[k];
+                await ctx.setRetirements(retirements);
+                return { content: [{ type: 'text', text: JSON.stringify({ ok: true, unretired: 'all', count: n, note: 'Full text restored from the next request onward.' }) }] };
+            }
+            for (const idx of selector.idxs) {
+                const units = retireView.retirableUnits(msgs[idx], formatMessageTs);
+                if (units.length === 0) { skipped.push({ msg: idx, reason: 'nothing retirable in this message' }); continue; }
+                if (retiring && idx >= liveFrom) { skipped.push({ msg: idx, reason: 'current exchange — not retirable until the next turn' }); continue; }
+                const kinds = [];
+                let bytes = 0;
+                let touched = false;
+                for (const u of units) {
+                    if (retiring) {
+                        retirements[u.hash] = { distill, at: new Date().toISOString(), msgIdx: idx, kind: u.kind };
+                        touched = true;
+                    } else if (u.hash in retirements) {
+                        delete retirements[u.hash];
+                        touched = true;
+                    }
+                    kinds.push(u.kind);
+                    bytes += u.bytes;
+                }
+                if (touched) applied.push({ msg: idx, kinds, bytes });
+                else skipped.push({ msg: idx, reason: 'not retired' });
+            }
+            if (applied.length === 0) {
+                throw new Error(`${name}: nothing to do — every named message was skipped. ${JSON.stringify(skipped.slice(0, 10))}. Valid range is 0-${msgs.length - 1}; context_units() lists everything.`);
             }
             await ctx.setRetirements(retirements);
+            const payload = retiring
+                ? { ok: true, retired: applied, skipped, note: 'Tombstones replace these messages from the next request onward. Originals remain in canonical history.' }
+                : { ok: true, unretired: applied, skipped, note: 'Full text restored from the next request onward.' };
+            if (selector.bad.length > 0) payload.invalid = selector.bad;
+            return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+        }
+
+        case 'context_units': {
+            const msgs = ctx.getStoredMessages ? ctx.getStoredMessages() : null;
+            if (!msgs) throw new Error('context_units: conversation not loaded.');
+            const retirements = ctx.getRetirements ? ctx.getRetirements() : {};
+            const retiredHashes = new Set(Object.keys(retirements));
+            const liveFrom = lastUserIdx(msgs);
+            const lines = [];
+            let retirableBytes = 0, retiredBytes = 0;
+            for (let i = 0; i < msgs.length; i++) {
+                const units = retireView.retirableUnits(msgs[i], formatMessageTs);
+                if (units.length === 0) continue;
+                const parts = [];
+                for (const u of units) {
+                    const isRet = retiredHashes.has(u.hash);
+                    retirableBytes += u.bytes;
+                    if (isRet) retiredBytes += u.bytes;
+                    parts.push(`${u.kind} ${(u.bytes / 1024).toFixed(1)}K${isRet ? ' [RETIRED]' : ''}`);
+                }
+                const tag = i >= liveFrom ? ' (current exchange — not retirable yet)' : '';
+                lines.push(`m${i}: ${parts.join(' | ')}${tag}`);
+            }
             return {
                 content: [{
                     type: 'text',
-                    text: JSON.stringify(retiring
-                        ? { ok: true, retired: ids, distill, note: 'Tombstones replace these chunks from the next request onward. Originals remain in canonical history.' }
-                        : { ok: true, unretired: ids, note: 'Full text restored from the next request onward.' })
+                    text: `context_units: ${msgs.length} messages, ${lines.length} with retirable content, ${(retirableBytes / 1024).toFixed(1)}K total, ${(retiredBytes / 1024).toFixed(1)}K already retired. Indexes are the N in each [mN] transcript marker (0-based).\n` + lines.join('\n')
                 }]
             };
         }

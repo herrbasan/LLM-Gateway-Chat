@@ -4,11 +4,13 @@
 // stored-form world (flat messages[], no exchanges): tool-call backfill,
 // image URL resolution + attachment manifest, timestamp stripping, role-merge,
 // orphan healing (both directions), thinking_signature propagation,
-// chunk-view transform hook.
+// retirement transform (positional [mN] markers + tombstones — see
+// server/retire-view.js).
 //
 // §2.4 note: assistant top-level fields mirror the current variant
 // (appendMessageVariant invariant), so this port needs NO variant logic.
 // ============================================
+const retireView = require('./retire-view');
 
 function stripExtraTimestamps(content) {
     // Keep the first timestamp, remove any subsequent ones
@@ -157,15 +159,29 @@ function resolveToolImage(url, publicOrigin, readImageBytes) {
 }
 
 // messages: stored-form array (flat, ordered by idx).
-// options: { systemPrompt, publicOrigin, chunkTransform, retirements, chunkView, log }
-//   chunkView: the (dynamically imported) chat/js/chunk-view.js module, or null.
-// Returns { messages, chunkTable } — messages is the OpenAI-style API array;
-// chunkTable (Map<label, hash>, empty when transform is off) resolves the
-// model's chunk labels to durable content hashes for context_retire.
+// options: { systemPrompt, publicOrigin, chunkTransform, retirements, log }
+//   chunkTransform: the per-session retirement flag (name kept for stored-doc
+//                   compatibility; the transform is retire-only since 2026-10-11).
+//   retirements:    { [contentHash]: { distill, at } } — the session's map.
+// Returns { messages, retireStats } — messages is the OpenAI-style API array
+// with [mN] markers and tombstones applied; retireStats carries the savings
+// numbers for the context report.
 function buildApiMessages(messages, options = {}) {
     if (!Array.isArray(messages)) throw new Error('buildApiMessages: messages array required');
-    const { systemPrompt = '', publicOrigin, chunkTransform = false, retirements = {}, chunkView = null, log = null, readImageBytes = null } = options;
+    const { systemPrompt = '', publicOrigin, chunkTransform = false, retirements = {}, log = null, readImageBytes = null } = options;
     if (!publicOrigin) throw new Error('buildApiMessages: options.publicOrigin required');
+
+    const retireOn = chunkTransform === true && retirements && Object.keys(retirements).length > 0;
+    // Live-chain guard: the last user message and everything after it is the
+    // active turn — tombstones never apply there (signed/tool-chain contracts).
+    let liveFromIdx = messages.length;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') { liveFromIdx = i; break; }
+    }
+    const retireStats = { retired: 0, retiredSavedBytes: 0 };
+    // Idempotence: one args hash tombstones on BOTH the assistant's
+    // tool_calls and the tool-message mirror — count it once per assembly.
+    const appliedRetireHashes = new Set();
 
     const rawMessages = [];
     if (systemPrompt?.trim()) {
@@ -177,6 +193,19 @@ function buildApiMessages(messages, options = {}) {
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
         const isLast = i === lastIndex;
+        // Retirement replacements for THIS message ({} when off / live chain).
+        const tx = retireOn ? retireView.transformStored(msg, i, retirements, liveFromIdx, formatMessageTs) : {};
+        if (tx._retireStats) {
+            for (const { hash, saved } of tx._retireStats.hashes) {
+                if (appliedRetireHashes.has(hash)) continue;
+                appliedRetireHashes.add(hash);
+                retireStats.retired++;
+                retireStats.retiredSavedBytes += saved;
+            }
+            delete tx._retireStats;
+        }
+        // [mN] address markers ride the payload only in retirement chats.
+        const mark = (text) => chunkTransform === true ? retireView.stampMarker(text, i) : text;
 
         // ---- Tool result messages: backfill tool_calls + emit role:'tool' ----
         if (msg.role === 'tool') {
@@ -195,7 +224,8 @@ function buildApiMessages(messages, options = {}) {
                 const buildCall = () => {
                     let sanitizedArgs = {};
                     try {
-                        sanitizedArgs = typeof msg.toolArgs === 'string' ? JSON.parse(msg.toolArgs) : msg.toolArgs;
+                        const srcArgs = 'toolArgs' in tx ? tx.toolArgs : msg.toolArgs;
+                        sanitizedArgs = typeof srcArgs === 'string' ? JSON.parse(srcArgs) : srcArgs;
                         sanitizedArgs = sanitizeToolArgs(sanitizedArgs);
                     } catch (e) {
                         sanitizedArgs = msg.toolArgs || {};
@@ -219,10 +249,13 @@ function buildApiMessages(messages, options = {}) {
                     rawMessages.push({ role: 'assistant', content: null, tool_calls: [buildCall()] });
                 }
 
+                const toolContent = 'content' in tx
+                    ? tx.content
+                    : mark(withTimestamp(msg.content, msg.createdAt));
                 const toolResultObj = {
                     role: 'tool',
                     tool_call_id: callId,
-                    content: withTimestamp(msg.content, msg.createdAt)
+                    content: toolContent
                 };
                 if (msg.toolImages && msg.toolImages.length > 0 && !msg.toolImagesStripped) {
                     const resolvedToolImages = msg.toolImages
@@ -230,7 +263,7 @@ function buildApiMessages(messages, options = {}) {
                         .filter(u => u !== null);
                     if (resolvedToolImages.length > 0) {
                         toolResultObj.content = [
-                            { type: 'text', text: withTimestamp(msg.content, msg.createdAt) },
+                            { type: 'text', text: toolContent },
                             ...resolvedToolImages.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } }))
                         ];
                     }
@@ -248,7 +281,9 @@ function buildApiMessages(messages, options = {}) {
                 ? atts.filter(att => att.dataUrl || att.url || att._file)
                 : [];
 
-            const cleanUserContent = withInputSource(withTimestamp(msg.content, msg.createdAt), msg);
+            const cleanUserContent = 'content' in tx
+                ? tx.content
+                : mark(withInputSource(withTimestamp(msg.content, msg.createdAt), msg));
 
             if (validAttachments.length > 0) {
                 const gatewayImageUrls = validAttachments
@@ -301,7 +336,11 @@ function buildApiMessages(messages, options = {}) {
         // ---- Assistant messages (stored = complete by definition) ----
         if (msg.role === 'assistant') {
             if (msg.content || msg.reasoning_content || msg.tool_calls) {
-                const cleanAssistantContent = msg.content ? withTimestamp(msg.content, msg.createdAt) : '';
+                const cleanAssistantContent = msg.content
+                    ? ('content' in tx
+                        ? tx.content
+                        : mark(withTimestamp(msg.content, msg.createdAt)))
+                    : '';
                 if (cleanAssistantContent || msg.reasoning_content || msg.tool_calls) {
                     const out = { role: 'assistant', content: cleanAssistantContent || null };
                 // Prior-reasoning policy is GATEWAY-side now (2026-08-29,
@@ -312,10 +351,15 @@ function buildApiMessages(messages, options = {}) {
                 // native Anthropic drops unsigned thinking with a warn). The former
                 // global strip-reasoning-without-signature guard broke exactly the
                 // providers that needed the echo.
-                if (msg.reasoning_content) out.reasoning_content = msg.reasoning_content;
-                    if (msg.thinking_signature) out.thinking_signature = msg.thinking_signature;
-                    if (msg.tool_calls) {
-                        out.tool_calls = msg.tool_calls.map(tc => {
+                // Retirement exception (retire-view): a tombstoned reasoning is
+                // replaced (unsigned) or dropped together with its signature
+                // (signed — prior-turn thinking may be dropped, never edited).
+                if (msg.reasoning_content && 'reasoning_content' in tx) out.reasoning_content = tx.reasoning_content;
+                else if (msg.reasoning_content) out.reasoning_content = msg.reasoning_content;
+                    if (msg.thinking_signature && !('thinking_signature' in tx)) out.thinking_signature = msg.thinking_signature;
+                    const callsSrc = tx.toolCalls || msg.tool_calls;
+                    if (callsSrc) {
+                        out.tool_calls = callsSrc.map(tc => {
                             let sanitizedArgs = {};
                             try {
                                 if (typeof tc.function?.arguments === 'string') {
@@ -402,25 +446,22 @@ function buildApiMessages(messages, options = {}) {
         }
     }
 
-    // Chunk-store transform (per-chat flag). Fail loud to raw on engine error.
-    if (chunkTransform === true && chunkView) {
-        try {
-            const { messages: tx, stats, chunkTable, chunkContents } = chunkView.buildChunkView(merged, {
-                retirements,
-                retirementTools: true
-            });
-            const savedPct = stats.bytesIn ? Math.round((1 - stats.bytesOut / stats.bytesIn) * 100) : 0;
-            log?.info?.(`[chunk-view] in=${(stats.bytesIn / 1000).toFixed(0)}K out=${(stats.bytesOut / 1000).toFixed(0)}K (-${savedPct}%) chunks=${stats.chunks} exact=${stats.exactDupes} near=${stats.nearDupes} retired=${stats.retired} dedupSaved=${(stats.dedupSavedBytes / 1000).toFixed(1)}K retiredSaved=${(stats.retiredSavedBytes / 1000).toFixed(1)}K`);
-            // rawMessages (pre-transform merged payload) rides along so the
-            // runner can count the no-measures number (§5a reporting) without
-            // re-running the projection.
-            return { messages: tx, chunkTable: chunkTable || new Map(), chunkContents: chunkContents || new Map(), chunkStats: stats, rawMessages: merged };
-        } catch (e) {
-            log?.error?.('[chunk-view] transform failed, sending raw:', e);
+    // Retirement convention paragraph — rides the first system message
+    // whenever the transform is on (the retire tools are offered exactly then).
+    if (chunkTransform === true) {
+        const para = retireView.RETIREMENT_CONVENTION_PARAGRAPH;
+        const sysIdx = merged.findIndex(m => m.role === 'system');
+        if (sysIdx >= 0) {
+            merged[sysIdx] = { ...merged[sysIdx], content: merged[sysIdx].content + '\n\n' + para };
+        } else {
+            merged.unshift({ role: 'system', content: para });
+        }
+        if (retireStats.retired > 0) {
+            log?.info?.(`[retire-view] tombstoned=${retireStats.retired} saved=${(retireStats.retiredSavedBytes / 1000).toFixed(1)}K`);
         }
     }
 
-    return { messages: merged, chunkTable: new Map(), chunkContents: new Map(), chunkStats: null, rawMessages: merged };
+    return { messages: merged, retireStats, rawMessages: merged };
 }
 
-module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, withInputSource, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef };
+module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, withInputSource, formatMessageTs, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef };

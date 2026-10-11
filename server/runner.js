@@ -156,6 +156,9 @@ const CHUNK_LABEL_ONLY = /^(\[chunk_[a-z0-9]+[^\]\n]*\]\s*)+$/;
 const CHUNK_LABEL_ANY = /\[chunk_[a-z0-9]+[^\]]*\]/g;
 function scrubChunkLabels(value, hits, resolve = null) {
     if (typeof value === 'string') {
+        // Address markers ([mN]) echoed from the transcript view — addressing,
+        // never content. Strip silently; they are expected, not a leak.
+        if (/\[m\d+\]/.test(value)) value = value.replace(/\[m\d+\]/g, '').trim();
         // Whole value is one or more labels — a "bare label" the model emitted
         // as content. Try EVERY chunk id named in the label: a near-dup is
         // [chunk_NEW ≈ chunk_BASE ...] and the BASE is the content the model
@@ -223,9 +226,6 @@ class Runner {
         this.idleTimer = null;
         this._stallTimer = null;
         this._ttftTimer = null;
-        this.chunkView = null; // lazy dynamic import (shared file, no port)
-        this._chunkTable = new Map(); // last assembly's chunk labels → hashes (context_retire)
-        this._chunkContents = new Map(); // last assembly's chunk labels → full text (issue #34)
         // §5a reporting: per-turn context records (raw/wire/savings/cache hint),
         // ring buffer of the last N turns — the data source for the report view.
         this.contextHistory = [];
@@ -393,7 +393,7 @@ class Runner {
         this.refresh();
         const lastAssistant = [...this.conv.messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
         // The pill means "how close am I to the limit" — the on-the-wire payload
-        // (post chunk-view dedup + retirements), NOT the raw stored history. Run
+        // (post retirement transform), NOT the raw stored history. Run
         // the same assembly a turn would, and count that, so load and live agree.
         let realUsed = null;
         let rawUsed = null;
@@ -570,7 +570,7 @@ class Runner {
         DEPS.log().info('Stripped transient tool image(s) at run start', { chatId: this.conversationId, count: pending.length }, 'Runner');
     }
 
-    // Assemble the exact outgoing payload (system prompt + chunk-view/dedup/
+    // Assemble the exact outgoing payload (system prompt + retirement transform/
     // retirement transform + image resolution). Single source of truth shared by
     // runOnce (the live turn) and buildSnapshot (the on-load context figure), so
     // the pill counts the SAME thing whether the conversation is fresh-loaded or
@@ -603,10 +603,7 @@ class Runner {
     }
 
     async _assemblePayload(turnModel = null) {
-        const [instructions, chunkView] = await Promise.all([
-            DEPS.getInstructions(),
-            this.chunkView ? Promise.resolve(this.chunkView) : import('../chat/js/chunk-view.js').then(m => (this.chunkView = m))
-        ]);
+        const instructions = await DEPS.getInstructions();
         const pool = mcpPool.getForUser(this.user, this.dbInstance);
         const mcpOrigin = pool.getStorageOrigin();
         const systemPrompt = buildSystemPrompt({
@@ -631,16 +628,30 @@ class Runner {
             voiceInput: this.session.assistantMode === true
                 || this.conv.messages.some(m => m.voice === true)
         });
-        const { messages, chunkTable, chunkStats, chunkContents, rawMessages } = buildApiMessages(this.conv.messages, {
+        const { messages, retireStats } = buildApiMessages(this.conv.messages, {
             systemPrompt,
             publicOrigin: DEPS.publicOrigin,
             chunkTransform: this.session.chunkTransform === true,
             retirements: this.session.retirements || {},
-            chunkView,
             log: DEPS.log(),
             readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
         });
-        return { apiMessages: messages, rawMessages, chunkStats, chunkTable, chunkContents, mcpOrigin };
+        // §5a reporting needs the no-measures number (rawTokens). With no active
+        // retirements raw === wire (markers aside) — skip the second projection.
+        // With retirements, project once more with the transform off. Costs a
+        // duplicate pass (incl. image inlining) only on retired conversations.
+        let rawMessages = messages;
+        if (this.session.chunkTransform === true && this.session.retirements && Object.keys(this.session.retirements).length > 0) {
+            rawMessages = buildApiMessages(this.conv.messages, {
+                systemPrompt,
+                publicOrigin: DEPS.publicOrigin,
+                chunkTransform: false,
+                retirements: {},
+                log: DEPS.log(),
+                readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
+            }).messages;
+        }
+        return { apiMessages: messages, rawMessages, retireStats, mcpOrigin };
     }
 
     // Auto-vision (restored server-side 2026-08-29; the pre-BFF client-side
@@ -757,7 +768,7 @@ class Runner {
     // turn's prefix survive from last turn). reasoningStripped is not reported
     // here: the reasoning policy is gateway-side (§3) and invisible to the
     // runner — reasoningTokens (what's ON the wire) is the honest number.
-    _contextReport({ apiMessages, rawMessages, chunkStats, breakdown, model, tools }) {
+    _contextReport({ apiMessages, rawMessages, retireStats, breakdown, model, tools }) {
             // Tools count on BOTH sides. raw is "the same request before the
             // measures ran" — the toolset is not a measure, it ships either way.
             // Counting it on one side only would let the delta read as negative
@@ -792,10 +803,8 @@ class Runner {
             rawTokens,
             wireTokens: breakdown.total,
             reasoningTokens: breakdown.byField.reasoning,
-            dedupSavedBytes: chunkStats?.dedupSavedBytes ?? 0,
-            retiredSavedBytes: chunkStats?.retiredSavedBytes ?? 0,
-            retiredCount: chunkStats?.retired ?? 0,
-            chunkCount: chunkStats?.chunks ?? 0,
+            retiredSavedBytes: retireStats?.retiredSavedBytes ?? 0,
+            retiredCount: retireStats?.retired ?? 0,
             cacheHint
         };
     }
@@ -856,9 +865,7 @@ class Runner {
             }
             await this._ensureVisionAnalysis(modelSupportsVision);
 
-            const { apiMessages, rawMessages, chunkStats, chunkTable, chunkContents, mcpOrigin } = await this._assemblePayload(model);
-            this._chunkTable = chunkTable;
-            this._chunkContents = chunkContents || new Map(); // label → full text (issue #34 tool-arg resolution)
+            const { apiMessages, rawMessages, retireStats, mcpOrigin } = await this._assemblePayload(model);
             // Keep the exact payload for the run-end context count (the real
             // on-the-wire size — the limit-relevant number).
             this.inFlight.apiMessages = apiMessages;
@@ -888,7 +895,7 @@ class Runner {
                         this.inFlight.tools = tools;
                         {
                             const b = breakdownApiMessages(apiMessages, model, tools);
-                            this.inFlight.contextReport = this._contextReport({ apiMessages, rawMessages, chunkStats, breakdown: b, model, tools });
+                            this.inFlight.contextReport = this._contextReport({ apiMessages, rawMessages, retireStats, breakdown: b, model, tools });
                             const head = `[token-count] ${this.conversationId.slice(-8)} turn payload: ${b.total} tok ` +
                                 `(content ${b.byField.content} + reasoning ${b.byField.reasoning} + toolCalls ${b.byField.toolCalls} + toolDefs ${b.byField.toolDefs} + overhead ${b.byField.overhead}) across ${apiMessages.length} msgs + ${b.toolCount} tools`;
                             console.log(head); // stdout — visible in the nPM console, not just the JSON log
@@ -1053,7 +1060,10 @@ class Runner {
             let args = {};
             try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
             const labelHits = { bare: [], stripped: [], resolved: [] };
-            args = scrubChunkLabels(args, labelHits, (label) => this._chunkContents.get(label));
+            // Legacy label defense stays (#30 era): old conversations taught
+            // models to emit labels; nothing resolves them anymore — bare
+            // labels reject, leading/inline labels strip.
+            args = scrubChunkLabels(args, labelHits);
             DEPS.log().info('Runner tool call', { chatId: this.conversationId, tool: tc.function.name }, 'Runner');
             this.broadcast('tool.start', { toolCallId: tc.id, name: tc.function.name, args, exchangeId: f.exchangeId, messageId: f.messageId });
             let status = 'success', resultText = '', resultImages = [];
@@ -1150,7 +1160,9 @@ class Runner {
 
     // PB-b: ctx for internal tool execution — everything over dbInstance,
     // no HTTP hop to our own API. Retirement writes go through the session
-    // doc (single author: this runner).
+    // doc (single author: this runner). Positional resolution: the retire
+    // tools name stored-message indexes; these accessors re-read the canonical
+    // store fresh (nDB find() returns detached copies — never cache).
     internalToolCtx() {
         return {
             user: this.user,
@@ -1159,7 +1171,11 @@ class Runner {
             log: DEPS.log(),
             mcpOrigin: this._mcpOrigin || null,
             publicOrigin: DEPS.publicOrigin,
-            chunkTable: this._chunkTable,
+            // () => stored messages array (fresh) — null when not yet loaded.
+            getStoredMessages: () => {
+                this.refresh();
+                return Array.isArray(this.conv?.messages) ? this.conv.messages : null;
+            },
             embedDeps: { embedBatch: DEPS.embedBatch, embedAvailable: DEPS.getEmbedAvailable ? DEPS.getEmbedAvailable() : true },
             getRetirements: () => {
                 this.refresh();
@@ -1358,10 +1374,8 @@ class Runner {
                 context.raw_tokens = f.contextReport.rawTokens;
                 context.reasoning_tokens = f.contextReport.reasoningTokens;
                 context.savings = {
-                    dedup_bytes: f.contextReport.dedupSavedBytes,
                     retired_bytes: f.contextReport.retiredSavedBytes,
-                    retired_count: f.contextReport.retiredCount,
-                    chunks: f.contextReport.chunkCount
+                    retired_count: f.contextReport.retiredCount
                 };
                 context.cache_hint = f.contextReport.cacheHint;
             }
@@ -1408,10 +1422,10 @@ class Runner {
                     role: 'assistant',
                     // Stored content is timestamp-free by invariant (2026-08-31):
                     // timestamps live in the api-view projection from createdAt.
-                    // Strip any model-echoed leading prefix so it can never double.
-                    // A mid-stream upstream error leaves a truncated answer — mark
-                    // it so it is never mistaken for a finished one.
-                    content: f.content.replace(LEADING_TS_REGEX, '') + (f.streamError
+                    // Strip any model-echoed leading prefix so it can never double,
+                    // and any [mN] address markers echoed from the transcript —
+                    // addresses are view-only, canonical content never carries them.
+                    content: f.content.replace(LEADING_TS_REGEX, '').replace(/\[m\d+\]/g, '').trim() + (f.streamError
                         ? `\n\n⚠️ The stream ended early — ${f.streamError.message} (${f.streamError.code}). The answer above may be incomplete.`
                         : ''),
                     model: f.model,

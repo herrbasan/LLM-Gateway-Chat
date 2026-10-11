@@ -138,7 +138,7 @@ const TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'storage_read',
-            description: `${SERVER_EXEC_NOTE}\n\nRead a file from workshop storage as UTF-8 text. Files larger than 32 KB are auto-CHUNKED (returns bucketFile + chunk count; page with browser_fetch bucket_file/chunk, retire consumed chunks with context_retire) — same pattern as browser_fetch. Reading a directory is an error; use storage_list instead.`,
+            description: `${SERVER_EXEC_NOTE}\n\nRead a file from workshop storage as UTF-8 text. Files larger than 32 KB are auto-paged into a bucket file (returns bucketFile + page count; read pages with browser_fetch bucket_file/chunk) — same pattern as browser_fetch. Once you have fully consumed the pages, retire those result messages with context_retire (their [mN] indexes). Reading a directory is an error; use storage_list instead.`,
             parameters: {
                 type: 'object',
                 properties: {

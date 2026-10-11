@@ -69,7 +69,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | `chat/js/file-store.js` | Attachment upload → `/api/buckets/images/…`, returns lightweight URLs |
 | `chat/js/voice-dictation.js` | Dictation controller (mic button flow): settled finals stream into the input, Done → `/api/stt` cleanup → cleaned text replaces input, Cancel restores snapshot |
 | `chat/js/voice-assistant.js` | Reactive assistant controller over nVoice SDK v1.1+ (turn-taking gauntlet, barge-in, ducking, look-ahead sentence TTS) talking to `/api/stt` |
-| `chat/js/preview.js`, `preview-url.js`, `chunk-view.js` | Preview pane + chunk inspection |
+| `chat/js/preview.js`, `preview-url.js` | Preview pane |
 | `chat-arena/js/arena.js` | Arena **spectator view** over the server ArenaRunner (snapshot + events via `/api/chats/:id/events`, start/stop/extend via `/api/arena/:id/*`). Legacy `Participant`/`Arena` classes (lines ~40–1165) are dead orchestration except: summary generation (`summarize`, direct `GatewayClient`) and legacy import — **cutover remnants** |
 
 ## Module Map (server side)
@@ -148,9 +148,10 @@ Existing `/api/chats/*` CRUD (list/rename/pin/delete), `/api/search`, `/api/buck
 
 - **The runner counts, not the gateway.** `server/token-count.js` (`countApiMessages`/`breakdownApiMessages`, js-tiktoken cl100k/o200k) is fed the full field set (content + reasoning_content + tool_calls + tool results + image costs). The gateway's own estimate only reads `content` and under-counts thinking/tool chats by 58–91%.
 - `_assemblePayload()` in `server/runner.js` is shared by `runOnce` (live turn) and `buildSnapshot` (on-load) — identical payload → no load/send flip. **The context pill = the on-the-wire payload** (what the next request consumes), not raw stored history.
-- **Measures** (audited against "saving must exceed cache-break cost"): dedup/chunk-collapse (cache-neutral, keep), retirement/tombstones (breaking by design — batch them), unretire, merge/auto-heal.
-- **Chunk IDs are content-derived**: `chunk_` + `fnv1a64(bareContent).toString(36)`. Tombstones key retirements by content hash. Label regex `^chunk_[a-z0-9]+$`. Accept both on read; never rewrite stored numeric labels.
-- **Chunk labels are view-only** — never file content, never tool payload (#30). The runner scrubs outbound tool args before dispatch: leading labels are stripped (logged loud + flagged in the tool result), a bare label as a value is rejected with an error. The chunk-view convention paragraph teaches this contract; never reintroduce "labels persist in files".
+- **Measures** (audited against "saving must exceed cache-break cost"): retirement/tombstones (breaking by design — batch them), unretire, merge/auto-heal. Dedup/chunking was REMOVED 2026-10-11 (issues #52/#53): replayed across all chunked sessions it saved ~1 MB total vs the retirement's 6.1 MB, and hash-label transcription caused confabulated ids. Do not resurrect it; the design lives in [architecture-conversation-runner.md §2.3a](docs/architecture-conversation-runner.md).
+- **Retirement is positional** (`server/retire-view.js`): retirement chats stamp each payload message `[mN]` (N = stored index); `context_retire(messages, distill)` takes indexes/ranges and retires whole messages (tool result, reasoning, prose, user text, write-args). `context_units()` enumerates. Partial success — unknown indexes are skipped, not fatal. The live chain (last user message onward) is never tombstoned.
+- **Retirement keys are content hashes** (`fnv1a`, byte-identical to the old chunk engine's key forms — tool results hash the timestamped API form, write-args the raw field value) so pre-rework retirements keep matching. Unsigned reasoning retires by replacement; signed reasoning (thinking_signature) drops together with its signature.
+- **Legacy label defense stays**: the runner scrubs `[chunk_…]` labels from outbound tool args (leading stripped, bare rejected) and strips echoed `[mN]` markers from args and from persisted assistant content — addresses are view-only, never content.
 - **Per-provider prior-reasoning policy** (in the gateway, `capabilities.priorReasoning`; the chat `api-view` strip was REMOVED — reasoning passes through verbatim):
 
 | Provider | `priorReasoning` | Why |
