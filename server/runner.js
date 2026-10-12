@@ -230,6 +230,8 @@ class Runner {
         // ring buffer of the last N turns — the data source for the report view.
         this.contextHistory = [];
         this._lastMsgHashes = null;
+        // Context-pill count cache (see buildSnapshot) — invalidated by key change.
+        this._countCache = null;
         // Orphaned run? The previous process died mid-chain and left its stamp
         // behind — mark the conversation LOUDLY, then clear the stamp. Without
         // this a restart mid-run is a permanent silent stall (2026-08-25).
@@ -399,16 +401,32 @@ class Runner {
         let rawUsed = null;
         let windowSize = lastAssistant?.context?.window_size ?? null;
         try {
-            const { apiMessages, rawMessages } = await this._assemblePayload();
-                    const models = await getModels();
-                    const entry = models.find(m => m.id === this.session.model);
-                    const tools = await this._assembleTools(entry?.capabilities?.vision === true);
-                    realUsed = countApiMessages(apiMessages, this.session.model, tools);
-                    rawUsed = countApiMessages(rawMessages, this.session.model, tools);
-                    if (windowSize == null) {
-                        windowSize = entry?.capabilities?.contextWindow ?? null;
-                    }
-                } catch (e) {
+            const models = await getModels();
+            const entry = models.find(m => m.id === this.session.model);
+            if (windowSize == null) {
+                windowSize = entry?.capabilities?.contextWindow ?? null;
+            }
+            const tools = await this._assembleTools(entry?.capabilities?.vision === true);
+            // Counting 786k tokens costs ~1.5s per pass (js-tiktoken ~1.9 MB/s) and
+            // every attach paid it TWICE — even with no retirements, where raw IS
+            // the wire array (same reference). Cache by everything the count
+            // depends on: every writer of those inputs bumps conv/session
+            // updatedAt (message writes, setRetirements, PATCH), so a matching
+            // key means the count is still current.
+            const cacheKey = JSON.stringify([
+                this.conversationId, this.conv.updatedAt, this.session.updatedAt,
+                this.session.model, entry?.capabilities?.vision === true, tools.length
+            ]);
+            if (this._countCache && this._countCache.key === cacheKey) {
+                realUsed = this._countCache.realUsed;
+                rawUsed = this._countCache.rawUsed;
+            } else {
+                const { apiMessages, rawMessages } = await this._assemblePayload();
+                realUsed = countApiMessages(apiMessages, this.session.model, tools);
+                rawUsed = rawMessages === apiMessages ? realUsed : countApiMessages(rawMessages, this.session.model, tools);
+                this._countCache = { key: cacheKey, realUsed, rawUsed };
+            }
+        } catch (e) {
             DEPS.log().warn('Snapshot context count failed', { chatId: this.conversationId, error: e.message }, 'Runner');
         }
         const realContext = realUsed == null ? (lastAssistant?.context ?? null) : {
