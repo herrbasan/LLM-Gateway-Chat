@@ -103,6 +103,7 @@ let attachedImages = []; // Array of {dataUrl, name, type}
 let tts = null;
 let ttsPlayer = null;
 let currentTtsExchangeId = null;
+let narrationPlayback = null; // { blockEl, buttonEl } — narration block owning the active playback
 
 // DOM Elements
 const elements = {
@@ -1300,6 +1301,29 @@ async function init() {
         });
     }
 
+    // Narration blocks (MD-Blocks §5.2 `preset=narration`) are delivery text —
+    // spoken, not shown. nui-markdown creates its play control ONLY when a
+    // speech function is registered, so this hook is what makes the affordance
+    // exist at all.
+    if (window.nui?.util?.setMarkdownSpeech) {
+        window.nui.util.setMarkdownSpeech((text, blockEl, buttonEl) => {
+            if (!tts || !text) return null;
+            // Narration is not a message read-aloud — clear the exchange identity
+            // so a later bubble click speaks instead of toggling a stale target.
+            currentTtsExchangeId = null;
+            narrationPlayback = { blockEl, buttonEl };
+            ttsPlayer?.reveal();
+            tts.toggle(text, blockEl);
+            // Returning no stop handle is deliberate: nui would then own a
+            // playing/stopped flag it can never clear once the audio ends by
+            // itself, so a later click would hit a dead stop() and need a second
+            // click to speak again. The app's toggle owns the behaviour instead —
+            // same contract as the bubble and preview speak buttons.
+            queueMicrotask(applyNarrationButtonState);
+            return null;
+        });
+    }
+
     // Restore theme (needs history loaded first for async prefs)
     const savedTheme = await storage.getPref('theme');
     if (savedTheme) {
@@ -1524,6 +1548,20 @@ async function applyDefaultConfig() {
             if (state === 'idle') currentTtsExchangeId = null;
         });
     }
+    // The narration control reads its state from the controller, not from nui:
+    // nui's own flag cannot see playback ending on its own, and it writes its
+    // play/stop visuals synchronously after the speech function returns (the
+    // microtask in setMarkdownSpeech re-applies the truth over that write).
+    tts.on('state', ({ targetEl }) => {
+        if (!narrationPlayback) return;
+        if (targetEl && targetEl !== narrationPlayback.blockEl) {
+            // The one global player belongs to another target now (bubble, preview).
+            setNarrationButtonState(narrationPlayback.buttonEl, 'idle');
+            narrationPlayback = null;
+            return;
+        }
+        setNarrationButtonState(narrationPlayback.buttonEl, narrationPlaybackState());
+    });
     tts.init().catch((err) => console.warn('[TTS] init failed:', err.message));
 }
 
@@ -4373,6 +4411,9 @@ function updateAssistantContent(el, content, reasoningContent = null) {
                         // marking it streaming would make endStream() crash on missing _tempContainer
                         // and block a later regeneration's beginStream().
                         nuiMd._processed = true;
+                        // Self-injected HTML skips the component's own render —
+                        // and that render is where narration controls are created.
+                        window.nui.util.enhanceNarration?.(nuiMd);
                     } else {
                         // Module not ready: rely on declarative markup that upgrades automatically later
                         const safeContent = parsed.answer.replace(/<\/script/gi, '<\\/script');
@@ -4591,6 +4632,46 @@ function getAssistantPlainText(exchangeId) {
 function stopTts() {
     if (tts) tts.stop();
     currentTtsExchangeId = null;
+}
+
+// Keep the renderer's narration control truthful. The control is a plain
+// play/stop toggle that nui flips on every click, so the controller's state is
+// written back over it — including 'idle', which nui can never reach on its own
+// when a line simply finishes playing.
+function setNarrationButtonState(buttonEl, state) {
+    if (!buttonEl?.isConnected) return;
+    const icon = buttonEl.querySelector('nui-icon');
+    const active = state === 'playing' || state === 'loading';
+    const glyph = state === 'playing' ? 'pause' : state === 'loading' ? 'sync' : 'play';
+    const label = state === 'playing' ? 'Pause narration'
+        : state === 'paused' ? 'Resume narration'
+        : state === 'loading' ? 'Generating narration' : 'Play narration';
+    if (icon) icon.setAttribute('name', glyph);
+    buttonEl.dataset.playing = active ? 'true' : 'false';
+    buttonEl.setAttribute('aria-pressed', active ? 'true' : 'false');
+    buttonEl.setAttribute('aria-label', label);
+}
+
+// The SDK reports a FINISHED line as 'paused' (the audio element ended), the same
+// state as a mid-line pause — but a click on a finished line replays it from the
+// start. Distinguishing them is what stops the control claiming "Resume" on a line
+// that is already over.
+function narrationPlaybackState() {
+    const state = tts?.getPlaybackState() ?? 'idle';
+    if (state !== 'paused') return state;
+    const audio = tts.audio;
+    const ended = audio ? (audio.ended || (audio.duration > 0 && audio.currentTime >= audio.duration - 0.05)) : false;
+    return ended ? 'idle' : 'paused';
+}
+
+function applyNarrationButtonState() {
+    if (!narrationPlayback) return;
+    const state = narrationPlaybackState();
+    setNarrationButtonState(narrationPlayback.buttonEl, state);
+    // Only the microtask clears the tracking: a cancel emits 'idle' synchronously,
+    // BEFORE nui has written its own play/stop visuals over the button, so clearing
+    // there would skip the one write that corrects them.
+    if (state === 'idle') narrationPlayback = null;
 }
 
 function toggleTts(exchangeId, el, opts = {}) {

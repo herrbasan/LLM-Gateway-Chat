@@ -568,6 +568,15 @@ nui-code pre {
     margin-right: auto;
 }
 
+/* A message holding MD-Blocks structure renders nui-markdown as an inline-size
+   container. Inline-size containment makes a shrink-to-fit host measure as if
+   empty, so a bubble that hugs its text collapses to a min-content sliver — a
+   narration block is the small case that lands in chat. A document bubble takes
+   the width instead of hugging. */
+.chat-message:has(nui-markdown.nui-md-document) {
+    width: 100%;
+}
+
 .chat-message.tool {
     width: 100%;
     border: thin solid var(--border-shade2);

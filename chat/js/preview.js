@@ -403,6 +403,10 @@ function renderMarkdown(mdContent, base) {
     // Previews show rendered work product, not document metadata — strip
     // frontmatter (nui-markdown default 'show' renders it as a card).
     md.setAttribute('frontmatter', 'strip');
+    // Deck authoring surface: label each section boundary ("Slide 2 of 7"). Set
+    // BEFORE appending — the component reads its attributes once, at render, and
+    // its _processed guard ignores later changes.
+    md.setAttribute('show-breaks', 'Slide');
     if (base) md.base = base;
     const script = document.createElement('script');
     script.type = 'text/markdown';
