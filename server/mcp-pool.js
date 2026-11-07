@@ -33,7 +33,10 @@ function clampBudget(v) {
 // budget as args.timeout in ms. The pool honors it up to the clamp; tools
 // without the field keep the flat default.
 function withBudget(opts, args) {
-    const n = Number(args?.timeout);
+    // The workshop compact surface wraps forge.call in tools({method, payload});
+    // its declared budget therefore lives one envelope deeper than a direct call.
+    const declared = args?.method === 'forge.call' ? args?.payload?.timeout : args?.timeout;
+    const n = Number(declared);
     if (!Number.isFinite(n) || n <= 0) return opts;
     return { ...opts, timeoutMs: n };
 }
