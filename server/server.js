@@ -14,6 +14,7 @@ const runner = require('./runner');
 const arenaRunner = require('./arena-runner');
 const mcpPool = require('./mcp-pool');
 const sttRelay = require('./stt-relay');
+const { decodePreviewText } = require('./preview-content');
 const {
     splitTextIntoChunks, minEmbedChunkCount, planEmbedBatches,
     embedVectorId, deleteEmbedVectors,
@@ -1444,11 +1445,12 @@ const routes = {
     try {
       const upstream = await fetch(target, { signal: AbortSignal.timeout(10000) });
       if (!upstream.ok) { json(res, { error: `upstream ${upstream.status} for ${target}` }, 502, req); return; }
-      const text = await upstream.text();
+      const bytes = Buffer.from(await upstream.arrayBuffer());
+      const text = decodePreviewText(bytes, upstream.headers.get('content-type'));
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(canonicalizeStorageUrls(text));
     } catch (e) {
-      json(res, { error: `preview fetch failed: ${e.message}` }, 502, req);
+      json(res, { error: e.statusCode === 415 ? e.message : `preview fetch failed: ${e.message}` }, e.statusCode || 502, req);
     }
   },
 

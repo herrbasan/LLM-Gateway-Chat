@@ -13,6 +13,7 @@
 const storageTools = require('./storage-tools');
 const retireView = require('./retire-view');
 const { formatMessageTs } = require('./api-view');
+const { preflightPreviewUrl } = require('./preview-content');
 
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
 // List-event emitter (issue #33): metadata mutations broadcast chat.updated so
@@ -392,7 +393,7 @@ const ARCHIVE_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'chat_preview_show',
-            description: `${SERVER_EXEC_NOTE}\n\nQueue content or a file/URL for rendering in the chat's preview pane (a second rendering surface). Pass EXACTLY ONE of content (text to render, markdown or code) or url (a /storage/... path or absolute http(s) URL to fetch). The preview renders CLIENT-side: this tool returns a confirmation and the user clicks "Show in preview" on the tool bubble to render it. Use content mode for generated work product (edits, diffs, code); url mode for existing files.`,
+            description: `${SERVER_EXEC_NOTE}\n\nQueue content or a file/URL for rendering in the chat's preview pane (a second rendering surface). Pass EXACTLY ONE of content (text to render, markdown or code) or url (a /storage/... path or absolute http(s) URL to fetch). URL mode is for existing text/Markdown/code files only: binary documents such as PDFs, images, and archives are rejected with an error; for rendered documents use raster page previews (PNG) instead. The preview renders CLIENT-side: this tool returns a confirmation and the user clicks "Show in preview" on the tool bubble to render it. Use content mode for generated work product (edits, diffs, code).`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -563,7 +564,7 @@ async function executeInternalTool(name, args, ctx) {
             return executeAttachmentSave(args, { mcpOrigin, publicOrigin, readBucketBytes: (b, i, e) => dbInstance.db.getFile(b, i, e) });
 
         case 'chat_preview_show':
-            return executePreviewShow(args);
+            return executePreviewShow(args, { mcpOrigin });
 
         case 'chat_preview_state':
             return executePreviewState(args, { dbInstance, conversationId });
@@ -1248,13 +1249,16 @@ function formatSessionList(all, args, kind) {
 // pane is a view surface (architecture §4 "preview becomes pure view"), so the
 // runner can't render to it. Validate the args and return a confirmation; the
 // view already renders a "Show in preview" button (chat.js _decoratePreviewToolButton)
-// that calls preview.show(args) using the args from tool.start.
-function executePreviewShow(args) {
+// that calls preview.show(args) using the args from tool.start. URL mode also
+// preflights the upstream declaration here so the MODEL gets a binary-type error;
+// the proxy independently validates bytes for mislabeled responses (#57).
+async function executePreviewShow(args, { mcpOrigin }) {
     if (!args || typeof args !== 'object') throw new Error('chat_preview_show: args object required');
     const hasContent = args.content !== undefined && args.content !== null;
     const hasUrl = typeof args.url === 'string' && args.url.length > 0;
     if (hasContent && hasUrl) throw new Error('chat_preview_show: pass content OR url, not both');
     if (!hasContent && !hasUrl) throw new Error('chat_preview_show: one of content or url required');
+    if (hasUrl) await preflightPreviewUrl(args.url, mcpOrigin);
     const label = args.title || args.id || 'item';
     const mode = hasUrl ? `URL ${args.url}` : `${(args.content || '').length} chars`;
     return { content: [{ type: 'text', text: `Preview queued (${mode}). Click "Show in preview" on this tool bubble to render "${label}".` }] };

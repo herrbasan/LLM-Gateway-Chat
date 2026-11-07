@@ -392,6 +392,13 @@ nui-code pre {
     display: none !important;
 }
 
+.preview-fetch-error {
+    padding: var(--nui-space, 1rem);
+    color: var(--color-danger, #f44336);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 /* Markdown text should wrap, not force a horizontal scrollbar. The preview
    pane is narrow (382px on a 390px phone) and long inline paths/code words
    in lists otherwise push scrollWidth past clientWidth. pre/code/nui-code

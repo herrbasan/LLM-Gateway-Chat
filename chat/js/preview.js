@@ -237,7 +237,12 @@ async function show(args) {
         // fetches and displays it. No regeneration of content.
         const resolvedUrl = resolvePreviewUrl(args.url, _mcpOriginResolver);
         docBase = resolvedUrl;
-        content = await _fetchUrlText(resolvedUrl);
+        try {
+            content = await _fetchUrlText(resolvedUrl);
+        } catch (err) {
+            renderFetchError(resolvedUrl, err);
+            throw err;
+        }
         if (typeof id !== 'string' || id.length === 0) id = deriveIdFromUrl(resolvedUrl);
         if (typeof title !== 'string' || title.length === 0) title = deriveTitleFromUrl(resolvedUrl);
         if (typeof args.language !== 'string' || args.language.length === 0) language = inferLanguageFromUrl(resolvedUrl);
@@ -336,6 +341,23 @@ async function showUi(args) {
 // Internal: URL fetch mode helpers
 // ============================================
 
+function renderFetchError(url, err) {
+    activeId = null;
+    _renderedContent = null;
+    syncDropdown();
+    openPane();
+    viewBtn.hidden = true;
+    content.classList.remove('deck-mode', 'ui-mode');
+    const error = document.createElement('div');
+    error.className = 'preview-fetch-error';
+    error.setAttribute('role', 'alert');
+    error.textContent = err.message;
+    content.replaceChildren(error);
+    sourceEl.textContent = url;
+    sourceEl.title = url;
+    if (_onContentChange) _onContentChange();
+}
+
 /**
  * Fetch a url and return its text content. Goes through the same-origin
  * backend proxy (/api/preview/fetch) — the MCP storage server binds localhost
@@ -348,7 +370,16 @@ async function _fetchUrlText(url) {
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
         const res = await fetch(`/api/preview/fetch?url=${encodeURIComponent(url)}`, { signal: controller.signal });
-        if (!res.ok) throw new Error(`preview: fetch failed (${res.status} ${res.statusText}) for ${url}`);
+        if (!res.ok) {
+            let detail;
+            if (res.headers.get('content-type')?.includes('application/json')) {
+                const body = await res.json();
+                detail = body.error || JSON.stringify(body);
+            } else {
+                detail = await res.text();
+            }
+            throw new Error(`preview: fetch failed (${res.status} ${res.statusText}) for ${url}${detail ? ` — ${detail}` : ''}`);
+        }
         return await res.text();
     } catch (err) {
         if (err.name === 'AbortError') {
