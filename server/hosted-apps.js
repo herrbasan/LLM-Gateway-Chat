@@ -23,7 +23,8 @@ function resolveHostedApp(args, mcpOrigin) {
     const url = new URL(rawUrl, origin);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('chat_app_open: only HTTP(S) apps are supported');
     if (url.origin !== origin) throw new Error(`chat_app_open: app URL origin ${url.origin} does not match the configured MCP origin ${origin}`);
-    if (url.pathname !== definition.editorPath) throw new Error(`chat_app_open: ${app} apps must use ${definition.editorPath}, received ${url.pathname}`);
+    if (url.pathname !== definition.editorPath && url.pathname !== `${definition.editorPath}/`) throw new Error(`chat_app_open: ${app} apps must use ${definition.editorPath}, received ${url.pathname}`);
+    url.pathname = `${definition.editorPath}/`;
     if (url.username || url.password) throw new Error('chat_app_open: credentials in URLs are forbidden');
     for (const key of url.searchParams.keys()) {
         if (CREDENTIAL_PARAMS.test(key)) throw new Error(`chat_app_open: credential query parameter "${key}" is forbidden`);

@@ -11,11 +11,11 @@ const BACKEND = 'http://192.168.0.100:3100';
 test('hosted URLs map host-free and backend-internal paths onto the public origin', () => {
     assert.equal(
         hostedApps.resolveUrl('/print?path=vita%2Fvita.md', PUBLIC, BACKEND).toString(),
-        `${PUBLIC}/print?path=vita%2Fvita.md`
+        `${PUBLIC}/print/?path=vita%2Fvita.md`
     );
     assert.equal(
         hostedApps.resolveUrl(`${BACKEND}/print?path=vita.md`, PUBLIC, BACKEND).toString(),
-        `${PUBLIC}/print?path=vita.md`
+        `${PUBLIC}/print/?path=vita.md`
     );
 });
 

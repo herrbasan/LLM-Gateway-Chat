@@ -1006,7 +1006,7 @@ function _resolveToolUiAction(ui) {
     } catch {
         return null;
     }
-    if (url.pathname === '/print') {
+    if (url.pathname === '/print' || url.pathname === '/print/') {
         url = hostedApps.resolveUrl(raw, getHostedAppOrigin(), getMcpServerOrigin());
         if (!url) return null;
     }

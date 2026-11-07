@@ -35,6 +35,7 @@ function resolveUrl(raw, rawPublicOrigin, rawBackendOrigin) {
     let url;
     try { url = new URL(raw, publicOrigin); } catch { return null; }
     if (url.origin !== publicOrigin && url.origin !== backendOrigin) return null;
+    if (url.pathname === '/print') url.pathname = '/print/';
     // Path preservation turns a backend-issued internal URL into its public
     // route without ever exposing the internal host to the browser (#62).
     return new URL(`${url.pathname}${url.search}${url.hash}`, publicOrigin);
@@ -50,7 +51,9 @@ function resolve(ui, rawPublicOrigin, rawBackendOrigin) {
     const url = resolveUrl(ui.url, rawPublicOrigin, rawBackendOrigin);
     if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:')) return null;
     const origin = url.origin;
-    if (url.pathname !== definition.editorPath || url.username || url.password) return null;
+    if (url.pathname !== definition.editorPath && url.pathname !== `${definition.editorPath}/`) return null;
+    url.pathname = `${definition.editorPath}/`;
+    if (url.username || url.password) return null;
     for (const key of url.searchParams.keys()) {
         if (CREDENTIAL_PARAMS.test(key)) return null;
     }

@@ -14,7 +14,7 @@ test('creates an explicit hosted-app action with a unique conversation-scoped in
     assert.equal(first.ui.kind, 'hosted-app');
     assert.equal(first.ui.app, 'print');
     assert.equal(first.ui.label, 'Open Vita — print layout');
-    assert.equal(first.ui.url, 'http://localhost:3100/print?path=vita%2Fvita.md');
+    assert.equal(first.ui.url, 'http://localhost:3100/print/?path=vita%2Fvita.md');
     assert.match(first.ui.appInstanceId, /^app_[0-9a-f-]{36}$/);
     assert.notEqual(first.ui.appInstanceId, second.ui.appInstanceId);
     assert.match(first.content[0].text, /nothing has been opened automatically/);
@@ -22,7 +22,7 @@ test('creates an explicit hosted-app action with a unique conversation-scoped in
 
 test('accepts an absolute URL only on the configured MCP origin', () => {
     const resolved = resolveHostedApp({ ...valid, url: `${ORIGIN}/print?path=vita.md` }, ORIGIN);
-    assert.equal(resolved.url, `${ORIGIN}/print?path=vita.md`);
+    assert.equal(resolved.url, `${ORIGIN}/print/?path=vita.md`);
     assert.throws(() => resolveHostedApp({ ...valid, url: 'https://example.com/print' }, ORIGIN), /does not match/);
 });
 
