@@ -99,6 +99,7 @@ architecture rule.
 | `GET` | `/api/chats/:id/events` | Attach to the conversation SSE stream (snapshot + live events). |
 | `POST` | `/api/chats/:id/abort` | Abort the active run. |
 | `POST` | `/api/chats/:id/retry` | Retry the last failed run: drop the trailing failure note(s) (assistant, `error: true`) and re-kick the chain — the pending user message is still in history. 409 when a run is active. |
+| `POST` | `/api/chats/:id/app-events` | Record a validated hosted-app `saved`/`closed` event (#58). The runner accepts only an `appInstanceId` issued by this conversation's persisted `chat_app_open` tool message; events are deduplicated, appended to `appEvents`, and broadcast. |
 
 All cookie-auth (`requireAuth`), per-user DB isolation as today. Existing
 `/api/chats/*` CRUD (list/rename/pin/delete), `/api/search`, `/api/buckets/*`,
@@ -210,6 +211,7 @@ embedStatus included), `inFlight` (if a run is active), `usage/context` of the l
 | `delta` | `{content?, reasoningContent?}` | raw rate; the view debounces rendering (as today) |
 | `tool.start` | `{toolCallId, name, args}` | |
 | `tool.end` | `{toolCallId, name, status, resultMessage, resultImages?, ui?, toolMessageId}` | result also persisted. Optional `ui` is a structured tool-owned action stored as `toolUi`: generic actions (`label`, `url`, `mode: preview|new-tab`) use preview iframes only for chat/workshop origins; `kind: hosted-app` (#58) carries `id`, `app`, `appInstanceId`, `title`, `url`, `label` and opens an allowlisted app in the large dialog after an explicit user click. |
+| `app.event` | `{id, appInstanceId, app, type, path?, sourceSha256?, pdfUrl?, at, consumedAt}` | Hosted-app `saved`/`closed` lifecycle event after parent and runner validation. Persisted on the conversation's `appEvents`; pending events join the next live system payload and are consumed only by a successful run. |
 | `msg.assistant` | message | appended + persisted |
 | `run.end` | `{finishReason, usage, context, aborted?}` | |
 | `embed.status` | `{messageId, status}` | folds today's separate `/api/embed-events` channel into the conversation stream |

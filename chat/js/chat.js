@@ -363,6 +363,7 @@ function attachRunnerEvents(chatId) {
             renderHistoryList();
         },
         error(d) { _runnerError(chatId, d); },
+        'app.event'(d) { _runnerAppEvent(chatId, d); },
         'embed.status'(d) { _runnerEmbed(chatId, d); },
         // #27 — another view (or a settings save) switched the conversation's
         // model: converge this view's selector on the actual model.
@@ -377,6 +378,19 @@ function attachRunnerEvents(chatId) {
             }
         }
     });
+}
+
+function _runnerAppEvent(chatId, event) {
+    if (chatId !== currentChatId || !event) return;
+    const container = getOrCreateContainer(chatId);
+    const notice = document.createElement('div');
+    notice.className = 'app-event-notice';
+    notice.textContent = event.type === 'saved'
+        ? `Hosted ${event.app} app saved ${event.path}`
+        : `Hosted ${event.app} app closed`;
+    container.appendChild(notice);
+    scrollToBottom(container);
+    setTimeout(() => notice.remove(), 10000);
 }
 
 function _runnerUser(chatId, msg) {
@@ -999,6 +1013,7 @@ function _resolveToolUiAction(ui) {
 
 function _openToolUi(action) {
     if (action.mode === 'dialog') {
+        hostedApps.setConversation(currentChatId);
         hostedApps.open(action);
         return;
     }
@@ -5196,6 +5211,7 @@ async function switchChat(targetChatId) {
     // Without this, chat B would see chat A's preview. Idempotent: safe on init.
     preview.reset();
     hostedApps.reset();
+    hostedApps.setConversation(currentChatId);
 
     // 1. Get or create the container for this chat (creates DOM node if first time)
     const targetContainer = getOrCreateContainer(targetChatId);

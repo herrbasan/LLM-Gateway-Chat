@@ -14,6 +14,7 @@ const { buildSystemPrompt } = require('./system-prompt');
 const { countApiMessages, breakdownApiMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
 const internalTools = require('./internal-tools');
+const { normalizeAppEvent } = require('./hosted-apps');
 
 let DEPS = null;
 // deps = { gatewayUrl, gatewayKey, publicOrigin, embedMessageAsync, log, getInstructions, idleMs,
@@ -356,6 +357,66 @@ class Runner {
         DEPS.emitUserEvent?.(this.user.id, this.conversationId, event, data);
     }
 
+    recordAppEvent(raw) {
+        const input = normalizeAppEvent(raw);
+        this.refresh();
+        const issued = this.conv.messages.find(m => m.role === 'tool'
+            && m.toolName === 'chat_app_open'
+            && m.toolUi?.kind === 'hosted-app'
+            && m.toolUi?.appInstanceId === input.appInstanceId
+            && m.toolUi?.app === input.app);
+        if (!issued) {
+            const err = new Error(`app event: appInstanceId ${input.appInstanceId} was not issued in this conversation`);
+            err.statusCode = 403;
+            throw err;
+        }
+        const events = Array.isArray(this.conv.appEvents) ? [...this.conv.appEvents] : [];
+        const duplicate = events.find(event => event.appInstanceId === input.appInstanceId
+            && event.type === input.type
+            && event.path === input.path
+            && event.sourceSha256 === input.sourceSha256
+            && event.pdfUrl === input.pdfUrl);
+        if (duplicate) return { event: duplicate, duplicate: true };
+
+        const event = {
+            id: 'appEvent_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10),
+            ...input,
+            at: new Date().toISOString(),
+            consumedAt: null
+        };
+        events.push(event);
+        const updatedAt = new Date().toISOString();
+        this.dbInstance.db.set(this.conv._id, 'appEvents', events);
+        this.dbInstance.db.set(this.conv._id, 'updatedAt', updatedAt);
+        this.conv.appEvents = events;
+        this.conv.updatedAt = updatedAt;
+        this.broadcast('app.event', event);
+        this.touch();
+        return { event, duplicate: false };
+    }
+
+    _pendingAppEvents() {
+        return (Array.isArray(this.conv.appEvents) ? this.conv.appEvents : []).filter(event => !event.consumedAt);
+    }
+
+    _consumeAppEventsInRun() {
+        if (!this._appEventIdsInRun || this._appEventIdsInRun.size === 0) return;
+        this.refresh();
+        const consumedAt = new Date().toISOString();
+        let changed = false;
+        const events = (Array.isArray(this.conv.appEvents) ? this.conv.appEvents : []).map(event => {
+            if (!this._appEventIdsInRun.has(event.id) || event.consumedAt) return event;
+            changed = true;
+            return { ...event, consumedAt };
+        });
+        this._appEventIdsInRun.clear();
+        if (!changed) return;
+        this.dbInstance.db.set(this.conv._id, 'appEvents', events);
+        this.dbInstance.db.set(this.conv._id, 'updatedAt', consumedAt);
+        this.conv.appEvents = events;
+        this.conv.updatedAt = consumedAt;
+    }
+
     // Progress indication: log + broadcast a phase transition so a view (and the
     // logs) can show what the backend is doing between run.start and the first
     // delta. Phases: assembling → streaming → (tool.start/end) → run.end.
@@ -453,6 +514,7 @@ class Runner {
                 retirements: this.session.retirements || {}
             },
             messages: this.conv.messages.map(m => this.viewMessage(m)),
+            appEvents: Array.isArray(this.conv.appEvents) ? this.conv.appEvents : [],
             inFlight: this.inFlight ? this.inFlightView() : null,
             running: this.running,
             contextHistory: this.contextHistory,
@@ -535,6 +597,7 @@ class Runner {
 
     async runLoop() {
         await this._stripTransientToolImages();
+        this._appEventIdsInRun = new Set();
         let more = this.pendingSends > 0;
         this.pendingSends = 0;
         let hops = 0;
@@ -635,6 +698,10 @@ class Runner {
         const instructions = await DEPS.getInstructions();
         const pool = mcpPool.getForUser(this.user, this.dbInstance);
         const mcpOrigin = pool.getStorageOrigin();
+        const pendingAppEvents = this._pendingAppEvents();
+        if (turnModel && this._appEventIdsInRun) {
+            for (const event of pendingAppEvents) this._appEventIdsInRun.add(event.id);
+        }
         const systemPrompt = buildSystemPrompt({
             instructions,
             user: this.userProfile(),
@@ -655,7 +722,8 @@ class Runner {
             // (otherwise a later typed-only turn would leave `[voice]` tags in
             // the payload with nothing explaining them).
             voiceInput: this.session.assistantMode === true
-                || this.conv.messages.some(m => m.voice === true)
+                || this.conv.messages.some(m => m.voice === true),
+            appEvents: pendingAppEvents
         });
         const { messages, retireStats } = buildApiMessages(this.conv.messages, {
             systemPrompt,
@@ -1066,6 +1134,7 @@ class Runner {
         if (outcome === 'tool_calls' && this._toolsAdvertised && f) {
             return await this.executeToolCalls(f); // true → runLoop continues immediately
         }
+        if (outcome !== 'error' && outcome !== 'aborted') this._consumeAppEventsInRun();
         return false;
     }
 

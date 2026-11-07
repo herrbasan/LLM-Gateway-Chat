@@ -8,6 +8,8 @@ const HOSTED_APPS = {
 const CREDENTIAL_PARAMS = /^(?:access_?token|api_?key|token|session|secret|password|sig|signature)$/i;
 let dialog = null;
 let frame = null;
+let current = null;
+let conversationId = null;
 
 function init() {
     dialog = document.getElementById('hosted-app-dialog');
@@ -16,6 +18,7 @@ function init() {
     dialog.addEventListener('nui-dialog-close', () => {
         frame.src = 'about:blank';
     });
+    window.addEventListener('message', onHostMessage);
 }
 
 function resolve(ui, rawMcpOrigin) {
@@ -39,6 +42,8 @@ function resolve(ui, rawMcpOrigin) {
     for (const key of url.searchParams.keys()) {
         if (CREDENTIAL_PARAMS.test(key)) return null;
     }
+    url.searchParams.set('hostInstanceId', ui.appInstanceId);
+    url.searchParams.set('parentOrigin', window.location.origin);
     return {
         mode: 'dialog',
         id: ui.id,
@@ -46,12 +51,15 @@ function resolve(ui, rawMcpOrigin) {
         appInstanceId: ui.appInstanceId,
         title: ui.title,
         url: url.toString(),
+        mcpOrigin: origin,
         label: typeof ui.label === 'string' && ui.label.trim() ? ui.label.trim() : `Open ${ui.title}`
     };
 }
 
 function open(action) {
     if (!dialog || !frame || !action || action.mode !== 'dialog') throw new Error('hostedApps.open: initialized hosted-app action required');
+    if (!conversationId) throw new Error('hostedApps.open: no active conversation');
+    current = { ...action, conversationId };
     dialog.setAttribute('title', action.title);
     const titleEl = dialog.querySelector('dialog > header h2');
     if (titleEl) titleEl.textContent = action.title;
@@ -60,10 +68,54 @@ function open(action) {
     dialog.showModal();
 }
 
+function setConversation(id) {
+    conversationId = id || null;
+}
+
+function acknowledgeHost(source, eventType, accepted, error = null) {
+    if (!current || eventType !== 'saved') return;
+    source.postMessage({
+        source: 'chat-host',
+        version: 1,
+        app: current.app,
+        instance: current.appInstanceId,
+        type: 'event-result',
+        eventType,
+        accepted,
+        error
+    }, current.mcpOrigin);
+}
+
+async function onHostMessage(event) {
+    if (!current || event.origin !== current.mcpOrigin || event.source !== frame.contentWindow) return;
+    const data = event.data;
+    if (!data || data.source !== 'workshop-app' || data.version !== 1) return;
+    if (data.app !== current.app || data.instance !== current.appInstanceId) return;
+    if (data.type !== 'saved' && data.type !== 'closed') return;
+    if (data.type === 'saved' && (typeof data.path !== 'string' || typeof data.sourceSha256 !== 'string' || typeof data.pdfUrl !== 'string')) return;
+
+    try {
+        const response = await fetch(`/api/chats/${encodeURIComponent(current.conversationId)}/app-events`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        acknowledgeHost(event.source, data.type, true);
+    } catch (error) {
+        // The document save is already authoritative on the MCP side. This ack
+        // only reports notification failure; it must never become a save error.
+        acknowledgeHost(event.source, data.type, false, error.message);
+    }
+}
+
 function reset() {
     if (!dialog || !frame) return;
     if (dialog.isOpen()) dialog.close('conversation-switch');
+    else current = null;
     frame.src = 'about:blank';
+    conversationId = null;
 }
 
-export const hostedApps = { init, resolve, open, reset };
+export const hostedApps = { init, resolve, open, reset, setConversation };

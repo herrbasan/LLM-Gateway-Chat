@@ -2055,6 +2055,24 @@ const routes = {
     }
   },
   
+  // Hosted app lifecycle notification (#58 Stage 2). The browser parent has
+  // already verified origin/source/instance; the runner re-validates the event
+  // against the appInstanceId persisted in this conversation's chat_app_open
+  // tool message before appending it to the canonical document.
+  'POST /api/chats/:id/app-events': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { user, dbInstance } = authResult;
+
+    const body = await readBody(req);
+    try {
+      const result = runner.getRunner(user, dbInstance, params.id).recordAppEvent(body);
+      json(res, result, result.duplicate ? 200 : 201, req);
+    } catch (e) {
+      json(res, { error: e.message }, e.statusCode || 400, req);
+    }
+  },
+
   // Attach to the conversation event stream (SSE — response stays open)
   'GET /api/chats/:id/events': async (req, res, params) => {
     const authResult = requireAuth(req, res);

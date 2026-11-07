@@ -49,4 +49,27 @@ function openHostedApp(args, { mcpOrigin, conversationId }) {
     };
 }
 
-module.exports = { openHostedApp, resolveHostedApp };
+function normalizeAppEvent(raw) {
+    if (!raw || raw.source !== 'workshop-app' || raw.version !== 1) throw new Error('app event: unsupported source or version');
+    if (raw.app !== 'print') throw new Error(`app event: unsupported app "${raw.app}"`);
+    if (typeof raw.instance !== 'string' || !/^app_[0-9a-f-]{36}$/.test(raw.instance)) throw new Error('app event: invalid appInstanceId');
+    if (raw.type !== 'saved' && raw.type !== 'closed') throw new Error(`app event: unsupported type "${raw.type}"`);
+
+    const event = { appInstanceId: raw.instance, app: raw.app, type: raw.type };
+    if (raw.path !== undefined) {
+        if (typeof raw.path !== 'string' || !raw.path || raw.path.length > 1024 || raw.path.startsWith('/') || raw.path.includes('\\') || raw.path.split('/').includes('..')) {
+            throw new Error('app event: path must be a confined storage-relative path');
+        }
+        event.path = raw.path;
+    }
+    if (raw.type === 'saved') {
+        if (!event.path) throw new Error('app event: saved requires path');
+        if (typeof raw.sourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(raw.sourceSha256)) throw new Error('app event: saved requires sourceSha256');
+        if (typeof raw.pdfUrl !== 'string' || !raw.pdfUrl.startsWith('/storage/prints/') || raw.pdfUrl.includes('..')) throw new Error('app event: saved requires a confined print pdfUrl');
+        event.sourceSha256 = raw.sourceSha256;
+        event.pdfUrl = raw.pdfUrl;
+    }
+    return event;
+}
+
+module.exports = { openHostedApp, resolveHostedApp, normalizeAppEvent };

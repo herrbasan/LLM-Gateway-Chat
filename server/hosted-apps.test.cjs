@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { openHostedApp, resolveHostedApp } = require('./hosted-apps');
+const { openHostedApp, resolveHostedApp, normalizeAppEvent } = require('./hosted-apps');
+const { buildAppEventBlock } = require('./system-prompt');
+const runner = require('./runner');
 const internalTools = require('./internal-tools');
 
 const ORIGIN = 'http://localhost:3100';
@@ -48,4 +50,93 @@ test('chat_app_open is registered as a native tool and returns its UI action thr
     assert.equal(result.ui.kind, 'hosted-app');
     assert.equal(result.ui.app, 'print');
     assert.match(result.ui.appInstanceId, /^app_/);
+});
+
+const savedEvent = {
+    source: 'workshop-app',
+    version: 1,
+    app: 'print',
+    instance: 'app_12345678-1234-1234-1234-123456789abc',
+    type: 'saved',
+    path: 'vita/vita_ai_change_manager_v4.md',
+    sourceSha256: 'a'.repeat(64),
+    pdfUrl: '/storage/prints/_editor/session/document.pdf'
+};
+
+test('validates compact saved and closed app events', () => {
+    assert.deepEqual(normalizeAppEvent(savedEvent), {
+        appInstanceId: savedEvent.instance,
+        app: 'print',
+        type: 'saved',
+        path: savedEvent.path,
+        sourceSha256: savedEvent.sourceSha256,
+        pdfUrl: savedEvent.pdfUrl
+    });
+    assert.deepEqual(normalizeAppEvent({ ...savedEvent, type: 'closed', path: undefined }), {
+        appInstanceId: savedEvent.instance,
+        app: 'print',
+        type: 'closed'
+    });
+});
+
+test('rejects forged, malformed, or out-of-scope app events', () => {
+    assert.throws(() => normalizeAppEvent({ ...savedEvent, source: 'anything' }), /source or version/);
+    assert.throws(() => normalizeAppEvent({ ...savedEvent, instance: 'app_fake' }), /appInstanceId/);
+    assert.throws(() => normalizeAppEvent({ ...savedEvent, type: 'rendered' }), /unsupported type/);
+    assert.throws(() => normalizeAppEvent({ ...savedEvent, path: '../secret.md' }), /storage-relative/);
+    assert.throws(() => normalizeAppEvent({ ...savedEvent, sourceSha256: 'bad' }), /sourceSha256/);
+    assert.throws(() => normalizeAppEvent({ ...savedEvent, pdfUrl: 'https://example.com/document.pdf' }), /pdfUrl/);
+});
+
+test('formats pending app events as an authoritative next-turn system block', () => {
+    const block = buildAppEventBlock([normalizeAppEvent(savedEvent)]);
+    assert.match(block, /HOSTED APP EVENTS/);
+    assert.match(block, /document write already succeeded/);
+    assert.match(block, /vita\/vita_ai_change_manager_v4\.md/);
+    assert.match(block, new RegExp('a'.repeat(64)));
+    assert.equal(buildAppEventBlock([]), '');
+});
+
+test('runner persists and deduplicates issued app events, then consumes them only on settlement', (t) => {
+    const docs = [
+        { _id: 'session_1', _type: 'session', id: 'chat_1', title: 'Test', createdAt: new Date().toISOString() },
+        {
+            _id: 'conv_1', _type: 'conversation', id: 'chat_1', title: 'Test', messages: [{
+                role: 'tool',
+                toolName: 'chat_app_open',
+                toolUi: { kind: 'hosted-app', app: 'print', appInstanceId: savedEvent.instance }
+            }]
+        }
+    ];
+    const db = {
+        find(field, value) { return structuredClone(docs.filter(doc => doc[field] === value)); },
+        set(id, field, value) { docs.find(doc => doc._id === id)[field] = value; },
+        insert(doc) { docs.push(structuredClone(doc)); }
+    };
+    const emitted = [];
+    runner.init({
+        idleMs: 60000,
+        log: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+        emitUserEvent: (_user, _chat, type, data) => emitted.push({ type, data }),
+        getInstructions: async () => '',
+        embedMessageAsync: async () => {}
+    });
+    const instance = runner.getRunner({ id: 'test' }, { db }, 'chat_1');
+    t.after(() => clearTimeout(instance.idleTimer));
+
+    const first = instance.recordAppEvent(savedEvent);
+    assert.equal(first.duplicate, false);
+    assert.equal(instance.conv.appEvents.length, 1);
+    assert.equal(instance._pendingAppEvents().length, 1);
+    assert.equal(emitted.at(-1).type, 'app.event');
+
+    const duplicate = instance.recordAppEvent(savedEvent);
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(instance.conv.appEvents.length, 1);
+    assert.throws(() => instance.recordAppEvent({ ...savedEvent, instance: 'app_00000000-0000-0000-0000-000000000000' }), /was not issued/);
+
+    instance._appEventIdsInRun = new Set([first.event.id]);
+    instance._consumeAppEventsInRun();
+    assert.ok(instance.conv.appEvents[0].consumedAt);
+    assert.equal(instance._pendingAppEvents().length, 0);
 });

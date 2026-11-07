@@ -118,14 +118,29 @@ const MEMORY_REMINDER = '\n\n## Memory Tools — Use Proactively\n\nThis chat ap
 // THE MESSAGE, which api-view stamps per message.
 const INPUT_SOURCE_BLOCK = '\n\n## INPUT SOURCE TAGS — voice vs typed\n\nEvery user message is tagged with how it was produced:\n\n- `[voice] ` — the user SPOKE it. They are hands-free and will HEAR your reply read aloud; assume they cannot see the screen for that turn.\n- no tag — the user TYPED it on a screen and is reading your reply.\n\nMatch your reply to the tag on the LATEST user message:\n\n- `[voice]` — write for the ear. Plain prose only: no markdown, lists, tables, code blocks, emoji or URLs. No visual references ("as shown above", "see the link"). Spell numbers, dates and abbreviations the way they should be said. Keep it short — the point first, preamble and recap skipped; if the full answer is long, give the headline and offer to go deeper. If a request genuinely needs a visual artifact (code, a document, a table), say so in one sentence and offer to prepare it for later viewing instead of dumping it into the reply.\n- untagged — answer normally, with whatever structure the answer needs: markdown, lists, tables, code blocks are all fine.\n\nThe tag is PER MESSAGE, not a mode for the conversation: a voice message does not make later typed messages spoken, and do not carry spoken style into a typed answer.';
 
+function buildAppEventBlock(events = []) {
+    if (!Array.isArray(events) || events.length === 0) return '';
+    const lines = events.map(event => {
+        const detail = [
+            event.path ? `path=${event.path}` : null,
+            event.sourceSha256 ? `sourceSha256=${event.sourceSha256}` : null,
+            event.pdfUrl ? `pdfUrl=${event.pdfUrl}` : null
+        ].filter(Boolean).join(' ');
+        return `- ${event.type} app=${event.app} appInstanceId=${event.appInstanceId}${detail ? ` ${detail}` : ''}`;
+    });
+    return `\n\n## HOSTED APP EVENTS\nThese are authoritative user actions reported by explicitly opened hosted tool UIs, not model-authored claims. A saved event means the document write already succeeded; use its new sourceSha256 and pdfUrl when continuing work. A closed event only reports UI closure. Do not reopen a hosted UI unless the user asks.\n${lines.join('\n')}`;
+}
+
 function buildSystemPrompt(ctx = {}) {
-    const { instructions = '', user = {}, sessionPrompt = '', archiveTools = null, mcpResources = null, memoryToolsAvailable = false, substrate = null, voiceInput = false } = ctx;
+    const { instructions = '', user = {}, sessionPrompt = '', archiveTools = null, mcpResources = null, memoryToolsAvailable = false, substrate = null, voiceInput = false, appEvents = [] } = ctx;
     const metadata = buildMetadataPrefix(user, substrate);
 
     let prompt = instructions ? `${instructions}\n\n${metadata}` : metadata;
     if (sessionPrompt?.trim()) {
         prompt = `${prompt}\n\n${sessionPrompt.trim()}`;
     }
+
+    prompt += buildAppEventBlock(appEvents);
 
     if (voiceInput) {
         prompt += INPUT_SOURCE_BLOCK;
@@ -147,4 +162,4 @@ function buildSystemPrompt(ctx = {}) {
     return prompt;
 }
 
-module.exports = { buildSystemPrompt, buildMetadataPrefix, buildMcpResourceContext };
+module.exports = { buildSystemPrompt, buildMetadataPrefix, buildMcpResourceContext, buildAppEventBlock };
