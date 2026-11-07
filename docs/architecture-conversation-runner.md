@@ -55,7 +55,10 @@ user message and all completed messages are already persisted).
 **Run loop:**
 
 1. View sends a message → runner appends it (stored form), persists via the shared
-   append helper (embed fires), broadcasts `msg.user`.
+   append helper (embed fires), broadcasts `msg.user`. The view may show a local
+   outbox bubble before confirmation, but that bubble is never canonical history;
+   an optional `clientId` reconciles it with the persisted message and makes retry
+   after a lost response idempotent.
 2. Runner builds the API payload: ported `getMessagesForApi` (conversation.js:553–668,
    incl. tool-result backfill) + retirement transform (`server/retire-view.js` — [mN]
    markers + tombstones, honors the per-chat toggle; §2.3a) + `thinking_signature`
@@ -92,7 +95,7 @@ architecture rule.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/chats/:id/send` | Append user message + start a run (queued if one is active). Body = raw stored-form fields (`content`, `attachments`, …). Returns `{exchangeId}`. |
+| `POST` | `/api/chats/:id/send` | Append user message + start a run (queued if one is active). Body = raw stored-form fields (`content`, `attachments`, …) plus optional `clientId`. Repeating a valid `clientId` returns the already-persisted message without appending or starting another run, so view-outbox retries are safe after a lost response. Returns `{message}`. |
 | `GET` | `/api/chats/:id/events` | Attach to the conversation SSE stream (snapshot + live events). |
 | `POST` | `/api/chats/:id/abort` | Abort the active run. |
 | `POST` | `/api/chats/:id/retry` | Retry the last failed run: drop the trailing failure note(s) (assistant, `error: true`) and re-kick the chain — the pending user message is still in history. 409 when a run is active. |
@@ -206,7 +209,7 @@ embedStatus included), `inFlight` (if a run is active), `usage/context` of the l
 | `run.retry` | `{exchangeId, attempt, attempts, reason}` | transient gateway failure (network, stall, TTFT, 408/429/5xx) — the runner re-issues the request; the view clears the dead attempt's partial deltas |
 | `delta` | `{content?, reasoningContent?}` | raw rate; the view debounces rendering (as today) |
 | `tool.start` | `{toolCallId, name, args}` | |
-| `tool.end` | `{toolCallId, name, status, resultMessage}` | result message also persisted |
+| `tool.end` | `{toolCallId, name, status, resultMessage, resultImages?, ui?, toolMessageId}` | result also persisted. Optional `ui` is a structured tool-owned action (`label`, `url`, `mode: preview|new-tab`), stored as `toolUi`; preview iframes are restricted to the chat/workshop origins, anything else opens an external tab. |
 | `msg.assistant` | message | appended + persisted |
 | `run.end` | `{finishReason, usage, context, aborted?}` | |
 | `embed.status` | `{messageId, status}` | folds today's separate `/api/embed-events` channel into the conversation stream |

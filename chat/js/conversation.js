@@ -57,7 +57,7 @@ export function messagesToExchanges(messages) {
                     timestamp: msg.timestamp || Date.now(),
                     type: 'tool',
                     _toolMsgId: msg.id || null,
-                    tool: { name: toolName || 'unknown', args: msg.toolArgs || {}, status: msg.toolStatus || 'success', content: toolContent, images: msg.toolImages || [] },
+                    tool: { name: toolName || 'unknown', args: msg.toolArgs || {}, status: msg.toolStatus || 'success', content: toolContent, images: msg.toolImages || [], ui: msg.toolUi || null },
                     user: { role: 'user', content: '', attachments: [] },
                     assistant: { role: 'assistant', content: '', versions: [], currentVersion: 0, isStreaming: false, isComplete: false }
                 };

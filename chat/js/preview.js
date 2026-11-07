@@ -256,6 +256,31 @@ async function show(args) {
     };
 }
 
+async function showUi(args) {
+    if (!args || typeof args !== 'object') throw new Error('preview.showUi: args object required');
+    if (typeof args.url !== 'string' || !args.url.trim()) throw new Error('preview.showUi: url required');
+    const url = new URL(args.url, window.location.origin);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('preview.showUi: only HTTP(S) UIs are supported');
+    const rawMcpOrigin = _mcpOriginResolver ? _mcpOriginResolver() : null;
+    const mcpOrigin = rawMcpOrigin ? new URL(rawMcpOrigin).origin : null;
+    if (url.origin !== window.location.origin && url.origin !== mcpOrigin) {
+        throw new Error(`preview.showUi: untrusted UI origin ${url.origin}`);
+    }
+    const id = typeof args.id === 'string' && args.id ? args.id : `tool-ui-${url.toString()}`;
+    const title = typeof args.title === 'string' && args.title ? args.title : 'Tool UI';
+    const previous = items.get(id);
+    items.set(id, {
+        id, title, language: 'ui', kind: 'ui', content: url.toString(), url: url.toString(),
+        source: url.origin, view: 'document', base: null
+    });
+    activeId = id;
+    openPane();
+    syncDropdown();
+    renderActive();
+    if ((!previous || previous.content !== url.toString()) && _onContentChange) _onContentChange();
+    return { content: [{ type: 'text', text: JSON.stringify({ shown: true, id, selected: true, itemCount: items.size, mode: 'ui', url: url.toString() }) }] };
+}
+
 // ============================================
 // Internal: URL fetch mode helpers
 // ============================================
@@ -304,6 +329,7 @@ function reset() {
     activeId = null;
     _renderedContent = null;
     if (content) content.replaceChildren();
+    if (content) content.classList.remove('ui-mode');
     if (sourceEl) sourceEl.textContent = '';
     close();
     if (selectEl?.setItems) {
@@ -363,6 +389,7 @@ function renderActive() {
     if (!content) return;
     if (!activeId || !items.has(activeId)) {
         content.replaceChildren();
+        content.classList.remove('ui-mode');
         if (sourceEl) sourceEl.textContent = '';
         return;
     }
@@ -382,6 +409,13 @@ function renderActive() {
         sourceEl.textContent = item.source || '';
         sourceEl.title = item.source || '';
     }
+
+    if (item.kind === 'ui') {
+        content.classList.add('ui-mode');
+        renderUi(item);
+        return;
+    }
+    content.classList.remove('ui-mode');
 
     if (item.language === 'markdown') {
         renderMarkdown(item.content, item.base);
@@ -442,6 +476,7 @@ function renderCode(codeContent, language) {
 function getActivePlainText(plainTextFn) {
     if (!activeId || !items.has(activeId)) return '';
     const item = items.get(activeId);
+    if (item.kind === 'ui') return '';
     return plainTextFn(item.content);
 }
 
@@ -472,6 +507,19 @@ function getState() {
     };
 }
 
+function renderUi(item) {
+    const frame = document.createElement('iframe');
+    frame.className = 'preview-ui-frame';
+    frame.title = item.title;
+    frame.src = item.url;
+    // Trusted, configured origins only (enforced by showUi). No top navigation,
+    // popups, or same-origin escape to untrusted content; forms and downloads
+    // remain available for editor/save/export workflows such as /print.
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads');
+    frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    content.replaceChildren(frame);
+}
+
 // ============================================
 // Module exports
 // ============================================
@@ -479,6 +527,7 @@ function getState() {
 export const preview = {
     init,
     show,
+    showUi,
     close,
     reset,
     getActivePlainText,

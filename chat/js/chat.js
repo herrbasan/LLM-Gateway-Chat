@@ -378,8 +378,10 @@ function attachRunnerEvents(chatId) {
 }
 
 function _runnerUser(chatId, msg) {
+    _ackPendingSend(chatId, msg.clientId);
     const conv = activeConversations.get(chatId);
     if (!conv) return;
+    if (msg.id && conv.exchanges.some(ex => ex._userMsgId === msg.id)) return;
     const exchange = messagesToExchanges([msg])[0];
     if (!exchange) return;
     conv.exchanges.push(exchange);
@@ -741,11 +743,12 @@ function _runnerToolEnd(chatId, d) {
     exchange.tool.status = status;
     exchange.tool.content = d.resultMessage || '';
     exchange.tool.images = d.resultImages || [];
+    exchange.tool.ui = d.ui || null;
     exchange._toolMsgId = d.toolMessageId || null;
     // The follow-up assistant (post-tool) keys to this tool exchange.
     s.exchangeId = exchange.id;
 
-    _runnerFinalizeTool(el, status, d.resultMessage || '', d.resultImages || []);
+    _runnerFinalizeTool(el, status, d.resultMessage || '', d.resultImages || [], d.ui || null);
     s.toolBubbles.delete(d.toolCallId);
     if (_isAssistantTurn(chatId)) {
         assistantToolLogUpdate(d.name, status === 'error' ? 'failed' : 'done');
@@ -827,11 +830,16 @@ function _runnerFinalizeTool(el, status, result, images) {
     if (images && images.length > 0) {
         _setToolImages(el, images);
     }
+    _decorateToolUiAction(el, ui);
 }
 
 // Delete / edit / variant (single-author through the runner). Regenerate needs a
 // runner method (not yet built) — deferred.
 function _runnerDeleteMessage(exchange, role) {
+    if (exchange?.pendingSend) {
+        _ackPendingSend(exchange.pendingSend.chatId, exchange.pendingSend.clientId);
+        return;
+    }
     const msgId = role === 'assistant' ? exchange?._asstMsgId
         : role === 'tool' ? exchange?._toolMsgId
         : exchange?._userMsgId;
@@ -954,6 +962,75 @@ function parsePartialToolArgs(toolCall) {
     try { return JSON.parse(raw); } catch { return null; }
 }
 
+function _resolveToolUiAction(ui) {
+    if (!ui || typeof ui !== 'object' || typeof ui.url !== 'string' || !ui.url.trim()) return null;
+    const label = typeof ui.label === 'string' && ui.label.trim() ? ui.label.trim() : 'Open UI';
+    const raw = ui.url.trim();
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^https?:\/\//i.test(raw)) return null;
+    let url;
+    try {
+        if (/^https?:\/\//i.test(raw)) {
+            url = new URL(raw);
+        } else {
+            const origin = getMcpServerOrigin();
+            if (!origin) return null;
+            url = new URL(raw.startsWith('/') ? raw : `/${raw}`, origin);
+        }
+    } catch {
+        return null;
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    let mcpOrigin = null;
+    try {
+        const rawOrigin = getMcpServerOrigin();
+        mcpOrigin = rawOrigin ? new URL(rawOrigin).origin : null;
+    } catch { mcpOrigin = null; }
+    const trusted = url.origin === window.location.origin || (mcpOrigin && url.origin === mcpOrigin);
+    return {
+        label,
+        url: url.toString(),
+        trusted,
+        mode: ui.mode === 'preview' && trusted ? 'preview' : 'new-tab'
+    };
+}
+
+function _openToolUi(action) {
+    if (action.mode === 'preview') {
+        preview.showUi({ id: `tool-ui-${action.url}`, title: action.label, url: action.url })
+            .catch(error => {
+                console.error('[tool-ui] preview failed; opening external tab:', error);
+                window.open(action.url, '_blank', 'noopener,noreferrer');
+            });
+        return;
+    }
+    window.open(action.url, '_blank', 'noopener,noreferrer');
+}
+
+function _decorateToolUiAction(toolEl, ui) {
+    const action = _resolveToolUiAction(ui);
+    if (!action || toolEl.querySelector('.tool-ui-action')) return;
+    const header = toolEl.querySelector('.tool-header');
+    if (!header) return;
+    const btn = document.createElement('nui-button');
+    btn.className = 'action-btn tool-ui-action';
+    btn.title = action.mode === 'preview' ? action.label : `${action.label} (new tab)`;
+    btn.dataset.mode = action.mode;
+    btn.dataset.url = action.url;
+    btn.dataset.trusted = String(action.trusted);
+    const inner = document.createElement('button');
+    inner.type = 'button';
+    inner.setAttribute('aria-label', action.label);
+    inner.textContent = action.label;
+    btn.appendChild(inner);
+    btn.addEventListener('click', event => {
+        event.stopPropagation();
+        _openToolUi(action);
+    });
+    const deleteBtn = header.querySelector('.delete-tool');
+    if (deleteBtn) header.insertBefore(btn, deleteBtn);
+    else header.appendChild(btn);
+}
+
 // ============================================
 // Preview tool-call button — "Show in preview" on chat_preview_show tool bubbles
 // ============================================
@@ -1048,6 +1125,7 @@ function buildExchangeElement(exchange) {
         if (isError) toolEl.querySelector('.tool-notifications .tool-error-text').textContent = toolErrorSummary(exchange.tool.content);
 
         _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
+        _decorateToolUiAction(toolEl, exchange.tool.ui);
 
         toolEl.querySelector('.delete-tool')?.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1183,14 +1261,13 @@ async function init() {
         const loginDialog = document.getElementById('login-dialog');
         const authBanner = document.getElementById('auth-expired-banner');
 
-        backendClient.onAuthError(() => {
-            // Session expired mid-use: queue messages locally (crash-net in
-            // _syncMessage) and tell the user persistence stopped. The login
-            // dialog is dismissable so in-flight content stays readable/copyable;
-            // the banner stays up and re-opens the dialog on demand.
+        const handleAuthError = () => {
+            // Pending sends stay in the local outbox; login reload restores them.
             if (authBanner) authBanner.dataset.visible = 'true';
             loginDialog.showModal();
-        });
+        };
+        backendClient.onAuthError(handleAuthError);
+        runnerClient.onAuthError(handleAuthError);
 
         document.getElementById('login-dismiss').addEventListener('click', () => {
             loginDialog.close();
@@ -1200,14 +1277,14 @@ async function init() {
             loginDialog.showModal();
         });
 
-        // Backend-offline alarm. The gateway can keep streaming while the
-        // backend (persistence) is dead, so this is the ONLY signal that
-        // messages have stopped being saved. Loud + persistent while offline;
-        // on recovery, drain the local crash-net back to the backend.
-        backendClient.onOfflineChange((offline) => {
+        // Backend-offline alarm. Sends remain in the local outbox with Retry;
+        // recovery snapshots reconcile anything the server already accepted.
+        const handleOfflineChange = (offline) => {
             const banner = document.getElementById('backend-offline-banner');
             if (banner) banner.dataset.visible = offline ? 'true' : 'false';
-        });
+        };
+        backendClient.onOfflineChange(handleOfflineChange);
+        runnerClient.onOfflineChange(handleOfflineChange);
 
         const loginForm = document.getElementById('login-form');
         loginForm.addEventListener('submit', async (e) => {
@@ -1224,8 +1301,8 @@ async function init() {
                 
                 await backendClient.login(username, password);
                 document.getElementById('login-dialog').close();
-                // Crash-netted messages are drained before load() on reload —
-                // nothing is lost. Reload to re-initialize cleanly.
+                // The local outbox survives this reload; canonical messages and
+                // pending sends reconcile by clientId during snapshot attach.
                 window.location.reload();
             } catch (err) {
                 errorDiv.textContent = err.message || 'Login failed';
@@ -2605,7 +2682,7 @@ async function sendAssistantMessage(text) {
     if (maxTokens && !isNaN(maxTokens)) sendBody.max_tokens = maxTokens;
     if (effort && effort !== 'default') sendBody.reasoning_effort = effort;
 
-    const res = await runnerClient.send(chatId, sendBody);
+    const res = await _sendWithOutbox(chatId, sendBody);
     if (!res.ok) {
         assistantError(res.data?.error || `send failed (${res.status})`);
         assistant.endTurn();
@@ -2857,6 +2934,159 @@ navigator.mediaDevices?.addEventListener?.('devicechange', () => loadSttDevices(
 // Message Sending
 // ============================================
 
+const PENDING_SENDS_KEY = 'chat-pending-sends-v1';
+let pendingSendsByChat = _loadPendingSends();
+
+function _loadPendingSends() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(PENDING_SENDS_KEY) || '{}');
+        for (const records of Object.values(parsed)) {
+            if (!Array.isArray(records)) continue;
+            for (const record of records) {
+                if (record.state === 'sending') {
+                    record.state = 'failed';
+                    record.error = 'The app reloaded before the server confirmed this send. Retry is safe; delivery is deduplicated.';
+                }
+            }
+        }
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+        console.warn('[send-outbox] could not restore pending sends:', error);
+        return {};
+    }
+}
+
+function _savePendingSends() {
+    try {
+        localStorage.setItem(PENDING_SENDS_KEY, JSON.stringify(pendingSendsByChat));
+    } catch (error) {
+        console.warn('[send-outbox] could not persist pending sends:', error);
+    }
+}
+
+function _pendingExchange(record) {
+    const attachments = (record.body.attachments || []).map(att => ({
+        ...att,
+        blobUrl: att.blobUrl || att.url || att.dataUrl || ''
+    }));
+    const exchange = messagesToExchanges([{
+        role: 'user', content: record.body.content || '', attachments, timestamp: record.createdAt
+    }])[0];
+    exchange.id = `pending_${record.clientId}`;
+    exchange.pendingSend = { chatId: record.chatId, clientId: record.clientId };
+    exchange.pendingState = record.state;
+    exchange.pendingError = record.error || '';
+    return exchange;
+}
+
+function _beginPendingSend(chatId, body, clientId) {
+    const record = { chatId, clientId, body, createdAt: Date.now(), state: 'sending', error: '' };
+    (pendingSendsByChat[chatId] ||= []).push(record);
+    _savePendingSends();
+    const conv = activeConversations.get(chatId);
+    if (conv) {
+        const exchange = _pendingExchange(record);
+        conv.exchanges.push(exchange);
+        renderExchange(exchange, getOrCreateContainer(chatId));
+    }
+    return record;
+}
+
+function _updatePendingSend(chatId, clientId, state, error = '') {
+    const record = (pendingSendsByChat[chatId] || []).find(r => r.clientId === clientId);
+    if (!record) return;
+    record.state = state;
+    record.error = error;
+    _savePendingSends();
+    const exchange = activeConversations.get(chatId)?.exchanges.find(ex => ex.pendingSend?.clientId === clientId);
+    if (!exchange) return;
+    exchange.pendingState = state;
+    exchange.pendingError = error;
+    const el = getOrCreateContainer(chatId).querySelector(`[data-exchange-id="${exchange.id}"]`);
+    if (el) _decoratePendingSend(el, exchange);
+}
+
+function _ackPendingSend(chatId, clientId) {
+    if (!clientId || !pendingSendsByChat[chatId]?.some(r => r.clientId === clientId)) return;
+    pendingSendsByChat[chatId] = pendingSendsByChat[chatId].filter(r => r.clientId !== clientId);
+    if (pendingSendsByChat[chatId].length === 0) delete pendingSendsByChat[chatId];
+    _savePendingSends();
+
+    const conv = activeConversations.get(chatId);
+    const idx = conv?.exchanges.findIndex(ex => ex.pendingSend?.clientId === clientId) ?? -1;
+    if (idx < 0) return;
+    const [exchange] = conv.exchanges.splice(idx, 1);
+    const container = getOrCreateContainer(chatId);
+    const el = container.querySelector(`[data-exchange-id="${exchange.id}"]`);
+    if (el) _vsRemoveExchangeDom(el, exchange.id);
+    else setTimeout(() => _runnerRefresh(chatId), 0);
+}
+
+function _restorePendingSends(chatId, messages) {
+    const confirmed = new Set(messages.map(m => m.clientId).filter(Boolean));
+    const before = pendingSendsByChat[chatId]?.length || 0;
+    if (before) {
+        pendingSendsByChat[chatId] = pendingSendsByChat[chatId].filter(r => !confirmed.has(r.clientId));
+        if (pendingSendsByChat[chatId].length === 0) delete pendingSendsByChat[chatId];
+        if (pendingSendsByChat[chatId]?.length !== before) _savePendingSends();
+    }
+    return (pendingSendsByChat[chatId] || []).map(_pendingExchange);
+}
+
+function _decoratePendingSend(el, exchange) {
+    if (!exchange.pendingSend) return;
+    const { chatId, clientId } = exchange.pendingSend;
+    const failed = exchange.pendingState === 'failed';
+    el.classList.toggle('send-failed', failed);
+    el.classList.toggle('send-pending', !failed);
+    el.querySelector('.embed-status')?.remove();
+    el.querySelector('.edit-message')?.remove();
+    const pending = el.querySelector('.user-pending-indicator');
+    if (pending) pending.style.display = failed ? 'none' : '';
+
+    let errorEl = el.querySelector('.send-error');
+    if (failed && !errorEl) {
+        errorEl = document.createElement('div');
+        errorEl.className = 'error-message send-error';
+        el.querySelector('.message-content')?.appendChild(errorEl);
+    }
+    if (errorEl) {
+        errorEl.textContent = `Send failed: ${exchange.pendingError || 'server unreachable'}`;
+        errorEl.hidden = !failed;
+    }
+
+    let retry = el.querySelector('.retry-send');
+    if (failed && !retry) {
+        retry = document.createElement('nui-button');
+        retry.className = 'action-btn retry-send';
+        retry.title = 'Retry sending this message';
+        retry.innerHTML = '<button type="button" aria-label="Retry sending this message"><nui-icon name="sync"></nui-icon></button>';
+        retry.addEventListener('click', () => _sendWithOutbox(chatId, null, clientId));
+        el.querySelector('.message-actions-user')?.prepend(retry);
+    }
+    if (retry && !failed) retry.remove();
+}
+
+async function _sendWithOutbox(chatId, body, existingClientId = null) {
+    const record = existingClientId
+        ? (pendingSendsByChat[chatId] || []).find(r => r.clientId === existingClientId)
+        : null;
+    const clientId = existingClientId || crypto.randomUUID();
+    const sendBody = record?.body || { ...body, clientId };
+    if (record) _updatePendingSend(chatId, clientId, 'sending');
+    else _beginPendingSend(chatId, sendBody, clientId);
+
+    let res;
+    try {
+        res = await runnerClient.send(chatId, sendBody);
+    } catch (error) {
+        res = { status: 0, ok: false, data: { error: error?.message || 'server unreachable' } };
+    }
+    if (res.ok) _ackPendingSend(chatId, clientId);
+    else _updatePendingSend(chatId, clientId, 'failed', res.data?.error || `send failed (${res.status})`);
+    return res;
+}
+
 async function sendMessage() {
     if (dictation.state !== 'idle') cancelDictation();
     const editor = elements.messageInput;
@@ -2924,9 +3154,10 @@ async function sendMessage() {
     if (maxTokens && !isNaN(maxTokens)) sendBody.max_tokens = maxTokens;
     if (effort && effort !== 'default') sendBody.reasoning_effort = effort;
 
-    const res = await runnerClient.send(sendChatId, sendBody);
+    const res = await _sendWithOutbox(sendChatId, sendBody);
     if (!res.ok) {
-        nui.components.dialog.alert('Send failed', res.data?.error || `send failed (${res.status})`);
+        // The outbox bubble remains visible with its own Retry action.
+        console.warn('Send failed:', res.data?.error || `send failed (${res.status})`);
     }
 }
 
@@ -3656,6 +3887,7 @@ function renderExchange(exchange, targetContainer = null) {
         if (isError) toolEl.querySelector('.tool-notifications .tool-error-text').textContent = toolErrorSummary(exchange.tool.content);
 
         _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
+        _decorateToolUiAction(toolEl, exchange.tool.ui);
 
         // Use textContent to prevent SVG/code examples from being parsed as HTML
         const resultEl = toolEl.querySelector('.tool-result');

@@ -475,12 +475,23 @@ class Runner {
 
     // ---- send: append user message (single author), queue the run ----
     async send(body) {
+        const clientId = typeof body.clientId === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(body.clientId)
+            ? body.clientId : null;
+        // A retry after a lost response must not append the same user turn twice.
+        // The optional client id makes send idempotent while the view keeps its
+        // optimistic outbox entry outside canonical history (#54).
+        this.refresh();
+        if (clientId) {
+            const existing = this.conv.messages.find(m => m.role === 'user' && m.clientId === clientId);
+            if (existing) return { message: existing, duplicate: true };
+        }
         const { message } = await convStore.appendConversationMessage(this.ctx(), {
             conversationId: this.conversationId,
             role: 'user',
             content: body.content || '',
             attachments: body.attachments,
-            model: body.model || this.session.model || null
+            model: body.model || this.session.model || null,
+            clientId
         });
         if (!this.pendingModel) this.pendingModel = message.model || null;
         if (body.model && body.model !== this.session.model) {
@@ -1084,7 +1095,7 @@ class Runner {
             args = scrubChunkLabels(args, labelHits);
             DEPS.log().info('Runner tool call', { chatId: this.conversationId, tool: tc.function.name }, 'Runner');
             this.broadcast('tool.start', { toolCallId: tc.id, name: tc.function.name, args, exchangeId: f.exchangeId, messageId: f.messageId });
-            let status = 'success', resultText = '', resultImages = [];
+            let status = 'success', resultText = '', resultImages = [], resultUi = null;
             try {
                 if (labelHits.bare.length > 0) {
                     throw new Error(`Chunk label (${labelHits.bare.join(', ')}) used as argument content but is unknown to this conversation's chunk view — labels are context references, never content. Re-emit the call with the full text the label refers to.`);
@@ -1110,7 +1121,7 @@ class Runner {
                     : isChatSend
                         ? await this._callToolWithChatProgress(pool, chatDispatcher, args, f)
                         : await pool.callTool(tc.function.name, args, { onProgress });
-                ({ text: resultText, images: resultImages } = this.extractToolResult(result));
+                ({ text: resultText, images: resultImages, ui: resultUi } = this.extractToolResult(result));
                 const labelNotes = [];
                 if (labelHits.stripped.length > 0) labelNotes.push('chunk label(s) were stripped from your arguments');
                 if (labelHits.resolved.length > 0) labelNotes.push(`bare chunk label(s) (${labelHits.resolved.join(', ')}) were resolved to their full content`);
@@ -1137,11 +1148,12 @@ class Runner {
                     toolStatus: status,
                     toolImages: resultImages.length ? resultImages : undefined,
                     toolImagesTransient: (tc.function.name === 'image_attach' && resultImages.length > 0) ? true : undefined,
+                    toolUi: resultUi || undefined,
                     tool_call_id: tc.id
                 }
             });
             executed = true;
-            this.broadcast('tool.end', { toolCallId: tc.id, name: tc.function.name, status, resultMessage: resultText, resultImages, toolMessageId: toolMsg.id, messageId: f.messageId });
+            this.broadcast('tool.end', { toolCallId: tc.id, name: tc.function.name, status, resultMessage: resultText, resultImages, ui: resultUi || undefined, toolMessageId: toolMsg.id, messageId: f.messageId });
         }
         return executed;
     }
@@ -1210,12 +1222,21 @@ class Runner {
         };
     }
 
-    // MCP result { content: [{type:'text'|'image', ...}] } → { text, images }.
+    // MCP result { content: [{type:'text'|'image', ...}] } → { text, images, ui }.
     // Images: base64 → nDB bucket (internal storeFile — no HTTP hop, no 401s).
+    // A tool-owned UI action may arrive as result.ui or as the `ui` field of a
+    // JSON text payload (the workshop dispatcher's result shape, #56).
     extractToolResult(result) {
         const parts = result?.content;
+        const text = !Array.isArray(parts)
+            ? (typeof result === 'string' ? result : JSON.stringify(result ?? ''))
+            : null;
         if (!Array.isArray(parts)) {
-            return { text: typeof result === 'string' ? result : JSON.stringify(result ?? ''), images: [] };
+            let ui = result?.ui && typeof result.ui === 'object' ? result.ui : null;
+            if (!ui) {
+                try { const parsed = JSON.parse(text); ui = parsed?.ui && typeof parsed.ui === 'object' ? parsed.ui : null; } catch { /* plain text */ }
+            }
+            return { text, images: [], ui };
         }
         const texts = [], images = [];
         for (const p of parts) {
@@ -1227,7 +1248,12 @@ class Runner {
                 images.push(`/api/buckets/images/${meta._file.id}.${meta._file.ext}`);
             }
         }
-        return { text: texts.join('\n'), images };
+        const joined = texts.join('\n');
+        let ui = result?.ui && typeof result.ui === 'object' ? result.ui : null;
+        if (!ui) {
+            try { const parsed = JSON.parse(joined); ui = parsed?.ui && typeof parsed.ui === 'object' ? parsed.ui : null; } catch { /* plain text */ }
+        }
+        return { text: joined, images, ui };
     }
 
     async consume(resp) {

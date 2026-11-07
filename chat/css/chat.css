@@ -1764,6 +1764,29 @@ nui-code pre {
     padding-left: 0.75rem;
 }
 
+/* View-only outbox entry: the server has not accepted this user message. */
+.chat-message.user.send-failed .message-content {
+    border-left: 3px solid #ef4444;
+    padding-left: 0.75rem;
+}
+
+.chat-message.user .send-error {
+    margin-top: 0.75rem;
+}
+
+.preview-content.ui-mode {
+    padding: 0;
+    overflow: hidden;
+}
+
+.preview-ui-frame {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: var(--color-base);
+}
+
 
 /* Mobile Styles */
 @media (max-width: 48rem) {

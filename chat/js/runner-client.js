@@ -29,6 +29,33 @@ const LIST_EVENT_NAMES = ['chat.created', 'chat.updated', 'chat.deleted'];
 
 const SEND_TIMEOUT_MS = 20000;
 
+const authErrorListeners = new Set();
+const offlineListeners = new Set();
+let offline = false;
+
+function onAuthError(fn) {
+    authErrorListeners.add(fn);
+    return () => authErrorListeners.delete(fn);
+}
+
+function onOfflineChange(fn) {
+    offlineListeners.add(fn);
+    return () => offlineListeners.delete(fn);
+}
+
+function _setOffline(value) {
+    if (offline === value) return;
+    offline = value;
+    for (const fn of offlineListeners) fn(value);
+}
+
+function _observeResponse(res) {
+    _setOffline(false);
+    if (res.status === 401 || res.status === 403) {
+        for (const fn of authErrorListeners) fn();
+    }
+}
+
 function _parseJSON(data) {
     if (!data) return {};
     try { return JSON.parse(data); } catch { return {}; }
@@ -49,6 +76,7 @@ async function _api(method, path, body) {
             signal: ctrl.signal
         });
     } catch (err) {
+        _setOffline(true);
         if (err?.name === 'AbortError') {
             throw new Error(`Request timed out after ${SEND_TIMEOUT_MS / 1000}s — server unreachable. If several tabs are open, close the extras and retry.`);
         }
@@ -56,6 +84,7 @@ async function _api(method, path, body) {
     } finally {
         clearTimeout(timer);
     }
+    _observeResponse(res);
     const data = await res.json().catch(() => null);
     return { status: res.status, ok: res.ok, data };
 }
@@ -92,20 +121,26 @@ function _ensureStream() {
     // Reconnect (drop or server restart): EventSource replays nothing —
     // re-snapshot every attached chat so views rebuild from persisted state.
     es.onopen = () => {
+        _setOffline(false);
         for (const [chatId, handlers] of chatHandlers) {
             _fetchSnapshot(chatId, handlers);
         }
     };
+    es.onerror = () => _setOffline(true);
     return es;
 }
 
 async function _fetchSnapshot(chatId, handlers) {
     try {
         const res = await fetch(`/api/chats/${chatId}/snapshot`);
+        _observeResponse(res);
         if (!res.ok) return;
         const snap = await res.json().catch(() => null);
         if (snap && typeof handlers.snapshot === 'function') handlers.snapshot(snap);
-    } catch { /* transient — next reconnect retries */ }
+    } catch {
+        _setOffline(true);
+        // transient — next reconnect retries
+    }
 }
 
 // Register a view for a conversation. `handlers` maps event name →
@@ -156,4 +191,4 @@ function attachListEvents(handlers = {}) {
     return { close: () => { listHandlers.delete(handlers); } };
 }
 
-export const runnerClient = { attach, send, abort, retry, deleteMessage, editMessage, attachListEvents };
+export const runnerClient = { attach, send, abort, retry, deleteMessage, editMessage, attachListEvents, onAuthError, onOfflineChange };
