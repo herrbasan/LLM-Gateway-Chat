@@ -32,7 +32,7 @@ let _onContentChange = null;
 // DOM references (populated in init())
 // ============================================
 
-let pane, resizer, content, selectEl, sourceEl, closeBtn, chatMain;
+let pane, resizer, content, selectEl, sourceEl, closeBtn, viewBtn, chatMain;
 let dragCleanup = null;
 
 // ============================================
@@ -43,6 +43,7 @@ const MIN_WIDTH_PX = 320;          // 20rem at 16px base
 const MAX_WIDTH_RATIO = 0.8;       // 80% of chat-main width
 const DEFAULT_WIDTH_RATIO = 0.4;   // 40% of chat-main width on first open
 const STORAGE_KEY = 'preview-width';
+const VIEW_KEY = 'preview-view';        // last chosen view — 'document' | 'deck'
 const MAX_CONTENT_BYTES = 256 * 1024;  // 256KB hard cap
 const FETCH_TIMEOUT_MS = 15000;        // url-mode fetch cap — never block forever
 
@@ -72,14 +73,18 @@ function init() {
     selectEl = document.getElementById('preview-select');
     sourceEl = document.getElementById('preview-source');
     closeBtn = document.getElementById('preview-close-btn');
+    viewBtn = document.getElementById('preview-view-btn');
     chatMain = document.querySelector('.chat-main');
 
-    if (!pane || !resizer || !content || !selectEl || !sourceEl || !closeBtn || !chatMain) {
+    if (!pane || !resizer || !content || !selectEl || !sourceEl || !closeBtn || !viewBtn || !chatMain) {
         throw new Error('preview.init: required DOM elements not found');
     }
 
     // Close button
     closeBtn.addEventListener('click', close);
+
+    // Document ↔ slide view toggle (markdown items with deck structure only)
+    viewBtn.addEventListener('click', toggleView);
 
     // Dropdown switch — listen for nui-change (NUI's custom event, not native change)
     selectEl.addEventListener('nui-change', (e) => {
@@ -140,6 +145,48 @@ function looksLikeMarkdown(content) {
         || /\*\*[^*\n]+\*\*/m.test(content)     // bold
         || /\[[^\]]+\]\([^)]+\)/m.test(content) // link
         || /^\s*\|.+\|/m.test(content);         // table
+}
+
+// ============================================
+// View mode — document (flow) ↔ deck (slides)
+// ============================================
+
+function defaultView() {
+    return localStorage.getItem(VIEW_KEY) === 'deck' ? 'deck' : 'document';
+}
+
+/**
+ * Does this document have the structure a deck needs? A deck is one section per
+ * slide, so the document must carry at least one root-level section break or
+ * MD-Blocks structure. Frontmatter is removed first: its opening and closing
+ * `---` lines are not sections.
+ */
+function hasDeckStructure(content) {
+    if (typeof content !== 'string' || !content) return false;
+    let body = content;
+    const fm = body.match(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/);
+    if (fm) body = body.slice(fm[0].length);
+    if (/<!--\s*mb:/.test(body)) return true;
+    return /^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/m.test(body);
+}
+
+function setViewButton(isDeck) {
+    if (!viewBtn) return;
+    const label = isDeck ? 'Document view' : 'Slide view';
+    viewBtn.title = label;
+    viewBtn.setAttribute('aria-label', label);
+    const button = viewBtn.querySelector('button');
+    if (button) button.setAttribute('aria-label', label);
+    const icon = viewBtn.querySelector('nui-icon');
+    if (icon) icon.setAttribute('name', isDeck ? 'article' : 'fullscreen');
+}
+
+function toggleView() {
+    const item = activeId && items.get(activeId);
+    if (!item || !hasDeckStructure(item.content)) return;
+    item.view = item.view === 'deck' ? 'document' : 'deck';
+    localStorage.setItem(VIEW_KEY, item.view);
+    renderActive();
 }
 
 /**
@@ -218,6 +265,10 @@ async function show(args) {
         language,
         content,
         source,
+        // Per-item view, defaulting to whatever was used last. Only markdown
+        // items with deck structure can actually render as a deck — renderActive
+        // is the gate, so an item may carry 'deck' while its content has none.
+        view: isNew ? defaultView() : prevItem.view,
         // Document base (issue #38): in url mode the fetched document HAS a
         // location — its resolved URL — and relative media destinations must
         // resolve against it, like any viewer opening the file from disk.
@@ -329,7 +380,8 @@ function reset() {
     activeId = null;
     _renderedContent = null;
     if (content) content.replaceChildren();
-    if (content) content.classList.remove('ui-mode');
+    if (content) content.classList.remove('deck-mode', 'ui-mode');
+    if (viewBtn) viewBtn.hidden = true;
     if (sourceEl) sourceEl.textContent = '';
     close();
     if (selectEl?.setItems) {
@@ -389,7 +441,8 @@ function renderActive() {
     if (!content) return;
     if (!activeId || !items.has(activeId)) {
         content.replaceChildren();
-        content.classList.remove('ui-mode');
+        content.classList.remove('deck-mode', 'ui-mode');
+        if (viewBtn) viewBtn.hidden = true;
         if (sourceEl) sourceEl.textContent = '';
         return;
     }
@@ -411,6 +464,8 @@ function renderActive() {
     }
 
     if (item.kind === 'ui') {
+        if (viewBtn) viewBtn.hidden = true;
+        content.classList.remove('deck-mode');
         content.classList.add('ui-mode');
         renderUi(item);
         return;
@@ -418,8 +473,22 @@ function renderActive() {
     content.classList.remove('ui-mode');
 
     if (item.language === 'markdown') {
-        renderMarkdown(item.content, item.base);
+        const deckCapable = hasDeckStructure(item.content);
+        const isDeck = deckCapable && item.view === 'deck';
+        // A markdown document with no section structure has exactly one slide and
+        // would overflow it — the toggle is not offered (spec §9: sections are the
+        // slide unit; a plain document is one surface).
+        if (viewBtn) viewBtn.hidden = !deckCapable;
+        setViewButton(isDeck);
+        content.classList.toggle('deck-mode', isDeck);
+        if (isDeck) {
+            renderDeck(item.content, item.base);
+        } else {
+            renderMarkdown(item.content, item.base);
+        }
     } else {
+        if (viewBtn) viewBtn.hidden = true;
+        content.classList.remove('deck-mode');
         renderCode(item.content, item.language);
     }
 }
@@ -447,6 +516,29 @@ function renderMarkdown(mdContent, base) {
     script.textContent = mdContent;
     md.appendChild(script);
     content.replaceChildren(md);
+}
+
+/**
+ * Render the same markdown through the nui-slides presentation profile.
+ * One section = one slide, chrome repeats per slide, the canvas scales to the
+ * pane. A fresh element per render is required for the same reason as
+ * renderMarkdown: nui-markdown's `_processed` guard ignores re-attachment.
+ */
+function renderDeck(mdContent, base) {
+    const deck = document.createElement('nui-slides');
+    deck.setAttribute('toolbar', '');
+    // Natural flow, not `height="fill"`: the container itself is locked to the
+    // deck's 16:9 canvas. A filled viewport stretches to the pane and letterboxes
+    // the surface, which reads as a container that is not 16:9.
+    const md = document.createElement('nui-markdown');
+    md.setAttribute('frontmatter', 'strip');
+    if (base) md.base = base;
+    const script = document.createElement('script');
+    script.type = 'text/markdown';
+    script.textContent = mdContent;
+    md.appendChild(script);
+    deck.appendChild(md);
+    content.replaceChildren(deck);
 }
 
 /**

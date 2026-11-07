@@ -378,6 +378,20 @@ nui-code pre {
     min-height: 0;
 }
 
+/* Deck view: the slide canvas scales to the pane, so the pane must give it a
+   definite width and no padding. The deck stays in natural flow; a padded,
+   scrolling parent would interfere with measuring and navigating the canvas. */
+.preview-content.deck-mode {
+    padding: 0;
+    overflow: hidden;
+}
+
+/* nui-button sets its own display, defeating the UA [hidden] rule — the view
+   toggle is hidden until the active item has deck structure. */
+.preview-header nui-button[hidden] {
+    display: none !important;
+}
+
 /* Markdown text should wrap, not force a horizontal scrollbar. The preview
    pane is narrow (382px on a 390px phone) and long inline paths/code words
    in lists otherwise push scrollWidth past clientWidth. pre/code/nui-code

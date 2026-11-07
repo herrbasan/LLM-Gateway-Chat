@@ -15,6 +15,7 @@
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-lightbox.css">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-rich-text.css">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-list.css">
+    <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-slides.css">
     
 </head>
 <body>
@@ -447,6 +448,9 @@
                                 <select></select>
                             </nui-select>
                             <span class="preview-source" id="preview-source"></span>
+                            <nui-button id="preview-view-btn" class="icon-only" title="Slide view" hidden>
+                                <button type="button" aria-label="Slide view"><nui-icon name="fullscreen"></nui-icon></button>
+                            </nui-button>
                             <nui-button id="preview-speak-btn" class="icon-only" title="Speak preview content">
                                 <button type="button" aria-label="Speak preview content"><nui-icon name="headphones"></nui-icon></button>
                             </nui-button>
@@ -582,6 +586,7 @@
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-lightbox.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-list.js" type="module"></script>
+    <script src="../lib/nui_wc2/NUI/lib/modules/nui-slides.js" type="module"></script>
     <script src="js/chat.js" type="module"></script>
 
     <!-- NO local [data-action] delegation here. `toggle-sidebar` and

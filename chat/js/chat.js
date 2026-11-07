@@ -325,6 +325,7 @@ function attachRunnerEvents(chatId) {
             const scrollAfterRender = !!view.scrollToBottomOnRender;
             view.scrollToBottomOnRender = false;
             conv.exchanges = messagesToExchanges(snap.messages || []);
+            conv.exchanges.push(..._restorePendingSends(chatId, snap.messages || []));
             // Full re-render (initial attach OR post-mutation refresh/edit).
             _vsDeactivate(container);
             container.replaceChildren();
@@ -812,7 +813,7 @@ function _runnerToolBubble(name, args) {
     return el;
 }
 
-function _runnerFinalizeTool(el, status, result, images) {
+function _runnerFinalizeTool(el, status, result, images, ui = null) {
     const isError = status === 'error';
     el.querySelector('.tool-status').setAttribute('variant', isError ? 'danger' : 'success');
     el.querySelector('.tool-status').innerHTML = isError ? 'Failed' : 'Success';
@@ -1209,6 +1210,7 @@ function buildExchangeElement(exchange) {
     userEl.querySelector('.delete-message')?.addEventListener('click', () => {
         _runnerDeleteMessage(exchange, 'user');
     });
+    _decoratePendingSend(userEl, exchange);
 
     // Set embed status directly on detached element (not in DOM yet)
     const userEmbedEl = userEl.querySelector('.embed-status');
@@ -1405,14 +1407,26 @@ async function init() {
             currentTtsExchangeId = null;
             narrationPlayback = { blockEl, buttonEl };
             ttsPlayer?.reveal();
+            // Attach the completion listener BEFORE speaking: toggle() on an
+            // already-running target emits its state synchronously.
+            const completion = narrationCompletion();
             tts.toggle(text, blockEl);
-            // Returning no stop handle is deliberate: nui would then own a
-            // playing/stopped flag it can never clear once the audio ends by
-            // itself, so a later click would hit a dead stop() and need a second
-            // click to speak again. The app's toggle owns the behaviour instead —
-            // same contract as the bubble and preview speak buttons.
+            // No voice selected / immediate failure — no state change will ever
+            // arrive, and autoplay would wait forever.
+            if (narrationPlaybackState() === 'idle') completion.finish();
             queueMicrotask(applyNarrationButtonState);
-            return null;
+            // Hand nui both handles. `done` is what makes narrated autoplay wait
+            // for the line to finish (nui-slides re-arms its advance timer on it);
+            // `stop` lets the same control cancel a line in progress. nui settles
+            // its own visuals from `done`, so its flag can no longer stick — the
+            // reason the earlier hook returned nothing.
+            return {
+                stop: () => {
+                    tts.stop();
+                    completion.finish();
+                },
+                done: completion.done
+            };
         });
     }
 
@@ -3983,6 +3997,7 @@ function renderExchange(exchange, targetContainer = null) {
     });
 
     if (container) _vsAppendMessage(container, userEl);
+    _decoratePendingSend(userEl, exchange);
 
     setEmbedStatus(exchange.id, exchange.user?.embedStatus || 'unknown', exchange.user?.embedError, 'user');
 
@@ -4899,6 +4914,32 @@ function narrationPlaybackState() {
     const audio = tts.audio;
     const ended = audio ? (audio.ended || (audio.duration > 0 && audio.currentTime >= audio.duration - 0.05)) : false;
     return ended ? 'idle' : 'paused';
+}
+
+// Completion signal for the narration hook: resolves when playback ENDS by itself
+// or is stopped — not when the user merely pauses. nui uses it to hold slide
+// autoplay until the line has actually been read. `narrationPlaybackState()`
+// already folds the SDK's "finished line reports paused" quirk into idle.
+function narrationCompletion() {
+    let settle;
+    let settled = false;
+    const done = new Promise((resolve) => { settle = resolve; });
+    const onState = () => {
+        if (settled || narrationPlaybackState() !== 'idle') return;
+        settled = true;
+        tts.off('state', onState);
+        settle();
+    };
+    tts.on('state', onState);
+    return {
+        done,
+        finish: () => {
+            if (settled) return;
+            settled = true;
+            tts.off('state', onState);
+            settle();
+        }
+    };
 }
 
 function applyNarrationButtonState() {
