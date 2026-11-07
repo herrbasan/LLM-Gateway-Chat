@@ -182,7 +182,7 @@ const TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'storage_list',
-            description: `${SERVER_EXEC_NOTE}\n\nList directory contents in workshop storage. Omit path (or use "/") for the storage root. Set recursive:true for a full subtree listing. Returns one line per entry: type (f/d), size, and path.`,
+            description: `${SERVER_EXEC_NOTE}\n\nList directory contents in workshop storage. Omit path (or use "/") for the storage root. Set recursive:true for a full subtree listing. Returns one line per entry: type (f/d), size, ISO 8601 modification time, and path.`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -357,12 +357,13 @@ async function execute(name, args, deps = {}) {
                 for (const entry of fs.readdirSync(dirAbs, { withFileTypes: true })) {
                     const eAbs = path.join(dirAbs, entry.name);
                     const eRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
+                    const entryStat = fs.statSync(eAbs);
+                    const mtime = entryStat.mtime.toISOString();
                     if (entry.isDirectory()) {
-                        lines.push(`d        ${eRel}`);
+                        lines.push(`d ${''.padStart(8)} ${mtime} ${eRel}`);
                         if (args.recursive) walk(eAbs, eRel);
                     } else {
-                        const sz = fs.statSync(eAbs).size;
-                        lines.push(`f ${String(sz).padStart(8)} ${eRel}`);
+                        lines.push(`f ${String(entryStat.size).padStart(8)} ${mtime} ${eRel}`);
                     }
                 }
             };

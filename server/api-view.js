@@ -262,8 +262,14 @@ function buildApiMessages(messages, options = {}) {
                         .map(u => resolveToolImage(u, publicOrigin, readImageBytes))
                         .filter(u => u !== null);
                     if (resolvedToolImages.length > 0) {
+                        // An image-only tool result must not carry a text part:
+                        // `text: ''` nested in tool_result.content is refused by
+                        // Kimi K3.1 with 400 "text content is empty" (measured
+                        // 2026-10-30, LLM-Gateway scripts/probe-k31-empty-text.mjs)
+                        // and poisons every resend of the history. Image-only
+                        // tool_result content is accepted (#55).
                         toolResultObj.content = [
-                            { type: 'text', text: toolContent },
+                            ...(toolContent ? [{ type: 'text', text: toolContent }] : []),
                             ...resolvedToolImages.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } }))
                         ];
                     }

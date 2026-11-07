@@ -237,7 +237,7 @@ class Runner {
         // this a restart mid-run is a permanent silent stall (2026-08-25).
         if (this.session.activeRun) {
             this._persistFailureNote('Run interrupted — the server restarted while a run was in flight. Send a message to continue.')
-                .catch(err => DEPS.log().error('Orphan-run note failed', { chatId: conversationId, error: err?.message }, 'Runner'));
+                .catch(err => DEPS.log().error('Orphan-run note failed', null, { chatId: conversationId, error: err?.message }, 'Runner'));
             this._clearActiveRunStamp();
         }
         this.scheduleIdle();
@@ -511,7 +511,7 @@ class Runner {
         this._setActiveRunStamp();
         this.runLoop()
             .catch(async err => {
-                DEPS.log().error('Runner runLoop crashed', { chatId: this.conversationId, error: err?.message, stack: err?.stack }, 'Runner');
+                DEPS.log().error('Runner runLoop crashed', null, { chatId: this.conversationId, error: err?.message, stack: err?.stack }, 'Runner');
                 this.broadcast('error', { code: 'runner', message: err?.message || 'runLoop crashed' });
                 await this._persistFailureNote(`Runner crashed: ${err?.message || 'unknown error'}`).catch(() => {});
             })
@@ -1015,7 +1015,7 @@ class Runner {
                         const rootCause = err?.cause
                             ? (err.cause?.message || err.cause?.code || String(err.cause))
                             : undefined;
-                        DEPS.log().error('Runner stream error', { chatId: this.conversationId, error: err?.message, cause: rootCause, attempt }, 'Runner');
+                        DEPS.log().error('Runner stream error', null, { chatId: this.conversationId, error: err?.message, cause: rootCause, attempt }, 'Runner');
                         const detail = rootCause ? `${err?.message || 'stream error'} — cause: ${rootCause}` : (err?.message || 'stream error');
                         // A connection error WITH a cause is the network class —
                         // transient, retry. A throw without one is something else
@@ -1044,7 +1044,7 @@ class Runner {
             const rootCause = err?.cause
                 ? (err.cause?.message || err.cause?.code || String(err.cause))
                 : undefined;
-            DEPS.log().error('Runner run error', { chatId: this.conversationId, error: err?.message, cause: rootCause }, 'Runner');
+            DEPS.log().error('Runner run error', null, { chatId: this.conversationId, error: err?.message, cause: rootCause }, 'Runner');
             const detail = rootCause ? `${err?.message || 'run error'} — cause: ${rootCause}` : (err?.message || 'run error');
             this.broadcast('error', { code: 'stream', message: detail, exchangeId });
             this.inFlight.errorDetail = detail;

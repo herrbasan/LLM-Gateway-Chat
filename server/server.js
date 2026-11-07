@@ -679,12 +679,14 @@ async function proxyStorage(req, res, storagePath) {
     const method = req.method === 'HEAD' ? 'HEAD' : 'GET';
     const upstreamHeaders = {};
     if (req.headers.range) upstreamHeaders.Range = req.headers.range;
+    if (req.headers['if-none-match']) upstreamHeaders['If-None-Match'] = req.headers['if-none-match'];
+    if (req.headers['if-modified-since']) upstreamHeaders['If-Modified-Since'] = req.headers['if-modified-since'];
     upstream = await fetch(target, { method, headers: upstreamHeaders });
   } catch (e) {
     json(res, { error: `Storage server unreachable: ${e.message}` }, 502, req);
     return;
   }
-  if (!upstream.ok) {
+  if (!upstream.ok && upstream.status !== 304) {
     json(res, { error: `Storage: ${upstream.status} ${upstream.statusText}` }, upstream.status, req);
     return;
   }
@@ -705,6 +707,9 @@ async function proxyStorage(req, res, storagePath) {
     if (v) outHeaders[h] = v;
   }
   if (!outHeaders['content-type']) outHeaders['content-type'] = 'application/octet-stream';
+  // Revalidate on every reuse: edited storage assets keep the same URL (#47).
+  // Validators still let unchanged responses answer 304 without a body.
+  outHeaders['Cache-Control'] = 'no-cache';
   res.writeHead(upstream.status, outHeaders);
 
   if (req.method === 'HEAD' || !upstream.body) {
@@ -1440,7 +1445,7 @@ const routes = {
       const upstream = await fetch(target, { signal: AbortSignal.timeout(10000) });
       if (!upstream.ok) { json(res, { error: `upstream ${upstream.status} for ${target}` }, 502, req); return; }
       const text = await upstream.text();
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(canonicalizeStorageUrls(text));
     } catch (e) {
       json(res, { error: `preview fetch failed: ${e.message}` }, 502, req);
