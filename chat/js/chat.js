@@ -753,6 +753,28 @@ function _runnerToolEnd(chatId, d) {
     }
 }
 
+// Model- and tool-authored values are text or DOM properties, never markup (#48).
+function _setToolBubbleText(el, name, args) {
+    el.querySelector('.tool-title').textContent = formatToolDisplayName(name, args);
+    el.querySelector('.tool-args').textContent = jsonStringifyForDisplay(args);
+}
+
+function _setToolImages(el, images) {
+    const imagesDiv = el.querySelector('.tool-images');
+    imagesDiv.replaceChildren();
+    imagesDiv.style.display = images?.length ? 'block' : 'none';
+    if (!images?.length) return;
+    const container = document.createElement('div');
+    container.className = 'tool-images-container';
+    for (const src of images) {
+        const img = document.createElement('img');
+        img.className = 'tool-image';
+        img.src = src;
+        container.appendChild(img);
+    }
+    imagesDiv.appendChild(container);
+}
+
 // Build a tool bubble in "Running" state (matches the retired handleToolExecution
 // markup). The delete button is deferred to the delete/edit follow-up.
 function _runnerToolBubble(name, args) {
@@ -762,7 +784,7 @@ function _runnerToolBubble(name, args) {
         <div class="tool-bubble">
             <div class="message-header tool-header">
                 <nui-icon name="extension"></nui-icon>
-                <strong class="tool-title">${formatToolDisplayName(name, args)}</strong>
+                <strong class="tool-title"></strong>
                 <nui-badge variant="primary" class="tool-status">Running</nui-badge>
             </div>
             <div class="tool-notifications" style="display: block;">
@@ -771,12 +793,13 @@ function _runnerToolBubble(name, args) {
             <div class="tool-images" style="display: none;"></div>
             <div class="message-content tool-payload" style="display: none;">
                 <div class="tool-section-title">Arguments</div>
-                <div class="tool-args">${jsonStringifyForDisplay(args)}</div>
+                <div class="tool-args"></div>
                 <div class="tool-section-title">Execution Result</div>
                 <div class="tool-result"></div>
             </div>
         </div>
     `;
+    _setToolBubbleText(el, name, args);
     el.querySelector('.message-header').addEventListener('click', (e) => {
         if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
         const payloadBox = el.querySelector('.tool-payload');
@@ -802,9 +825,7 @@ function _runnerFinalizeTool(el, status, result, images) {
         notif.querySelector('.tool-error-text').textContent = toolErrorSummary(result || '');
     }
     if (images && images.length > 0) {
-        const imagesDiv = el.querySelector('.tool-images');
-        imagesDiv.style.display = 'block';
-        imagesDiv.innerHTML = images.map(img => `<img src="${img}" class="tool-image" />`).join('');
+        _setToolImages(el, images);
     }
 }
 
@@ -989,15 +1010,7 @@ function buildExchangeElement(exchange) {
         const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : 'Pending');
         const badgeVariant = isSuccess ? 'success' : (isError ? 'danger' : 'primary');
 
-        let hasImages = exchange.tool.images && exchange.tool.images.length > 0;
-        let imagesHtml = '';
-        if (hasImages) {
-            imagesHtml = `<div class="tool-images-container">`;
-            exchange.tool.images.forEach(img => {
-                imagesHtml += `<img src="${img}" class="tool-image" />`;
-            });
-            imagesHtml += `</div>`;
-        }
+        const hasImages = exchange.tool.images && exchange.tool.images.length > 0;
 
         // Interpolate content as escaped text, not raw HTML — tool content can
         // contain arbitrary markup (code examples, SVG, model output), and raw
@@ -1016,20 +1029,22 @@ function buildExchangeElement(exchange) {
             <div class="tool-bubble">
                 <div class="message-header tool-header">
                     <nui-icon name="extension"></nui-icon>
-                    <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
+                    <strong class="tool-title"></strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
                     <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button" aria-label="Delete Tool Call"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
                 <div class="tool-notifications" style="display: ${isError ? 'block' : 'none'};">${errorSummaryHtml}</div>
-                <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
+                <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};"></div>
                 <div class="message-content tool-payload" style="display: none;">
                     <div class="tool-section-title">Arguments</div>
-                    <div class="tool-args">${jsonStringifyForDisplay(parsedObj.args)}</div>
+                    <div class="tool-args"></div>
                     <div class="tool-section-title">Execution Result</div>
                     <div class="tool-result">${resultHtml}</div>
                 </div>
             </div>
         `;
+        _setToolBubbleText(toolEl, parsedObj.name, parsedObj.args);
+        _setToolImages(toolEl, exchange.tool.images || []);
         if (isError) toolEl.querySelector('.tool-notifications .tool-error-text').textContent = toolErrorSummary(exchange.tool.content);
 
         _decoratePreviewToolButton(toolEl, parsedObj.name, parsedObj.args);
@@ -3611,19 +3626,7 @@ function renderExchange(exchange, targetContainer = null) {
         const displayStatus = isSuccess ? 'Success' : (isError ? 'Failed' : 'Pending');
         const badgeVariant = isSuccess ? 'success' : (isError ? 'danger' : 'primary');
         
-        let hasImages = exchange.tool.images && exchange.tool.images.length > 0;
-        let imagesHtml = '';
-        if (hasImages) {
-            imagesHtml = `<div class="tool-images-container">`;
-            exchange.tool.images.forEach(img => {
-                imagesHtml += `<img src="${img}" class="tool-image" />`;
-            });
-            imagesHtml += `</div>`;
-        }
-
-        let resultHtml = '';
-        if (isSuccess) resultHtml = exchange.tool.content;
-        else if (isError) resultHtml = exchange.tool.content;
+        const hasImages = exchange.tool.images && exchange.tool.images.length > 0;
 
         const errorSummaryHtml2 = isError
             ? `<span class="tool-error-text"></span> <span class="tool-error-hint">— click for details</span>`
@@ -3633,20 +3636,22 @@ function renderExchange(exchange, targetContainer = null) {
             <div class="tool-bubble">
                 <div class="message-header tool-header">
                     <nui-icon name="extension"></nui-icon>
-                    <strong class="tool-title">${formatToolDisplayName(parsedObj.name, parsedObj.args)}</strong>
+                    <strong class="tool-title"></strong>
                     <nui-badge variant="${badgeVariant}" class="tool-status">${displayStatus}</nui-badge>
                     <nui-button variant="icon" class="action-btn delete-tool" title="Delete Tool Call"><button type="button" aria-label="Delete Tool Call"><nui-icon name="delete"></nui-icon></button></nui-button>
                 </div>
                 <div class="tool-notifications" style="display: ${isError ? 'block' : 'none'};">${errorSummaryHtml2}</div>
-                  <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};">${imagesHtml}</div>
+                  <div class="tool-images" style="display: ${hasImages ? 'block' : 'none'};"></div>
                 <div class="message-content tool-payload" style="display: none;">
                     <div class="tool-section-title">Arguments</div>
-                    <div class="tool-args">${JSON.stringify(parsedObj.args, null, 2)}</div>
+                    <div class="tool-args"></div>
                     <div class="tool-section-title">Execution Result</div>
                     <div class="tool-result"></div>
                 </div>
             </div>
         `;
+        _setToolBubbleText(toolEl, parsedObj.name, parsedObj.args);
+        _setToolImages(toolEl, exchange.tool.images || []);
         if (container) _vsAppendMessage(container, toolEl);
         if (isError) toolEl.querySelector('.tool-notifications .tool-error-text').textContent = toolErrorSummary(exchange.tool.content);
 
