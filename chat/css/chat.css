@@ -9,6 +9,19 @@ html, body {
     -ms-text-size-adjust: none;
 }
 
+/* Session sidebar is closed by default at every width. On a wide viewport a
+   manual open docks and displaces the conversation; below it the same state
+   stays a floating overlay with NUI's backdrop. */
+@media (min-width: 75rem) {
+    nui-app[data-layout="app"].sidebar-open nui-content {
+        left: var(--sidebar-width);
+    }
+
+    nui-app[data-layout="app"].sidebar-open::before {
+        display: none;
+    }
+}
+
 /* Prevent double-tap zoom on interactive elements */
 button, input, textarea, select, a {
     touch-action: manipulation;
