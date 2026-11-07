@@ -14,6 +14,7 @@ const storageTools = require('./storage-tools');
 const retireView = require('./retire-view');
 const { formatMessageTs } = require('./api-view');
 const { preflightPreviewUrl } = require('./preview-content');
+const { openHostedApp } = require('./hosted-apps');
 
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
 // List-event emitter (issue #33): metadata mutations broadcast chat.updated so
@@ -410,6 +411,23 @@ const ARCHIVE_TOOL_DEFS = [
     {
         type: 'function',
         function: {
+            name: 'chat_app_open',
+            description: `${SERVER_EXEC_NOTE}\n\nPrepare an explicit hosted tool UI for the user to open manually. This does NOT open a dialog by itself and must not be used for ordinary headless rendering. Currently supported app: print (the MCP /print editor, for occasional manual page-break adjustment after print.render has produced its normal PDF and raster previews). Args: id (safe stable slug), title, app, url (the editorPath supplied by the tool, on the configured MCP origin). Returns a conversation-scoped appInstanceId and an Open button on the tool message. The hosted app talks directly to its own backend; chat never proxies document saves and never receives chat credentials.`,
+            parameters: {
+                type: 'object',
+                properties: {
+                    id: { type: 'string', description: 'Stable safe slug for this hosted app reference, e.g. print-vita' },
+                    title: { type: 'string', description: 'Human-readable dialog title' },
+                    app: { type: 'string', enum: ['print'], description: 'Allowlisted hosted app id' },
+                    url: { type: 'string', description: 'The app editorPath supplied by the tool, e.g. /print?path=vita%2Fvita.md' }
+                },
+                required: ['id', 'title', 'app', 'url']
+            }
+        }
+    },
+    {
+        type: 'function',
+        function: {
             name: 'chat_preview_state',
             description: `${SERVER_EXEC_NOTE}\n\nReturn the preview items shown so far in this conversation (metadata only: id, title, language, source — no content). Use to recall what you've already previewed when the user refers to "this" or "the current one". Live view state (which item is selected in the dropdown, whether the pane is open) is client-side and not queryable by the backend.`,
             parameters: {
@@ -565,6 +583,9 @@ async function executeInternalTool(name, args, ctx) {
 
         case 'chat_preview_show':
             return executePreviewShow(args, { mcpOrigin });
+
+        case 'chat_app_open':
+            return openHostedApp(args, { mcpOrigin, conversationId });
 
         case 'chat_preview_state':
             return executePreviewState(args, { dbInstance, conversationId });

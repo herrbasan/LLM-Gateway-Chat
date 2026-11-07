@@ -15,6 +15,7 @@ import { TtsPlayerHost } from '../../lib/tts/tts-player.js';
 import { createVoiceDictation } from './voice-dictation.js';
 import { createVoiceAssistant } from './voice-assistant.js';
 import { preview } from './preview.js';
+import { hostedApps } from './hosted-app.js';
 import { runnerClient } from './runner-client.js';
 
 // Fire-and-forget client log to server nLogger — never throws
@@ -964,6 +965,7 @@ function parsePartialToolArgs(toolCall) {
 }
 
 function _resolveToolUiAction(ui) {
+    if (ui?.kind === 'hosted-app') return hostedApps.resolve(ui, getMcpServerOrigin());
     if (!ui || typeof ui !== 'object' || typeof ui.url !== 'string' || !ui.url.trim()) return null;
     const label = typeof ui.label === 'string' && ui.label.trim() ? ui.label.trim() : 'Open UI';
     const raw = ui.url.trim();
@@ -996,6 +998,10 @@ function _resolveToolUiAction(ui) {
 }
 
 function _openToolUi(action) {
+    if (action.mode === 'dialog') {
+        hostedApps.open(action);
+        return;
+    }
     if (action.mode === 'preview') {
         preview.showUi({ id: `tool-ui-${action.url}`, title: action.label, url: action.url })
             .catch(error => {
@@ -1014,7 +1020,7 @@ function _decorateToolUiAction(toolEl, ui) {
     if (!header) return;
     const btn = document.createElement('nui-button');
     btn.className = 'action-btn tool-ui-action';
-    btn.title = action.mode === 'preview' ? action.label : `${action.label} (new tab)`;
+    btn.title = action.mode === 'preview' ? action.label : action.mode === 'dialog' ? action.label : `${action.label} (new tab)`;
     btn.dataset.mode = action.mode;
     btn.dataset.url = action.url;
     btn.dataset.trusted = String(action.trusted);
@@ -1469,6 +1475,7 @@ async function init() {
 
     // Initialize preview pane (needs DOM ready + NUI loaded for enableDrag)
     preview.init();
+    hostedApps.init();
 
     // Track the composer (bottom container) height so the mobile preview and
     // TTS player can dock above it. The composer grows when images attach or
@@ -5188,6 +5195,7 @@ async function switchChat(targetChatId) {
     // Reset preview pane — it's a shared surface across per-chat containers.
     // Without this, chat B would see chat A's preview. Idempotent: safe on init.
     preview.reset();
+    hostedApps.reset();
 
     // 1. Get or create the container for this chat (creates DOM node if first time)
     const targetContainer = getOrCreateContainer(targetChatId);

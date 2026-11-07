@@ -579,6 +579,15 @@
         </dialog>
     </nui-dialog>
 
+    <!-- Explicit hosted tool app (#58). Opened only by its tool-message button. -->
+    <nui-dialog id="hosted-app-dialog" mode="page" title="Hosted app" style="--space-page-maxwidth: 96vw;">
+        <div class="hosted-app-frame-wrap">
+            <iframe id="hosted-app-frame" class="hosted-app-frame" title="Hosted app" src="about:blank"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-downloads"
+                referrerpolicy="strict-origin-when-cross-origin"></iframe>
+        </div>
+    </nui-dialog>
+
     <script src="js/config.js?v=2"></script>
 
     <!-- Scripts -->

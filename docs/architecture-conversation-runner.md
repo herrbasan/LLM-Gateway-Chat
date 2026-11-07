@@ -209,7 +209,7 @@ embedStatus included), `inFlight` (if a run is active), `usage/context` of the l
 | `run.retry` | `{exchangeId, attempt, attempts, reason}` | transient gateway failure (network, stall, TTFT, 408/429/5xx) — the runner re-issues the request; the view clears the dead attempt's partial deltas |
 | `delta` | `{content?, reasoningContent?}` | raw rate; the view debounces rendering (as today) |
 | `tool.start` | `{toolCallId, name, args}` | |
-| `tool.end` | `{toolCallId, name, status, resultMessage, resultImages?, ui?, toolMessageId}` | result also persisted. Optional `ui` is a structured tool-owned action (`label`, `url`, `mode: preview|new-tab`), stored as `toolUi`; preview iframes are restricted to the chat/workshop origins, anything else opens an external tab. |
+| `tool.end` | `{toolCallId, name, status, resultMessage, resultImages?, ui?, toolMessageId}` | result also persisted. Optional `ui` is a structured tool-owned action stored as `toolUi`: generic actions (`label`, `url`, `mode: preview|new-tab`) use preview iframes only for chat/workshop origins; `kind: hosted-app` (#58) carries `id`, `app`, `appInstanceId`, `title`, `url`, `label` and opens an allowlisted app in the large dialog after an explicit user click. |
 | `msg.assistant` | message | appended + persisted |
 | `run.end` | `{finishReason, usage, context, aborted?}` | |
 | `embed.status` | `{messageId, status}` | folds today's separate `/api/embed-events` channel into the conversation stream |
