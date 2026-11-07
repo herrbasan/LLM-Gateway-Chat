@@ -73,6 +73,16 @@ function getMcpServerOrigin() {
     return null;
 }
 
+// Browser-facing hosted-app mapping (#62). Internal MCP addresses belong to the
+// backend and are never a fallback. 'same-origin' works for both the public
+// nPort site and its LAN mirror, including exact postMessage origins.
+function getHostedAppOrigin() {
+    const mapping = CONFIG.mcpPublicOrigin;
+    if (!mapping) return null;
+    if (mapping === 'same-origin') return window.location.origin;
+    try { return new URL(mapping).origin; } catch (_) { return null; }
+}
+
 
 
 
@@ -979,7 +989,7 @@ function parsePartialToolArgs(toolCall) {
 }
 
 function _resolveToolUiAction(ui) {
-    if (ui?.kind === 'hosted-app') return hostedApps.resolve(ui, getMcpServerOrigin());
+    if (ui?.kind === 'hosted-app') return hostedApps.resolve(ui, getHostedAppOrigin(), getMcpServerOrigin());
     if (!ui || typeof ui !== 'object' || typeof ui.url !== 'string' || !ui.url.trim()) return null;
     const label = typeof ui.label === 'string' && ui.label.trim() ? ui.label.trim() : 'Open UI';
     const raw = ui.url.trim();
@@ -996,13 +1006,20 @@ function _resolveToolUiAction(ui) {
     } catch {
         return null;
     }
+    if (url.pathname === '/print') {
+        url = hostedApps.resolveUrl(raw, getHostedAppOrigin(), getMcpServerOrigin());
+        if (!url) return null;
+    }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
     let mcpOrigin = null;
     try {
         const rawOrigin = getMcpServerOrigin();
         mcpOrigin = rawOrigin ? new URL(rawOrigin).origin : null;
     } catch { mcpOrigin = null; }
-    const trusted = url.origin === window.location.origin || (mcpOrigin && url.origin === mcpOrigin);
+    const hostedOrigin = getHostedAppOrigin();
+    const trusted = url.origin === window.location.origin
+        || (mcpOrigin && url.origin === mcpOrigin)
+        || (hostedOrigin && url.origin === hostedOrigin);
     return {
         label,
         url: url.toString(),

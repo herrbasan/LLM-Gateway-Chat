@@ -21,23 +21,35 @@ function init() {
     window.addEventListener('message', onHostMessage);
 }
 
-function resolve(ui, rawMcpOrigin) {
+function resolveUrl(raw, rawPublicOrigin, rawBackendOrigin) {
+    if (typeof raw !== 'string' || !raw.trim() || !rawPublicOrigin) return null;
+    let publicOrigin;
+    let backendOrigin = null;
+    try {
+        publicOrigin = new URL(rawPublicOrigin).origin;
+        backendOrigin = rawBackendOrigin ? new URL(rawBackendOrigin).origin : null;
+    } catch {
+        return null;
+    }
+
+    let url;
+    try { url = new URL(raw, publicOrigin); } catch { return null; }
+    if (url.origin !== publicOrigin && url.origin !== backendOrigin) return null;
+    // Path preservation turns a backend-issued internal URL into its public
+    // route without ever exposing the internal host to the browser (#62).
+    return new URL(`${url.pathname}${url.search}${url.hash}`, publicOrigin);
+}
+
+function resolve(ui, rawPublicOrigin, rawBackendOrigin) {
     if (!ui || ui.kind !== 'hosted-app') return null;
     const definition = HOSTED_APPS[ui.app];
     if (!definition || typeof ui.url !== 'string' || typeof ui.title !== 'string') return null;
     if (typeof ui.id !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(ui.id)) return null;
     if (typeof ui.appInstanceId !== 'string' || !/^app_[0-9a-f-]{36}$/.test(ui.appInstanceId)) return null;
-    if (!rawMcpOrigin) return null;
 
-    let url;
-    let origin;
-    try {
-        origin = new URL(rawMcpOrigin).origin;
-        url = new URL(ui.url, origin);
-    } catch {
-        return null;
-    }
-    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== origin) return null;
+    const url = resolveUrl(ui.url, rawPublicOrigin, rawBackendOrigin);
+    if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:')) return null;
+    const origin = url.origin;
     if (url.pathname !== definition.editorPath || url.username || url.password) return null;
     for (const key of url.searchParams.keys()) {
         if (CREDENTIAL_PARAMS.test(key)) return null;
@@ -118,4 +130,4 @@ function reset() {
     conversationId = null;
 }
 
-export const hostedApps = { init, resolve, open, reset, setConversation };
+export const hostedApps = { init, resolve, resolveUrl, open, reset, setConversation };

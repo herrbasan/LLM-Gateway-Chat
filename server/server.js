@@ -2505,7 +2505,8 @@ const server = http.createServer(async (req, res) => {
       ttsEndpoint: '/api/tts', // same-origin proxy → nSpeech (see proxyTts); TTS_ENDPOINT env is the server-side nSpeech address
       ttsVoice: process.env.TTS_VOICE || '',
       ttsSpeed: parseFloat(process.env.TTS_SPEED || 1.0),
-      mcpOrigin: MCP_URL || null, // workshop origin — trusted source for inline markdown images (issue #32)
+      mcpOrigin: MCP_URL || null, // backend workshop origin — server-side tools only
+      mcpPublicOrigin: process.env.MCP_PUBLIC_ORIGIN || 'same-origin', // browser-facing hosted-app mapping; never an internal fallback
       backendUrl: '',
       enableBackend: true,
       enableArchiveTools: true,
