@@ -440,6 +440,105 @@ nui-code pre {
     overflow-wrap: anywhere;
 }
 
+/* Knowledge-base note overlay (blog research-note convention): a panel, not a
+   page — wide enough to read, capped so the document stays faintly present
+   behind it and the reader keeps their place. The header stays put, the body
+   scrolls. Sized here because nui-dialog's base is a 480px alert box. */
+#preview-note-dialog dialog {
+    width: min(44rem, 92vw);
+    max-width: 92vw;
+    max-height: min(600px, 88vh);
+}
+
+#preview-note-dialog dialog[open] {
+    display: flex;
+    flex-direction: column;
+}
+
+#preview-note-dialog .preview-note {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: min(600px, 88vh);
+}
+
+#preview-note-dialog .preview-note-head {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--nui-space-half);
+    padding: var(--nui-space);
+    padding-bottom: var(--nui-space-half);
+    border-bottom: thin solid var(--border-shade1);
+    flex: 0 0 auto;
+}
+
+#preview-note-dialog .preview-note-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.3;
+    /* Chrome, not prose: the theme's heading colour is the link accent, which
+       would read as "click me" on a panel header. */
+    color: var(--text-color);
+    overflow-wrap: break-word;
+}
+
+#preview-note-dialog .preview-note-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--nui-space) calc(var(--nui-space) * 1.5);
+    font-size: 0.95rem;
+    overflow-wrap: break-word;
+}
+
+#preview-note-dialog .preview-note-body > *:first-child {
+    margin-top: 0;
+}
+
+/* The panel is an inset, not a second document: headings sit at body scale and
+   in the text colour, matching the blog's research-note panel. The theme's
+   document headings are accent-coloured and 1.8rem, which reads as a page. */
+#preview-note-dialog .preview-note-body :is(h1, h2) {
+    font-size: 1.06rem;
+    font-weight: 600;
+    line-height: 1.4;
+    margin: 1.5rem 0 0.5rem;
+    color: var(--text-color);
+}
+
+#preview-note-dialog .preview-note-body :is(h3, h4, h5, h6) {
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.4;
+    margin: 1.2rem 0 0.4rem;
+    color: var(--text-color);
+}
+
+/* The note's first block sits against the header — the markdown host is the
+   body's first child, so the heading it renders needs its own reset. */
+#preview-note-dialog .preview-note-body :where(h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote):first-child {
+    margin-top: 0;
+}
+
+#preview-note-dialog .preview-note-body a {
+    color: var(--nui-accent, var(--color-highlight));
+}
+
+#preview-note-dialog .preview-note-loading {
+    color: var(--text-color-dim);
+    font-style: italic;
+}
+
+#preview-note-dialog .preview-note-error {
+    color: var(--color-danger, #f44336);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 /* Markdown text should wrap, not force a horizontal scrollbar. The preview
    pane is narrow (382px on a 390px phone) and long inline paths/code words
    in lists otherwise push scrollWidth past clientWidth. pre/code/nui-code

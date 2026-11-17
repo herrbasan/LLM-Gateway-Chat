@@ -16,6 +16,7 @@ import {
     deriveIdFromUrl,
     deriveTitleFromUrl
 } from './preview-url.js';
+import { resolveContentHref, noteUrlFromHref, splitNoteSource } from './research-note.js';
 
 // ============================================
 // State (module-level, per-conversation)
@@ -24,6 +25,15 @@ import {
 const items = new Map();   // id → { id, title, language, content, source }
 let activeId = null;       // currently displayed item id
 let _renderedContent = null;  // tracks what's currently on screen (for TTS invalidation)
+
+// Knowledge-base notes: one dialog at a time, its source fetched from the
+// document's own base and reused for the rest of the conversation.
+const notes = new Map();   // note url → source text
+let noteDialog = null;     // lazily built <nui-dialog> holding the panel
+let noteUrl = null;        // url of the note currently in the panel
+let noteSeq = 0;           // invalidates a slow fetch that a newer note overtook
+let noteParts = null;      // { body, title } refs inside the dialog
+let linkObserver = null;   // follows the rendered DOM so no render path re-wires links
 
 // Callback fired when the active content changes (chat.js registers a TTS stop here)
 let _onContentChange = null;
@@ -82,6 +92,16 @@ function init() {
 
     // Close button
     closeBtn.addEventListener('click', close);
+
+    // Every anchor rendered into the pane is resolved against the document's
+    // own base at click time (a note opens in the dialog, anything else in a
+    // new tab). Delegated on the container so no render path has to re-wire.
+    wireContentClicks(content, activeItemBase);
+    // The same resolution is stamped onto the anchors as they appear: every
+    // render builds new ones, and nui-slides clones them for its slides, so the
+    // decorator follows the DOM rather than the render call.
+    linkObserver = new MutationObserver(() => decorateLinks(content, activeItemBase()));
+    linkObserver.observe(content, { childList: true, subtree: true });
 
     // Document ↔ slide view toggle (markdown items with deck structure only)
     viewBtn.addEventListener('click', toggleView);
@@ -410,6 +430,11 @@ function reset() {
     items.clear();
     activeId = null;
     _renderedContent = null;
+    noteSeq++;                        // a fetch in flight must not land in the next conversation
+    noteUrl = null;
+    notes.clear();
+    if (noteDialog && noteDialog.isOpen()) noteDialog.close('reset');
+    if (noteParts) noteParts.body.replaceChildren();
     if (content) content.replaceChildren();
     if (content) content.classList.remove('deck-mode', 'ui-mode');
     if (viewBtn) viewBtn.hidden = true;
@@ -641,6 +666,171 @@ function renderUi(item) {
     frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads');
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
     content.replaceChildren(frame);
+}
+
+// ============================================
+// Knowledge-base notes — research-note links open as an inline dialog
+// ============================================
+//
+// The blog bakes one <dialog> per cited note at build time; a preview has no
+// build, so the note source is fetched from the link's own destination and
+// shown in the same kind of panel — a side excursion over the document, not a
+// page the reader has to leave. One note at a time: a note→note link swaps the
+// panel, matching the site's own chrome.
+
+function activeItemBase() {
+    const item = activeId ? items.get(activeId) : null;
+    return item ? item.base : null;
+}
+
+/**
+ * Delegated click handling for rendered markdown. The base is read at click
+ * time, so a render that replaces the DOM needs no new listener.
+ */
+function wireContentClicks(root, getBase) {
+    root.addEventListener('click', (e) => {
+        const anchor = e.target.closest && e.target.closest('a[href]');
+        if (!anchor) return;
+        const href = anchor.getAttribute('href');
+        if (!href) return;
+        const base = getBase();
+        const noteHref = noteUrlFromHref(href, base, _mcpOriginResolver);
+        if (noteHref) {
+            if (!base) console.warn(`[preview] note link "${href}" resolved without a document base — assumed ${noteHref}`);
+            e.preventDefault();
+            void showNote(noteHref);
+            return;
+        }
+        const url = resolveContentHref(href, base, _mcpOriginResolver);
+        if (!url) return;   // in-page anchor, non-http scheme, or a locationless relative path
+        e.preventDefault();
+        window.open(browserHref(url), '_blank', 'noopener,noreferrer');
+    });
+}
+
+/**
+ * The storage origin binds localhost on the server host, so a browser cannot
+ * reach it from anywhere else. Deep links go through the backend's same-origin
+ * /storage/* proxy instead (issue #36), which is also what makes them survive
+ * the public nPort origin.
+ */
+function browserHref(url) {
+    const rawOrigin = _mcpOriginResolver ? _mcpOriginResolver() : null;
+    if (!rawOrigin) return url;
+    const origin = rawOrigin.replace(/\/+$/, '');
+    return url.startsWith(origin + '/storage/') ? url.slice(origin.length) : url;
+}
+
+/**
+ * Stamp each rendered anchor with its absolute destination and a new-tab
+ * target, so ctrl/middle-click and copy-link match what a plain click does.
+ * Idempotent — the observer calls it on every DOM change.
+ */
+function decorateLinks(root, base) {
+    if (!root) return;
+    for (const anchor of root.querySelectorAll('a[href]')) {
+        const href = anchor.getAttribute('href');
+        const url = noteUrlFromHref(href, base, _mcpOriginResolver)
+            || resolveContentHref(href, base, _mcpOriginResolver);
+        if (!url) continue;
+        const target = browserHref(url);
+        if (anchor.getAttribute('href') !== target) anchor.setAttribute('href', target);
+        anchor.target = '_blank';
+        anchor.rel = 'noopener noreferrer';
+    }
+}
+
+function ensureNoteDialog() {
+    if (noteDialog) return noteDialog;
+
+    const host = document.createElement('nui-dialog');
+    host.id = 'preview-note-dialog';
+    host.innerHTML = `
+        <dialog>
+            <article class="preview-note">
+                <header class="preview-note-head">
+                    <h2 class="preview-note-title"></h2>
+                    <nui-button variant="icon"><button type="button" data-note-action="open" aria-label="Open the note page in a new tab" title="Open the note page in a new tab"><nui-icon name="link"></nui-icon></button></nui-button>
+                    <nui-button variant="icon"><button type="button" data-note-action="close" aria-label="Close" title="Close"><nui-icon name="close"></nui-icon></button></nui-button>
+                </header>
+                <div class="preview-note-body"></div>
+            </article>
+        </dialog>`;
+    document.body.appendChild(host);
+
+    const body = host.querySelector('.preview-note-body');
+    const title = host.querySelector('.preview-note-title');
+    const open = host.querySelector('[data-note-action="open"]');
+    const close = host.querySelector('[data-note-action="close"]');
+
+    // Leaving for the note's own page ends the excursion: the panel would
+    // otherwise stay open behind the new tab, hiding the document.
+    open.addEventListener('click', () => {
+        const url = noteUrl;
+        host.close('open');
+        window.open(browserHref(url), '_blank', 'noopener,noreferrer');
+    });
+    close.addEventListener('click', () => host.close());
+    wireContentClicks(body, () => noteUrl);
+
+    noteParts = { body, title };
+    noteDialog = host;
+    return host;
+}
+
+/**
+ * Fetch (once) and show the note at `url`. The panel opens immediately so a
+ * slow fetch still shows what is happening; a failed fetch renders its error
+ * in place — never a blank panel.
+ */
+async function showNote(url) {
+    const host = ensureNoteDialog();
+    const seq = ++noteSeq;
+    noteUrl = url;
+    noteParts.title.textContent = noteTitleFromUrl(url);
+    noteParts.body.replaceChildren(noteLine('Loading note…', 'preview-note-loading'));
+    if (!host.isOpen()) host.showModal();
+
+    let source = notes.get(url);
+    if (source === undefined) {
+        try {
+            source = await _fetchUrlText(url);
+        } catch (err) {
+            if (seq !== noteSeq) return;
+            noteParts.body.replaceChildren(noteLine(`${err.message}\n${url}`, 'preview-note-error'));
+            return;
+        }
+        notes.set(url, source);
+    }
+    if (seq !== noteSeq) return;
+    renderNote(url, source);
+}
+
+function renderNote(url, source) {
+    const { title, body } = splitNoteSource(source);
+    noteParts.title.textContent = title || noteTitleFromUrl(url);
+
+    const md = document.createElement('nui-markdown');
+    md.setAttribute('frontmatter', 'strip');
+    md.base = url;
+    const script = document.createElement('script');
+    script.type = 'text/markdown';
+    script.textContent = body;
+    md.appendChild(script);
+    noteParts.body.replaceChildren(md);
+    // nui-markdown renders synchronously on attach, so the anchors exist here.
+    decorateLinks(noteParts.body, url);
+}
+
+function noteTitleFromUrl(url) {
+    return deriveTitleFromUrl(url).replace(/\.md$/i, '');
+}
+
+function noteLine(text, className) {
+    const p = document.createElement('p');
+    p.className = className;
+    p.textContent = text;
+    return p;
 }
 
 // ============================================

@@ -903,7 +903,42 @@ function getOrCreateContainer(chatId) {
     container.style.display = 'none'; // Hidden by default; switchChat sets 'flex' for active
     elements.messages.appendChild(container);
     chatContainers.set(chatId, container);
+    trackBottomPin(container);
     return container;
+}
+
+const BOTTOM_PIN_PX = 100;              // same tolerance as the streaming auto-scroll
+const bottomPin = new WeakMap();        // container → { stick }
+
+/**
+ * Keep a chat that is reading at the bottom pinned there across layout changes.
+ *
+ * A narrower message column reflows the text taller and pushes the newest
+ * message — usually the one being read — out of view. Every layout change that
+ * matters (window resize, the preview split, a growing composer) resizes this
+ * container, so one ResizeObserver covers them all.
+ *
+ * "At the bottom" is sampled on scroll, not in the observer: the observer runs
+ * AFTER layout, when the distance from the bottom has already grown — the
+ * pre-resize reading is the only honest input.
+ */
+function trackBottomPin(container) {
+    if (bottomPin.has(container)) return;
+    const state = { stick: true };      // a fresh container opens at its newest message
+    bottomPin.set(container, state);
+    container.addEventListener('scroll', () => {
+        state.stick = isNearBottom(BOTTOM_PIN_PX, container);
+    }, { passive: true });
+    new ResizeObserver(() => repinIfStuck(container)).observe(container);
+}
+
+// The virtual scroller re-measures every slot ~300ms after the last resize and
+// rewrites the stage height then, which moves the bottom again. Anything that
+// changes the content height after the layout pass has to re-pin too.
+function repinIfStuck(container) {
+    const state = bottomPin.get(container);
+    if (!state || !state.stick || !container.isConnected) return;
+    scrollToBottom(container);
 }
 
 /**
@@ -2313,6 +2348,12 @@ function setupEventListeners() {
     // Image lightbox - use event delegation
     elements.messages?.addEventListener('click', onMarkdownImageClick);
     document.getElementById('preview-content')?.addEventListener('click', onMarkdownImageClick);
+
+    // Prose links leave the app: a message is a document surface, so an
+    // in-place navigation would throw the conversation away. Delegated, so
+    // every markdown render path (live, snapshot, preview) is covered without
+    // re-wiring after a re-render.
+    document.addEventListener('click', onMarkdownLinkClick);
 }
 
 /**
@@ -2345,6 +2386,26 @@ function onMarkdownImageClick(e) {
         const start = gallery.indexOf(img);
         lb.open([], start >= 0 ? start : 0);
     }
+}
+
+/**
+ * Delegated click handler for links rendered into markdown: they open a new
+ * tab instead of navigating the SPA away from the conversation.
+ *
+ * Only `<nui-markdown>` content is claimed — app chrome keeps native anchor
+ * behavior. The preview pane resolves its own links first (document base,
+ * research-note dialogs) and marks what it has handled, so those are left
+ * alone here.
+ */
+function onMarkdownLinkClick(e) {
+    const anchor = e.target.closest && e.target.closest('a[href]');
+    if (!anchor || e.defaultPrevented) return;
+    if (anchor.target === '_blank') return;
+    if (!anchor.closest('nui-markdown')) return;
+    const href = anchor.getAttribute('href');
+    if (!href || href.startsWith('#') || /^(?:mailto|tel|javascript):/i.test(href)) return;
+    e.preventDefault();
+    window.open(anchor.href, '_blank', 'noopener,noreferrer');
 }
 
 
@@ -3473,6 +3534,7 @@ function _vsActivate(container) {
                 // valid. Skips the full re-measure on every switch-back.
                 if (container.clientWidth === state.measuredWidth && !state.staleMeasurements) return;
                 _vsRecalculate(container);
+                repinIfStuck(container);
             }, 300);
         });
         container._vsResizeObserver.observe(container);
