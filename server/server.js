@@ -1451,6 +1451,16 @@ const routes = {
   'GET /api/tts/v1/models': (req, res) => proxyTts(req, res, '/v1/models'),
   'POST /api/tts/v1/audio/speech': (req, res) => proxyTts(req, res, '/v1/audio/speech'),
 
+  // Device diagnostics (issue #63): a phone has no devtools, so the Web Audio
+  // path reports its own state here and it lands in the server log.
+  'POST /api/client-diag': async (req, res) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const body = await readBody(req);
+    logger.info('client-diag', body, 'Diag');
+    json(res, { ok: true }, 200, req);
+  },
+
   // nVoice same-origin relay (STT) — same rationale as the TTS proxy above:
   // nVoice binds localhost on the server host. The WS half (realtime audio +
   // wakeword) is handled by the server 'upgrade' listener, not this table.
