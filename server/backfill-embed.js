@@ -25,7 +25,7 @@ const path = require('path');
 const { Database: nDB } = require('../lib/ndb/napi');
 const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
-const { buildEmbedText, splitTextIntoChunks, minEmbedChunkCount, planEmbedBatches, embedVectorId, fetchRetry, EMBEDDING_DIMS, TOK_CHARS_RATIO, EMBED_CHUNK_TOKENS, EMBED_CHUNK_OVERLAP_TOKENS, EMBED_MAX_INPUT_TOKENS, EMBED_REQUEST_TOKENS, EMBED_MAX_CONCURRENCY, sleep } = require('./embed');
+const { isEmbeddableMessage, buildEmbedText, splitTextIntoChunks, minEmbedChunkCount, planEmbedBatches, embedVectorId, fetchRetry, EMBEDDING_DIMS, TOK_CHARS_RATIO, EMBED_CHUNK_TOKENS, EMBED_CHUNK_OVERLAP_TOKENS, EMBED_MAX_INPUT_TOKENS, EMBED_REQUEST_TOKENS, EMBED_MAX_CONCURRENCY, sleep } = require('./embed');
 
 // Load minimal .env natively (same loader as server.js). Without it the default
 // Gateway route has no GATEWAY_API_KEY and every request 401s — which is why
@@ -220,13 +220,17 @@ async function run() {
     // Gather all messages from conversation documents
     const messages = [];
     let toolSkipped = 0;
+    let emptySkipped = 0;
     for (const c of docs.filter(d => d._type === 'conversation')) {
         if (!c.messages) continue;
         for (const m of c.messages) {
             // Tool payloads are deliberately not indexed — same rule as
             // embedMessageAsync and the startup reconciliation. They are huge
             // JSON blobs: embedding them wastes box time and pollutes search.
+            // Empty messages are skipped for the same reason: no content, no
+            // vector worth returning.
             if (m.role === 'tool') { toolSkipped++; continue; }
+            if (!isEmbeddableMessage(m)) { emptySkipped++; continue; }
             m._sessionId = c.id; // attach sessionId for buildText
             messages.push(m);
         }
@@ -277,7 +281,7 @@ async function run() {
         logger.info('Gap heal', { gaps: todo.length, alreadyEmbedded: already }, 'Embed');
     }
 
-    logger.info('Embedding stats', { total: messages.length, toolsSkipped: toolSkipped, done: already, todo: todo.length }, 'Embed');
+    logger.info('Embedding stats', { total: messages.length, toolsSkipped: toolSkipped, emptySkipped, done: already, todo: todo.length }, 'Embed');
 
     if (todo.length === 0) {
         logger.info('Nothing to embed — all messages already embedded', {}, 'Embed');

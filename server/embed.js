@@ -18,6 +18,16 @@ const EMBED_REQUEST_TOKENS = Math.min(Math.max(EMBED_MAX_INPUT_TOKENS, parseInt(
 // in-flight requests than this only deepen its queue.
 const EMBED_MAX_CONCURRENCY = Math.min(Math.max(1, parseInt(process.env.CHAT_EMBED_CONCURRENCY || 2)), 4);
 
+// One rule for every embedding path (live append, mount reconciliation, backfill):
+// tool payloads are deliberately not indexed — they are huge JSON blobs that
+// waste box time and pollute search — and an empty message carries nothing to
+// index, so its vector could only ever come back content-free.
+function isEmbeddableMessage(msg) {
+    if (!msg) return false;
+    if (msg.role === 'tool') return false;
+    return String(msg.content ?? '').trim() !== '';
+}
+
 function buildEmbedText(msg, session) {
     const parts = [];
     if (session?.mode === 'arena') {
@@ -164,6 +174,7 @@ async function fetchRetry(url, options, retries) {
 }
 
 module.exports = {
+    isEmbeddableMessage,
     buildEmbedText,
     splitTextIntoChunks,
     minEmbedChunkCount,

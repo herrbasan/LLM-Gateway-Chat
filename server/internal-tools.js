@@ -41,6 +41,31 @@ function init({ log, emitListEvent }) {
 // deps = { embedBatch, embedAvailable }
 // ============================================
 
+// Knowledge-role default: an unfiltered search is a knowledge search, so the
+// legacy tool/system transcripts (some of them indexed before the tool-skip rule
+// existed) are not candidates. An explicit role filter that names them may still
+// inspect them. Empty content is never a result — no message, no identity.
+const LEGACY_NON_KNOWLEDGE_ROLES = new Set(['tool', 'system']);
+
+function isSearchEligible(msg, explicitRole) {
+    if (!msg || String(msg.content ?? '').trim() === '') return false;
+    if (explicitRole) return true; // role match already enforced while indexing
+    return !LEGACY_NON_KNOWLEDGE_ROLES.has(msg.role);
+}
+
+// Deterministic order for the flat index: newest first, chatId/idx as stable
+// tie-breaks. nDB find() order is HashMap order — identical queries would
+// otherwise return a different keyword result set run to run.
+function compareRecency(a, b) {
+    const ta = Date.parse(a.msg.createdAt);
+    const tb = Date.parse(b.msg.createdAt);
+    const va = Number.isNaN(ta) ? 0 : ta;
+    const vb = Number.isNaN(tb) ? 0 : tb;
+    if (va !== vb) return vb - va;
+    if (a.chatId !== b.chatId) return a.chatId < b.chatId ? -1 : 1;
+    return (a.idx ?? 0) - (b.idx ?? 0);
+}
+
 async function searchArchive(dbInstance, body, deps = {}) {
     const { db, embeddingsCol } = dbInstance;
     const { embedBatch, embedAvailable } = deps;
@@ -61,6 +86,7 @@ async function searchArchive(dbInstance, body, deps = {}) {
     const userSessions = db.find('_type', 'session');
     const convById = new Map();
     const msgIndex = []; // flat list of { chatId, idx, msg, session }
+    const explicitRole = filterRole && filterRole !== 'all' ? filterRole : null;
 
     for (const c of convs) {
         convById.set(c.id, c);
@@ -74,9 +100,14 @@ async function searchArchive(dbInstance, body, deps = {}) {
             }
             if (filterMode && filterMode !== 'all' && session?.mode && session.mode !== filterMode) continue;
             if (filterRole && filterRole !== 'all' && msg.role !== filterRole) continue;
+            // Eligibility applies to the index itself, so neither the semantic
+            // mapping nor the keyword fallback can resurrect an ineligible message
+            // (a legacy vector for a tool/empty message must not leak).
+            if (!isSearchEligible(msg, explicitRole)) continue;
             msgIndex.push({ chatId: c.id, idx: msg.idx, msg, session });
         }
     }
+    msgIndex.sort(compareRecency);
 
     const results = [];
     const seen = new Set();
@@ -88,7 +119,9 @@ async function searchArchive(dbInstance, body, deps = {}) {
 
             const vectorResults = await embeddingsCol.search({
                 vector: queryVector,
-                top_k: limit * 3
+                // nVDB reads `topK` — a snake_case `top_k` is ignored and falls
+                // back to its default 10 (proven: topK30 → 30 hits, top_k 30 → 10).
+                topK: limit * 3
             });
 
             for (const hit of vectorResults) {
@@ -153,6 +186,28 @@ async function searchArchive(dbInstance, body, deps = {}) {
         query,
         search_type: searchType,
         method: searchType === 'keyword' ? 'text' : searchType === 'hybrid' ? (results.some(r => r.score > 0) ? 'hybrid' : 'text') : (results.some(r => r.score > 0) ? 'semantic' : 'text-fallback')
+    };
+}
+
+// Tool-facing shape of a searchArchive result. messageId + idx are the message
+// identity: without them a content-free identity guess (which message was that?)
+// is the only option, and the 500-char excerpt is not an identity.
+function shapeSearchToolResult(data) {
+    return {
+        query: data.query,
+        method: data.method,
+        results: data.results.map(r => ({
+            score: r.score,
+            messageId: r.message?.id,
+            idx: r.message?.idx,
+            sessionId: r.session?.id,
+            sessionTitle: r.session?.title,
+            mode: r.session?.mode,
+            role: r.message?.role,
+            model: r.message?.model,
+            date: r.session?.createdAt || r.message?.createdAt,
+            content: r.message?.content?.slice(0, 500)
+        }))
     };
 }
 
@@ -286,7 +341,7 @@ const ARCHIVE_TOOL_DEFS = [
                 properties: {
                     query: { type: 'string', description: 'The search query' },
                     mode: { type: 'string', enum: ['direct', 'arena', 'all'], description: 'Filter by session type (default: all)' },
-                    role: { type: 'string', enum: ['user', 'assistant', 'tool', 'all'], description: 'Filter by message role (default: all). Use "user" to exclude tool output noise.' },
+                    role: { type: 'string', enum: ['user', 'assistant', 'tool', 'system', 'all'], description: 'Filter by message role (default: all — excludes tool and system noise; name "tool" or "system" explicitly to inspect those legacy messages, empty messages are never returned)' },
                     search_type: { type: 'string', enum: ['semantic', 'keyword', 'hybrid'], description: 'Search method (default: semantic)' },
                     limit: { type: 'number', description: 'Max results (default 10)' },
                     date_from: { type: 'string', description: 'ISO date — messages after this date' },
@@ -394,7 +449,7 @@ const ARCHIVE_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'chat_preview_show',
-            description: `${SERVER_EXEC_NOTE}\n\nQueue content or a file/URL for rendering in the chat's preview pane (a second rendering surface). Pass EXACTLY ONE of content (text to render, markdown or code) or url (a /storage/... path or absolute http(s) URL to fetch). URL mode is for existing text/Markdown/code files only: binary documents such as PDFs, images, and archives are rejected with an error; for rendered documents use raster page previews (PNG) instead. The preview renders CLIENT-side: this tool returns a confirmation and the user clicks "Show in preview" on the tool bubble to render it. Use content mode for generated work product (edits, diffs, code).`,
+            description: `${SERVER_EXEC_NOTE}\n\nQueue content or a file/URL for rendering in the chat's preview pane (a second rendering surface). Pass EXACTLY ONE of content (text to render, markdown or code) or url (a /storage/... path or absolute http(s) URL to fetch). URL mode is for existing text/Markdown/code files only: binary documents such as PDFs, images, and archives are rejected with an error; for rendered documents use raster page previews (PNG) instead. The preview renders CLIENT-side: this tool returns a confirmation and the user clicks "Show in preview" on the tool bubble to render it. Use content mode for generated work product (edits, diffs, code). Preview a file with its url (not its content) whenever it carries relative links — a blog draft links research notes as ../references/<slug>.md, and only a document with a location resolves them; such note links render as an in-pane dialog, all other links open in a new tab.`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -605,20 +660,7 @@ async function executeInternalTool(name, args, ctx) {
             return {
                 content: [{
                     type: 'text',
-                    text: JSON.stringify({
-                        query: data.query,
-                        method: data.method,
-                        results: data.results.map(r => ({
-                            score: r.score,
-                            sessionId: r.session?.id,
-                            sessionTitle: r.session?.title,
-                            mode: r.session?.mode,
-                            role: r.message?.role,
-                            model: r.message?.model,
-                            date: r.session?.createdAt || r.message?.createdAt,
-                            content: r.message?.content?.slice(0, 500)
-                        }))
-                    }, null, 2)
+                    text: JSON.stringify(shapeSearchToolResult(data), null, 2)
                 }]
             };
         }
@@ -1313,6 +1355,8 @@ function executePreviewState(args, { dbInstance, conversationId }) {
 module.exports = {
     init,
     searchArchive,
+    shapeSearchToolResult,
+    isSearchEligible,
     findReferences,
     getToolDefs,
     isInternalTool,

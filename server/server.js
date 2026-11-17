@@ -16,6 +16,7 @@ const mcpPool = require('./mcp-pool');
 const sttRelay = require('./stt-relay');
 const { decodePreviewText } = require('./preview-content');
 const {
+    isEmbeddableMessage,
     splitTextIntoChunks, minEmbedChunkCount, planEmbedBatches,
     embedVectorId, deleteEmbedVectors,
     EMBED_CHUNK_TOKENS: DEFAULT_EMBED_CHUNK_TOKENS,
@@ -410,7 +411,7 @@ function getOrLoadUserDb(dbPath) {
                 for (let idx = 0; idx < c.messages.length; idx++) {
                     const m = c.messages[idx];
                     if (!m.id) continue;
-                    if (m.role === 'tool') continue;
+                    if (!isEmbeddableMessage(m)) continue;
                     if (!embeddingsCol.get(m.id)) {
                         // Not in nVDB at all — re-embed regardless of prior status.
                         // 'failed' messages are retried too (gap filling): transient
@@ -992,7 +993,11 @@ function releaseEmbedSlot(instance) {
 
 async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _prevFails = 0) {
     // Skip embedding for tool responses (prevents indexing massive JSON loads or duplicated session exports)
-    if (msg.role === 'tool') {
+    // and for empty messages (a vector with no content can only return content-free hits).
+    if (!isEmbeddableMessage(msg)) {
+        if (msg.role !== 'tool') {
+            L().debug('Embed skipped (empty content)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
+        }
         return;
     }
 
