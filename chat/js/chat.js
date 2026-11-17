@@ -5832,6 +5832,7 @@ let chatTabList = null;          // nui-list element
 let chatListCategories = null;   // cached category signature for filter rebuild
 let chatListInitialized = false;
 let chatListDataSig = null;      // structural signature of the chat list data
+let chatListTimeSig = null;      // per-chat updatedAt signature (Modified-sort reactivity)
 let chatListSortCache = null;    // cached {index, direction} sort pref
 
 /**
@@ -6085,9 +6086,11 @@ async function renderHistoryList() {
     // make the scroll jump. Minor cost: "Recent" order refreshes on structural
     // changes rather than every chat touch.
     const sig = listData.map(c => `${c.id}|${c.title}|${c.category}|${c.messageCount}|${c.pinned}`).join('§');
+    const timeSig = listData.map(c => `${c.id}|${c.updatedAt}`).join('§');
 
     if (sig !== chatListDataSig) {
         chatListDataSig = sig;
+        chatListTimeSig = timeSig;
 
         // nui-list's sort() only re-applies when the sort column/direction CHANGED,
         // but every updateData() -> filter() rebuilds `filtered` from the unsorted
@@ -6110,7 +6113,27 @@ async function renderHistoryList() {
         }
 
         syncActiveChatSelection(); // scrolls the active chat into view
+    } else if (timeSig !== chatListTimeSig && chatTabList.currentSort?.prop === 'updatedAt') {
+        // Timestamp-only change (#66): under the Modified sort position IS a
+        // display field, so activity must re-order the list immediately. The
+        // data was already refreshed by the list event; re-apply the sort over
+        // it, keeping the viewport scroll (a bare rebuild resets it) and the
+        // active selection WITHOUT its scroll-into-view — a background chat's
+        // activity must never yank the sidebar to the active row.
+        chatListTimeSig = timeSig;
+        const vp = chatTabList.querySelector('.nui-list-viewport');
+        const scrollTop = vp ? vp.scrollTop : 0;
+        chatTabList.last_sort = undefined;
+        chatTabList.last_direction = undefined;
+        chatTabList.updateData(listData);
+        await restoreChatListSort(chatTabList);
+        if (vp) vp.scrollTop = scrollTop;
+        // Selection flags directly: setSelection() would scroll to the active
+        // row and fire a redundant selection event.
+        chatTabList.filtered.forEach(it => { it.selected = it.data?.id === currentChatId; });
+        chatTabList.update(true);
     } else {
+        chatListTimeSig = timeSig;
         // Data unchanged (e.g. user clicked an already-visible row): only the
         // active chat changed. nui-list's update() reuses element refs without
         // re-running the render fn, so null them to force a re-render that

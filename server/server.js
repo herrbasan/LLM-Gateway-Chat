@@ -506,6 +506,32 @@ function emitListEvent(userId, event, data) {
     listEvents.emit('event', { userId, event, data });
 }
 
+// Message activity (send append, assistant persist, tool hop, edit/delete)
+// changes a conversation's updatedAt/messageCount in the store but fired no
+// list event, so the sidebar's Modified sort (#66) stayed stale until an
+// unrelated metadata save happened to emit one. Tap the runner's event flow
+// here — broadcast() reaches it with zero attached views, so headless and
+// background conversations are covered — and debounce per USER: the client's
+// reaction is one refreshList() over all chats, so per-chat timers would only
+// multiply fetches. Leading edge lands the send's reposition instantly;
+// trailing catches the run's assistant persist.
+const ACTIVITY_EVENTS = new Set(['msg.user', 'msg.assistant', 'tool.end', 'msg.deleted']);
+const ACTIVITY_DEBOUNCE_MS = 750;
+const activityTimers = new Map();   // userId → { timer, chatId }
+function scheduleActivityListEvent(userId, chatId) {
+    const prev = activityTimers.get(userId);
+    if (prev) clearTimeout(prev.timer);
+    if (!prev) emitListEvent(userId, 'chat.updated', { id: chatId, activity: true });
+    activityTimers.set(userId, {
+        chatId,
+        timer: setTimeout(() => {
+            const cur = activityTimers.get(userId);
+            activityTimers.delete(userId);
+            if (cur) emitListEvent(userId, 'chat.updated', { id: cur.chatId, activity: true });
+        }, ACTIVITY_DEBOUNCE_MS)
+    });
+}
+
 const L = () => logger || { info() {}, warn() {}, error() {}, debug() {} };
 
 // ConversationRunner (PA-3) — server-side conversation sessions.
@@ -524,8 +550,10 @@ runner.init({
     // Multiplexing (issue #19): forward every runner event into the user-level
     // listEvents pipe as an `r.<event>` frame carrying chatId — one SSE per TAB
     // instead of one per open chat (browser HTTP/1.1 cap is ~6 conns per host).
-    emitUserEvent: (userId, chatId, event, data) =>
-        listEvents.emit('event', { userId, event: 'r.' + event, data: { chatId, ...data } })
+    emitUserEvent: (userId, chatId, event, data) => {
+        listEvents.emit('event', { userId, event: 'r.' + event, data: { chatId, ...data } });
+        if (ACTIVITY_EVENTS.has(event)) scheduleActivityListEvent(userId, chatId);
+    }
 });
 internalTools.init({ log: L, emitListEvent });
 require('./storage-tools').init({ log: L(), storageRoot: MCP_STORAGE_PATH });
