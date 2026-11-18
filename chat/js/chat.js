@@ -1983,24 +1983,17 @@ async function loadModels() {
     }
 }
 
-// One grouped item list shared by the sidebar selector and the new-chat setup
-// card (#60), so the two can never drift.
+// One flat, pretty-named item list shared by the sidebar selector and the
+// new-chat setup card (#60). `prettyName` is the model's human label from the
+// gateway; the id stays the value. No adapter groups: `owned_by` is the
+// adapter, not the provider — "Anthropic" mixed Kimi, DeepSeek and MiniMax.
 function buildModelSelectItems(chatModels) {
-    const items = [{ value: '', label: 'Select model...' }];
-    const byAdapter = new Map();
-    for (const model of chatModels) {
-        const adapter = model.owned_by || 'unknown';
-        if (!byAdapter.has(adapter)) byAdapter.set(adapter, []);
-        byAdapter.get(adapter).push(model);
-    }
-    for (const [adapter, adapterModels] of byAdapter) {
-        const adapterLabel = adapter.charAt(0).toUpperCase() + adapter.slice(1);
-        items.push({
-            group: adapterLabel,
-            options: adapterModels.map(model => ({ value: model.id, label: model.id }))
-        });
-    }
-    return items;
+    const sorted = [...chatModels].sort((a, b) =>
+        (a.prettyName || a.id).localeCompare(b.prettyName || b.id, undefined, { sensitivity: 'base' }));
+    return [
+        { value: '', label: 'Select model...' },
+        ...sorted.map(model => ({ value: model.id, label: model.prettyName || model.id }))
+    ];
 }
 
 async function populateModelSelect() {
@@ -2078,26 +2071,11 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
     
     select.innerHTML = '<option value="">Select model...</option>';
     
-    const byAdapter = new Map();
-    for (const model of chatModels) {
-        const adapter = model.owned_by || 'unknown';
-        if (!byAdapter.has(adapter)) byAdapter.set(adapter, []);
-        byAdapter.get(adapter).push(model);
-    }
-    
-    for (const [adapter, adapterModels] of byAdapter) {
-        const adapterLabel = adapter.charAt(0).toUpperCase() + adapter.slice(1);
-        const optgroup = document.createElement('optgroup');
-        optgroup.label = adapterLabel;
-        
-        for (const model of adapterModels) {
-            const option = document.createElement('option');
-            option.value = model.id;
-            option.textContent = model.id;
-            optgroup.appendChild(option);
-        }
-        
-        select.appendChild(optgroup);
+    for (const item of buildModelSelectItems(chatModels).slice(1)) {
+        const option = document.createElement('option');
+        option.value = item.value;
+        option.textContent = item.label;
+        select.appendChild(option);
     }
     
     // Select the model (default or first available)
