@@ -1983,17 +1983,60 @@ async function loadModels() {
     }
 }
 
-// One flat, pretty-named item list shared by the sidebar selector and the
-// new-chat setup card (#60). `prettyName` is the model's human label from the
-// gateway; the id stays the value. No adapter groups: `owned_by` is the
-// adapter, not the provider — "Anthropic" mixed Kimi, DeepSeek and MiniMax.
+// The gateway's model payload carries no provider: `owned_by` is the adapter
+// (openai / gemini / anthropic / responses), which is why grouping by it put
+// Kimi, DeepSeek and MiniMax under "Anthropic". Provider is derived from the
+// model family instead — `model.provider` wins the moment the gateway reports
+// one — and an unknown family lands in "Other" rather than a wrong group.
+const MODEL_PROVIDERS = [
+    [/^gemma/, 'Google'],
+    [/^gemini/, 'Google'],
+    [/^qwen/, 'Alibaba'],
+    [/^kimi/, 'Moonshot'],
+    [/^glm/, 'Z.ai'],
+    [/^deepseek/, 'DeepSeek'],
+    [/^minimax/, 'MiniMax'],
+    [/^gpt/, 'OpenAI'],
+    [/^claude/, 'Anthropic'],
+    [/^mistral/, 'Mistral'],
+    [/^grok/, 'xAI'],
+];
+
+function modelProvider(model) {
+    if (typeof model.provider === 'string' && model.provider) return model.provider;
+    const label = (model.prettyName || model.id || '').toLowerCase();
+    for (const [pattern, provider] of MODEL_PROVIDERS) {
+        if (pattern.test(label)) return provider;
+    }
+    return 'Other';
+}
+
+// Provider-grouped, pretty-named items shared by the sidebar selector and the
+// new-chat setup card (#60). `prettyName` is the human label from the gateway;
+// the id stays the value. Local models group under their real family — the
+// "(Local)" suffix in the label keeps the hosting machine visible.
 function buildModelSelectItems(chatModels) {
     const sorted = [...chatModels].sort((a, b) =>
         (a.prettyName || a.id).localeCompare(b.prettyName || b.id, undefined, { sensitivity: 'base' }));
-    return [
-        { value: '', label: 'Select model...' },
-        ...sorted.map(model => ({ value: model.id, label: model.prettyName || model.id }))
-    ];
+
+    const byProvider = new Map();
+    for (const model of sorted) {
+        const provider = modelProvider(model);
+        if (!byProvider.has(provider)) byProvider.set(provider, []);
+        byProvider.get(provider).push({ value: model.id, label: model.prettyName || model.id });
+    }
+
+    const items = [{ value: '', label: 'Select model...' }];
+    const providers = [...byProvider.keys()].sort((a, b) =>
+        a === 'Other' ? 1 : b === 'Other' ? -1 : a.localeCompare(b));
+    for (const provider of providers) {
+        items.push({ group: provider, options: byProvider.get(provider) });
+    }
+    return items;
+}
+
+function flattenModelItems(items) {
+    return items.flatMap(item => (item.group ? item.options : [item]));
 }
 
 async function populateModelSelect() {
@@ -2071,7 +2114,7 @@ function populateModelSelectFallback(chatModels, modelToSelect) {
     
     select.innerHTML = '<option value="">Select model...</option>';
     
-    for (const item of buildModelSelectItems(chatModels).slice(1)) {
+    for (const item of flattenModelItems(buildModelSelectItems(chatModels)).slice(1)) {
         const option = document.createElement('option');
         option.value = item.value;
         option.textContent = item.label;
@@ -5407,13 +5450,16 @@ function renderSetupCard(container) {
 
     // Escape closes the card while focus is inside it (never while the user is
     // typing in the composer — that listener is on the card, not the document).
+    // Capture phase, because an open dropdown closes itself on the same key and
+    // would otherwise leave nothing to detect: the list must not cancel the chat.
     card.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
+        if (document.querySelector('.nui-select-popup:popover-open')) return;
         e.stopPropagation();
         cancelDraftChat();
-    });
+    }, true);
 
-    // Grouped, adapter-labelled options — same list the sidebar renders.
+    // Provider-grouped, pretty-named options — the same list the sidebar renders.
     _syncDraftCardModelItems();
 
     modelSelect.addEventListener('nui-change', (e) => {
