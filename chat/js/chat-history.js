@@ -87,22 +87,27 @@ export class ChatHistory {
     // Conversation CRUD
     // ============================================
 
-    async create() {
+    // `opts` carries the confirmed settings of the new-chat setup card (#60):
+    // { title, model, systemPrompt, chunkTransform }. Everything is optional.
+    async create(opts = {}) {
+        const title = opts.title || 'New Chat';
         const id = 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         const conversation = {
             id,
-            title: 'New Chat',
+            title,
             createdAt: Date.now(),
             updatedAt: Date.now(),
             messageCount: 0,
-            model: '',
-            systemPrompt: '',
+            model: opts.model || '',
+            systemPrompt: opts.systemPrompt || '',
             category: '',
             summary: '',
             // Chunk dedup default-on for new chats (field-proven since
             // 2026-08-11). Per-chat toggle in chat options still overrides;
             // CONFIG.chunkTransformDefault === false restores opt-in.
-            chunkTransform: (window.CHAT_CONFIG || {}).chunkTransformDefault !== false
+            chunkTransform: opts.chunkTransform !== undefined
+                ? !!opts.chunkTransform
+                : (window.CHAT_CONFIG || {}).chunkTransformDefault !== false
         };
 
         this.conversations.unshift(conversation);
@@ -110,7 +115,12 @@ export class ChatHistory {
 
         if (USE_BACKEND && backendClient.user) {
             try {
-                const serverSession = await backendClient.createSession({ title: 'New Chat', chunkTransform: conversation.chunkTransform });
+                const serverSession = await backendClient.createSession({
+                    title,
+                    model: opts.model || null,
+                    systemPrompt: opts.systemPrompt || '',
+                    chunkTransform: conversation.chunkTransform
+                });
                 console.log('[ChatHistory] Backend session created:', serverSession.id, '(local was:', id, ')');
                 conversation.id = serverSession.id;
                 conversation.createdAt = (c => isNaN(c) ? Date.now() : c)(new Date(serverSession.createdAt).getTime());

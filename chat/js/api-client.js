@@ -190,6 +190,7 @@ export class BackendClient {
             title: params.title || 'New Chat',
             mode: params.mode || 'direct',
             model: params.model || null,
+            systemPrompt: params.systemPrompt || '',
             chunkTransform: params.chunkTransform === true
         });
     }

@@ -651,6 +651,50 @@ nui-code pre {
     color: var(--text-color-dim);
 }
 
+/* New-chat setup card (#60) — the inline empty state of a DRAFT conversation. */
+.chat-setup-card {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    width: min(34rem, 100%);
+    margin: 2rem auto;
+    padding: 1.5rem;
+    box-sizing: border-box;
+    background: var(--color-shade1);
+    border: thin solid var(--border-shade2);
+    border-radius: var(--border-radius2);
+}
+
+.chat-setup-card h2 {
+    margin: 0;
+    font-size: 1.15rem;
+    color: var(--text-color);
+}
+
+.chat-setup-hint {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-color-dim);
+}
+
+.chat-setup-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;
+}
+
+.chat-setup-label {
+    font-size: 0.8rem;
+    color: var(--text-color-dim);
+}
+
+.chat-setup-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
 .vs-stage {
     position: relative;
     width: 100%;

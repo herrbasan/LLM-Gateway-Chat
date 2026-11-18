@@ -110,6 +110,12 @@ let isStreaming = false;
 let currentExchangeId = null;
 let attachedImages = []; // Array of {dataUrl, name, type}
 
+// A new chat is a DRAFT until the user starts it (#60): nothing is written to
+// the database, so abandoning the setup card cannot leave an empty session
+// behind. The draft container is keyed by this sentinel instead of a chat id.
+const DRAFT_CHAT_ID = '__draft';
+let _draftMaterializing = false; // guards Start against a double click creating two sessions
+
 // TTS State — managed by NSpeechController (instantiated after DOM elements are bound)
 let tts = null;
 let ttsPlayer = null;
@@ -411,7 +417,12 @@ function _runnerUser(chatId, msg) {
     const exchange = messagesToExchanges([msg])[0];
     if (!exchange) return;
     conv.exchanges.push(exchange);
-    renderExchange(exchange, getOrCreateContainer(chatId));
+    const container = getOrCreateContainer(chatId);
+    // A snapshot that landed before this message rendered the empty state; the
+    // first real message retires it (#60 — the draft's card/welcome must not
+    // linger above the conversation once a send is in flight).
+    container.querySelector('.welcome-message, .chat-setup-card')?.remove();
+    renderExchange(exchange, container);
     _runnerStreaming(chatId).exchangeId = exchange.id;
 }
 
@@ -974,6 +985,10 @@ async function buildHistoricalDomForChat(conv, container) {
     if (conv.length === 0) {
         _vsShowBusy();
         _vsHideBusy();
+        if (container.dataset.chatId === DRAFT_CHAT_ID) {
+            renderSetupCard(container);
+            return;
+        }
         const welcome = document.createElement('div');
         welcome.className = 'welcome-message';
         const h2 = document.createElement('h2');
@@ -1517,17 +1532,18 @@ async function init() {
         const draft = sessionStorage.getItem('chat-draft');
         if (draft) elements.messageInput?.setMarkdown(draft);
     } catch { /* ignore — draft restore is best-effort */ }
-    // Get or create active conversation
-    let activeId = await chatHistory.getActiveId();
-    if (!activeId || !chatHistory.has(activeId)) {
-        activeId = await chatHistory.create();
+    // Open the last active conversation. A fresh account (or a stale id) gets a
+    // DRAFT setup card (#60) — no session is created before the first message.
+    const activeId = await chatHistory.getActiveId();
+    if (activeId && chatHistory.has(activeId)) {
+        currentChatId = activeId;
+        conversation = new Conversation(`chat-conversation-${currentChatId}`);
+
+        // Cache in activeConversations for multi-conversation support
+        activeConversations.set(currentChatId, conversation);
+    } else {
+        await startNewChat();
     }
-
-    currentChatId = activeId;
-    conversation = new Conversation(`chat-conversation-${currentChatId}`);
-
-    // Cache in activeConversations for multi-conversation support
-    activeConversations.set(currentChatId, conversation);
 
     // Apply default config values (needs history loaded first for async prefs)
     await applyDefaultConfig();
@@ -1612,7 +1628,13 @@ async function init() {
     // Create container for the initial chat and show it
     const initContainer = getOrCreateContainer(currentChatId);
     initContainer.style.display = 'flex'; // show the active chat
-    attachRunnerEvents(currentChatId);
+    if (currentChatId === DRAFT_CHAT_ID) {
+        // NUI is ready and models are loaded now — rebuild the card so its
+        // model selector carries the real list.
+        renderSetupCard(initContainer);
+    } else {
+        attachRunnerEvents(currentChatId);
+    }
     renderAssistantChrome(); // assistant mode persisted on this chat → overlay (tap-to-start)
 
     // Load MCP config from storage (servers still back vision/preview features)
@@ -1956,7 +1978,28 @@ async function loadModels() {
         if (elements.modelSelect.setItems) {
             elements.modelSelect.setItems([{ value: '', label: 'Failed to load models', disabled: true }]);
         }
+        _syncDraftCardModelItems();
     }
+}
+
+// One grouped item list shared by the sidebar selector and the new-chat setup
+// card (#60), so the two can never drift.
+function buildModelSelectItems(chatModels) {
+    const items = [{ value: '', label: 'Select model...' }];
+    const byAdapter = new Map();
+    for (const model of chatModels) {
+        const adapter = model.owned_by || 'unknown';
+        if (!byAdapter.has(adapter)) byAdapter.set(adapter, []);
+        byAdapter.get(adapter).push(model);
+    }
+    for (const [adapter, adapterModels] of byAdapter) {
+        const adapterLabel = adapter.charAt(0).toUpperCase() + adapter.slice(1);
+        items.push({
+            group: adapterLabel,
+            options: adapterModels.map(model => ({ value: model.id, label: model.id }))
+        });
+    }
+    return items;
 }
 
 async function populateModelSelect() {
@@ -1967,6 +2010,7 @@ async function populateModelSelect() {
         if (elements.modelSelect.setItems) {
             elements.modelSelect.setItems([{ value: '', label: 'No chat models available', disabled: true }]);
         }
+        _syncDraftCardModelItems();
         return;
     }
     
@@ -1998,28 +2042,7 @@ async function populateModelSelect() {
     }
 
     // Build items array for NUI setItems API
-    const items = [{ value: '', label: 'Select model...' }];
-    
-    // Group by adapter/provider
-    const byAdapter = new Map();
-    for (const model of chatModels) {
-        const adapter = model.owned_by || 'unknown';
-        if (!byAdapter.has(adapter)) byAdapter.set(adapter, []);
-        byAdapter.get(adapter).push(model);
-    }
-    
-    for (const [adapter, adapterModels] of byAdapter) {
-        const adapterLabel = adapter.charAt(0).toUpperCase() + adapter.slice(1);
-        const groupItems = adapterModels.map(model => ({
-            value: model.id,
-            label: model.id
-        }));
-        
-        items.push({
-            group: adapterLabel,
-            options: groupItems
-        });
-    }
+    const items = buildModelSelectItems(chatModels);
     
     // Use NUI API to update options
     if (elements.modelSelect.setItems) {
@@ -2042,6 +2065,9 @@ async function populateModelSelect() {
         console.warn('[Chat] NUI select not ready, using fallback');
         populateModelSelectFallback(chatModels, modelToSelect);
     }
+
+    // Keep an open setup card's selector on the same list + selection.
+    _syncDraftCardModelItems();
 }
 
 // Fallback for when NUI is not ready
@@ -3206,17 +3232,29 @@ async function sendMessage() {
     const editor = elements.messageInput;
     const content = editor?.getMarkdown().trim();
 
+    // Nothing to send — checked BEFORE a draft could be materialized, so an
+    // empty composer can never create a conversation.
+    if ((!content && attachedImages.length === 0)) return;
+
     // Use the DOM as ground truth — find the VISIBLE chat's ID.
     // currentChatId is a global that can be stale; the visible container
     // is what the user is actually looking at and typing into.
-    const sendChatId = getDisplayedChatId();
+    let sendChatId = getDisplayedChatId();
+    if (sendChatId === DRAFT_CHAT_ID) {
+        // A draft becomes a real conversation on its first send: the card's
+        // model/title/instructions are written, then the message lands on the
+        // new id. A null return means the card had no model to start with.
+        const materialized = await _materializeDraft();
+        if (!materialized) return;
+        sendChatId = materialized;
+    }
+
     const sendConv = activeConversations.get(sendChatId) || conversation;
     const sendModel = currentModel;
 
     console.log('%c✉️ SEND  %c→ %c' + sendChatId + ' %c(' + sendModel + ')',
         'font-weight:bold;color:#ffb74d', 'color:#aaa', 'color:#ffb74d', 'color:#666');
 
-    if ((!content && attachedImages.length === 0)) return;
     if (!sendModel) {
         nui.components.dialog.alert('Model Required', 'Please select a model first.');
         return;
@@ -3366,6 +3404,11 @@ function renderConversation() {
         // No virtual scroll to wait for — hide busy and show the welcome
         // message built with createElement (no innerHTML parser cost).
         _vsHideBusy();
+        if (currentChatId === DRAFT_CHAT_ID) {
+            renderSetupCard(container);
+            updateOverallContext();
+            return;
+        }
         const welcome = document.createElement('div');
         welcome.className = 'welcome-message';
         const h2 = document.createElement('h2');
@@ -5226,8 +5269,12 @@ async function startNewChat() {
     // Note: we do NOT abort background streams when starting a new chat.
     // Each chat's stream continues in its hidden containers.
 
-    const newChatId = await chatHistory.create();
-    currentChatId = newChatId;
+    // One draft at a time: a second New Chat click returns to the open card
+    // instead of stacking another (nothing exists server-side to duplicate).
+    if (currentChatId === DRAFT_CHAT_ID) {
+        _focusComposer();
+        return;
+    }
 
     // Restore last-used model — pref is kept current on every selection
     // (nui-change). Validate against the loaded list; fall back to first model
@@ -5244,26 +5291,226 @@ async function startNewChat() {
         if (select) select.value = restoreModel;
     }
 
-    // Cache the new conversation
-    conversation = new Conversation(`chat-conversation-${currentChatId}`);
-    activeConversations.set(currentChatId, conversation);
+    // Draft conversation cache + container. NO chatHistory.create() here: the
+    // session/conversation docs are written by _materializeDraft on Start (or
+    // on the first send), so an abandoned card leaves nothing behind.
+    currentChatId = DRAFT_CHAT_ID;
+    conversation = new Conversation(`chat-conversation-${DRAFT_CHAT_ID}`);
+    activeConversations.set(DRAFT_CHAT_ID, conversation);
 
-    // Create container for the new chat (hidden until shown)
-    const newContainer = getOrCreateContainer(currentChatId);
+    const draftContainer = getOrCreateContainer(DRAFT_CHAT_ID);
+    renderSetupCard(draftContainer);
 
-    // Toggle: show new chat, hide others
+    // Shared surfaces belong to the conversation that owns them.
+    preview.reset();
+    hostedApps.reset();
+    hostedApps.setConversation(DRAFT_CHAT_ID);
+
+    // Toggle: show the draft, hide others
     for (const [id, container] of chatContainers.entries()) {
-        container.style.display = id === currentChatId ? 'flex' : 'none';
+        container.style.display = id === DRAFT_CHAT_ID ? 'flex' : 'none';
     }
 
     renderHistoryList();
-    attachRunnerEvents(currentChatId); // snapshot (empty) shows the welcome
+    _focusComposer();
+}
 
-    // Auto-focus input
+function _focusComposer() {
     setTimeout(() => {
         const textarea = elements.messageInput?.querySelector('textarea');
         if (textarea) textarea.focus();
     }, 100);
+}
+
+// ============================================
+// New-chat setup card (issue #60)
+// ============================================
+//
+// The card is the empty state of a DRAFT conversation: inline (never a modal),
+// keyboard reachable, and the only place the new chat's model/title/
+// instructions are chosen. Everything it collects is written once, by
+// _materializeDraft, through the canonical POST /api/chats.
+
+function _setupField(labelText) {
+    const field = document.createElement('div');
+    field.className = 'chat-setup-field';
+    const label = document.createElement('span');
+    label.className = 'chat-setup-label';
+    label.textContent = labelText;
+    field.appendChild(label);
+    return field;
+}
+
+function renderSetupCard(container) {
+    const card = document.createElement('section');
+    card.className = 'chat-setup-card';
+    card.setAttribute('aria-label', 'New chat setup');
+
+    const h2 = document.createElement('h2');
+    h2.textContent = 'Start a new chat';
+    const hint = document.createElement('p');
+    hint.className = 'chat-setup-hint';
+    hint.textContent = 'Pick a model. Title and instructions are optional — you can also just type below.';
+
+    const modelField = _setupField('Model');
+    const modelSelect = document.createElement('nui-select');
+    modelSelect.id = 'setup-model';
+    modelSelect.setAttribute('searchable', '');
+    modelSelect.setAttribute('data-label', 'Select model...');
+    modelSelect.appendChild(document.createElement('select'));
+    modelField.appendChild(modelSelect);
+
+    const titleField = _setupField('Title');
+    const titleHost = document.createElement('nui-input');
+    titleHost.id = 'setup-title';
+    const titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.placeholder = 'New Chat';
+    titleInput.setAttribute('aria-label', 'Conversation title');
+    titleHost.appendChild(titleInput);
+    titleField.appendChild(titleHost);
+
+    const instructionsField = _setupField('Instructions');
+    const instructionsHost = document.createElement('nui-textarea');
+    instructionsHost.id = 'setup-instructions';
+    instructionsHost.setAttribute('auto-resize', '');
+    const instructionsInput = document.createElement('textarea');
+    instructionsInput.rows = 3;
+    instructionsInput.placeholder = 'Session instructions (optional)';
+    instructionsInput.setAttribute('aria-label', 'Session instructions');
+    instructionsHost.appendChild(instructionsInput);
+    instructionsField.appendChild(instructionsHost);
+
+    const actions = document.createElement('nui-button-container');
+    actions.className = 'chat-setup-actions';
+
+    const startWrap = document.createElement('nui-button');
+    startWrap.setAttribute('variant', 'primary');
+    const startBtn = document.createElement('button');
+    startBtn.type = 'button';
+    startBtn.textContent = 'Start chat';
+    startBtn.addEventListener('click', () => { startDraftChat(); });
+    startWrap.appendChild(startBtn);
+
+    const defaultsWrap = document.createElement('nui-button');
+    defaultsWrap.setAttribute('variant', 'ghost');
+    const defaultsBtn = document.createElement('button');
+    defaultsBtn.type = 'button';
+    defaultsBtn.textContent = 'Use defaults';
+    defaultsBtn.addEventListener('click', () => {
+        titleInput.value = '';
+        instructionsInput.value = '';
+        if (modelSelect.setValue) modelSelect.setValue(currentModel);
+        startDraftChat();
+    });
+    defaultsWrap.appendChild(defaultsBtn);
+
+    actions.append(startWrap, defaultsWrap);
+    card.append(h2, hint, modelField, titleField, instructionsField, actions);
+    container.replaceChildren(card);
+
+    // Grouped, adapter-labelled options — same list the sidebar renders.
+    _syncDraftCardModelItems();
+
+    modelSelect.addEventListener('nui-change', (e) => {
+        const value = (e.detail?.values?.[0]) || e.detail?.value || '';
+        if (!value) return;
+        currentModel = value;
+        storage.setPref('default-model', value).catch(() => {});
+        updateOverallContext();
+    });
+}
+
+function _syncDraftCardModelItems() {
+    const card = chatContainers.get(DRAFT_CHAT_ID)?.querySelector('.chat-setup-card');
+    const select = card?.querySelector('#setup-model');
+    if (!select || !select.setItems) return;
+    const chatModels = models.filter(m => m.type === 'chat' || !m.type);
+    if (chatModels.length === 0) {
+        select.setItems([{ value: '', label: 'No chat models available', disabled: true }]);
+        return;
+    }
+    select.setItems(buildModelSelectItems(chatModels));
+    select.setValue(chatModels.some(m => m.id === currentModel) ? currentModel : chatModels[0].id);
+}
+
+function _draftCardValues() {
+    const card = chatContainers.get(DRAFT_CHAT_ID)?.querySelector('.chat-setup-card');
+    if (!card) return { model: currentModel, title: '', systemPrompt: '' };
+    const modelEl = card.querySelector('#setup-model');
+    const model = ((modelEl?.getValue?.() || modelEl?.querySelector('select')?.value || currentModel) || '').trim();
+    const title = (card.querySelector('#setup-title input')?.value || '').trim();
+    const systemPrompt = (card.querySelector('#setup-instructions textarea')?.value || '').trim();
+    return { model, title, systemPrompt };
+}
+
+async function startDraftChat() {
+    if (!await _materializeDraft()) return;
+    _focusComposer();
+}
+
+/**
+ * Turns the draft into a real conversation: one POST /api/chats carrying the
+ * card's confirmed settings, then the draft container/maps are re-keyed to the
+ * server id. Returns the new chat id, or null when there is no model to start.
+ */
+async function _materializeDraft() {
+    if (currentChatId !== DRAFT_CHAT_ID) return currentChatId;
+    // A double click on Start (or Enter twice) must not create two sessions.
+    if (_draftMaterializing) return null;
+
+    const { model, title, systemPrompt } = _draftCardValues();
+    if (!model) {
+        nui.components.dialog.alert('Model Required', 'Please select a model first.');
+        return null;
+    }
+
+    _draftMaterializing = true;
+    try {
+        return await _materializeDraftSession({ model, title, systemPrompt });
+    } finally {
+        _draftMaterializing = false;
+    }
+}
+
+async function _materializeDraftSession({ model, title, systemPrompt }) {
+    const newChatId = await chatHistory.create({ title, model, systemPrompt });
+
+    const container = chatContainers.get(DRAFT_CHAT_ID);
+    const conv = activeConversations.get(DRAFT_CHAT_ID) || new Conversation(`chat-conversation-${newChatId}`);
+    chatContainers.delete(DRAFT_CHAT_ID);
+    activeConversations.delete(DRAFT_CHAT_ID);
+
+    if (container) {
+        container.dataset.chatId = newChatId;
+        container.replaceChildren(); // the card is gone before the snapshot lands
+        chatContainers.set(newChatId, container);
+    }
+    activeConversations.set(newChatId, conv);
+
+    conversation = conv;
+    currentChatId = newChatId;
+    currentModel = model;
+
+    storage.setActiveChatId(newChatId).catch(() => {});
+    if (elements.modelSelect?.setValue) elements.modelSelect.setValue(model);
+    restoreSystemPromptUI({ systemPrompt });
+    hostedApps.setConversation(newChatId);
+
+    attachRunnerEvents(newChatId); // snapshot (empty) renders the welcome
+    renderHistoryList();
+    return newChatId;
+}
+
+/**
+ * Drops an unstarted draft. Nothing was persisted, so there is nothing to undo
+ * server-side — this only discards the client-side container and caches.
+ */
+function _discardDraft() {
+    const container = chatContainers.get(DRAFT_CHAT_ID);
+    chatContainers.delete(DRAFT_CHAT_ID);
+    activeConversations.delete(DRAFT_CHAT_ID);
+    if (container) container.remove();
 }
 
 function restoreSystemPromptUI(chatInfo) {
@@ -5279,6 +5526,9 @@ function restoreSystemPromptUI(chatInfo) {
 }
 
 async function switchChat(targetChatId) {
+    // Leaving an unstarted draft discards it — nothing was created server-side.
+    if (currentChatId === DRAFT_CHAT_ID && targetChatId !== DRAFT_CHAT_ID) _discardDraft();
+
     // Capture the outgoing conversation before changing currentChatId.
     // We MUST set currentChatId BEFORE any await — otherwise sendMessage()
     // can fire during the yield point and capture the old chatId, sending
