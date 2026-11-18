@@ -1983,55 +1983,37 @@ async function loadModels() {
     }
 }
 
-// The gateway's model payload carries no provider: `owned_by` is the adapter
-// (openai / gemini / anthropic / responses), which is why grouping by it put
-// Kimi, DeepSeek and MiniMax under "Anthropic". Provider is derived from the
-// model family instead — `model.provider` wins the moment the gateway reports
-// one — and an unknown family lands in "Other" rather than a wrong group.
-const MODEL_PROVIDERS = [
-    [/^gemma/, 'Google'],
-    [/^gemini/, 'Google'],
-    [/^qwen/, 'Alibaba'],
-    [/^kimi/, 'Moonshot'],
-    [/^glm/, 'Z.ai'],
-    [/^deepseek/, 'DeepSeek'],
-    [/^minimax/, 'MiniMax'],
-    [/^gpt/, 'OpenAI'],
-    [/^claude/, 'Anthropic'],
-    [/^mistral/, 'Mistral'],
-    [/^grok/, 'xAI'],
-];
-
-function modelProvider(model) {
-    if (typeof model.provider === 'string' && model.provider) return model.provider;
-    const label = (model.prettyName || model.id || '').toLowerCase();
-    for (const [pattern, provider] of MODEL_PROVIDERS) {
-        if (pattern.test(label)) return provider;
-    }
-    return 'Other';
-}
-
 // Provider-grouped, pretty-named items shared by the sidebar selector and the
 // new-chat setup card (#60). `prettyName` is the human label from the gateway;
-// the id stays the value. Local models group under their real family — the
-// "(Local)" suffix in the label keeps the hosting machine visible.
+// the id stays the value.
+//
+// The provider comes from the gateway (`model.provider`) and is never derived
+// here: `owned_by` is the adapter, and a client-side family table would
+// silently misgroup the next model that does not match it. Models without a
+// provider stay ungrouped below the groups — so today the list is flat, and
+// grouping appears the moment the field ships.
 function buildModelSelectItems(chatModels) {
     const sorted = [...chatModels].sort((a, b) =>
         (a.prettyName || a.id).localeCompare(b.prettyName || b.id, undefined, { sensitivity: 'base' }));
 
-    const byProvider = new Map();
+    const groups = new Map();
+    const ungrouped = [];
     for (const model of sorted) {
-        const provider = modelProvider(model);
-        if (!byProvider.has(provider)) byProvider.set(provider, []);
-        byProvider.get(provider).push({ value: model.id, label: model.prettyName || model.id });
+        const entry = { value: model.id, label: model.prettyName || model.id };
+        const provider = typeof model.provider === 'string' ? model.provider.trim() : '';
+        if (!provider) {
+            ungrouped.push(entry);
+            continue;
+        }
+        if (!groups.has(provider)) groups.set(provider, []);
+        groups.get(provider).push(entry);
     }
 
     const items = [{ value: '', label: 'Select model...' }];
-    const providers = [...byProvider.keys()].sort((a, b) =>
-        a === 'Other' ? 1 : b === 'Other' ? -1 : a.localeCompare(b));
-    for (const provider of providers) {
-        items.push({ group: provider, options: byProvider.get(provider) });
+    for (const provider of [...groups.keys()].sort((a, b) => a.localeCompare(b))) {
+        items.push({ group: provider, options: groups.get(provider) });
     }
+    items.push(...ungrouped);
     return items;
 }
 
