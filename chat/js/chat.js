@@ -115,6 +115,7 @@ let attachedImages = []; // Array of {dataUrl, name, type}
 // behind. The draft container is keyed by this sentinel instead of a chat id.
 const DRAFT_CHAT_ID = '__draft';
 let _draftMaterializing = false; // guards Start against a double click creating two sessions
+let _draftReturnChatId = null;   // where Cancel goes back to (the chat New Chat was pressed from)
 
 // TTS State — managed by NSpeechController (instantiated after DOM elements are bound)
 let tts = null;
@@ -5291,6 +5292,12 @@ async function startNewChat() {
         if (select) select.value = restoreModel;
     }
 
+    // Cancel returns to the chat the user came from; with no prior chat the
+    // card has no way out and offers no Cancel action.
+    _draftReturnChatId = (currentChatId && currentChatId !== DRAFT_CHAT_ID && chatHistory.has(currentChatId))
+        ? currentChatId
+        : (chatHistory.getAll()[0]?.id || null);
+
     // Draft conversation cache + container. NO chatHistory.create() here: the
     // session/conversation docs are written by _materializeDraft on Start (or
     // on the first send), so an abandoned card leaves nothing behind.
@@ -5405,9 +5412,28 @@ function renderSetupCard(container) {
     });
     defaultsWrap.appendChild(defaultsBtn);
 
+    const cancelWrap = document.createElement('nui-button');
+    cancelWrap.setAttribute('variant', 'ghost');
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => { cancelDraftChat(); });
+    cancelWrap.appendChild(cancelBtn);
+
     actions.append(startWrap, defaultsWrap);
+    // Nothing to return to on a fresh account — the card is the only surface.
+    if (_draftReturnChatId && chatHistory.has(_draftReturnChatId)) actions.append(cancelWrap);
+
     card.append(h2, hint, modelField, titleField, instructionsField, actions);
     container.replaceChildren(card);
+
+    // Escape closes the card while focus is inside it (never while the user is
+    // typing in the composer — that listener is on the card, not the document).
+    card.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.stopPropagation();
+        cancelDraftChat();
+    });
 
     // Grouped, adapter-labelled options — same list the sidebar renders.
     _syncDraftCardModelItems();
@@ -5499,6 +5525,7 @@ async function _materializeDraftSession({ model, title, systemPrompt }) {
 
     attachRunnerEvents(newChatId); // snapshot (empty) renders the welcome
     renderHistoryList();
+    _draftReturnChatId = null;
     return newChatId;
 }
 
@@ -5511,6 +5538,21 @@ function _discardDraft() {
     chatContainers.delete(DRAFT_CHAT_ID);
     activeConversations.delete(DRAFT_CHAT_ID);
     if (container) container.remove();
+}
+
+/**
+ * Cancel/close for the setup card: return to the chat New Chat was pressed
+ * from (switchChat discards the draft on the way out). A fresh account has no
+ * conversation to return to, so the card simply stays.
+ */
+function cancelDraftChat() {
+    if (currentChatId !== DRAFT_CHAT_ID) return;
+    const target = (_draftReturnChatId && chatHistory.has(_draftReturnChatId))
+        ? _draftReturnChatId
+        : (chatHistory.getAll()[0]?.id || null);
+    if (!target) return;
+    _draftReturnChatId = null;
+    switchChat(target);
 }
 
 function restoreSystemPromptUI(chatInfo) {
