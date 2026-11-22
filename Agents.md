@@ -36,7 +36,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | Backend | Node.js raw `http` + hand-rolled router (`server/server.js`) — zero framework deps |
 | Structured DB | nDB (Rust JSON-Lines store, submodule `lib/ndb/`) |
 | Dead deps | `express` + `@seald-io/nedb` in package.json are never imported — remove in a cleanup pass |
-| Vector DB | nVDB (Rust, submodule `lib/nvdb/`) |
+| Vector DB | Shared `nvdb serve` v2 HTTP daemon (`http://127.0.0.1:3510`, `chat` collection, native per-user ACL + ONNX reranker) |
 | Embedding | Gateway `/v1/embeddings` (Qwen3-Embedding-4B, 2560d) |
 | Transport | SSE to gateway + same-origin REST/SSE to backend |
 | Logging | nLogger (JSON Lines) |
@@ -46,7 +46,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 ```
 ├── chat/            # Main SPA (index.html, css/, js/)
 ├── chat-arena/      # Arena mode (LLM-to-LLM autonomous conversations)
-├── lib/             # Submodules: nui_wc2, ndb, nvdb, nlogger; tts/
+├── lib/             # Submodules: nui_wc2, ndb, nlogger; tts/
 ├── server/          # Backend: server.js (router+routes), runner.js, arena-runner.js,
 │                    #   conversation-store.js, api-view.js, system-prompt.js, mcp-pool.js,
 │                    #   internal-tools.js, embed.js, stt-relay.js, config.json, migrations (historical)
@@ -141,7 +141,7 @@ Existing `/api/chats/*` CRUD (list/rename/pin/delete), `/api/search`, `/api/buck
 - One conversation document per session (`_type: 'conversation'`, inline `messages[]`).
 - Message **stored form**: `role`, `content`, timestamp prefix, attachments offloaded to `_file` nURIs, tool message shape (`toolName`/`toolArgs`/`toolStatus`/`toolImages`), assistant metadata (`reasoning_content`, `thinking_signature`, `streamStats`, `usage`, `context`), per-message `embedStatus`.
 - **nDB `find()` returns detached copies** — re-read at every use point, never cache across writes (`runner.refresh()`). Objects held across writes go stale.
-- Vectors in nVDB keyed by message ID, payload `{chatId, msgIdx}`. Users in `users_db` (scrypt-hashed, per-user `dbPath` isolation).
+- Search index in shared `nvdb serve` v2 (`chat` collection): chunk IDs `${userId}:${sessionId}:${msgIdx}#${chunkIdx}`, native ACL `["user:<userId>"]`, promoted `role`/`mode`/`session_id`/`msg_idx`, native `created_at` range, hybrid RRF + Level-2 ONNX rerank. Users in `users_db` (scrypt-hashed, per-user `dbPath` isolation).
 - **Message ordering is contractual:** the in-flight assistant message is persisted at its RESERVED position (`insertConversationMessageAt`, `atIdx` reserved at run start); queued sends append after it. Without this, an abort during a queued send produces an assistant-FINAL payload (providers treat as prefill; thinking-mode prefills 400).
 - Aborted runs persist **content only** — reasoning cut mid-stream is a malformed thinking block.
 

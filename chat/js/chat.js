@@ -576,9 +576,12 @@ function _runnerAssistant(chatId, msg) {
         }
     }
     if (s.el) {
+        if (msg.id) s.el.dataset.messageId = msg.id;
         // Authoritative timestamp: the persisted message's createdAt (view form).
         const tsSpan = s.el.querySelector('.message-header .message-timestamp');
         if (tsSpan && msg.timestamp) tsSpan.textContent = formatHeaderTimestamp(msg.timestamp);
+        const aEmbed = s.el.querySelector('.embed-status');
+        if (aEmbed) _applyEmbedStatusAttrs(aEmbed, msg.embedStatus || 'pending', msg.embedError || null);
         finalizeAssistantElement(s.el, s.exchangeId, msg.usage, msg.context, msg.streamStats, conv);
         forceFinalizeMarkdownStream(s.el, msg.content || '', msg.reasoning_content || null);
     }
@@ -687,7 +690,24 @@ function _runnerEmbed(chatId, d) {
     const conv = activeConversations.get(chatId);
     if (!conv) return;
     const ex = _findExchangeByMsgId(conv, d.messageId);
-    if (ex) setEmbedStatus(ex.id, d.status, d.embedError || null);
+    const role = ex && d.messageId && ex._userMsgId === d.messageId ? 'user' : 'assistant';
+    if (ex) {
+        if (role === 'user' && ex.user) {
+            ex.user.embedStatus = d.status;
+            ex.user.embedError = d.embedError || null;
+        } else if (role === 'assistant' && ex.assistant) {
+            ex.assistant.embedStatus = d.status;
+            ex.assistant.embedError = d.embedError || null;
+        }
+    }
+    const byMsgEl = d.messageId
+        ? document.querySelector(`.chat-message[data-message-id="${d.messageId}"] .embed-status`)
+        : null;
+    if (byMsgEl) {
+        _applyEmbedStatusAttrs(byMsgEl, d.status, d.embedError || null);
+    } else if (ex) {
+        setEmbedStatus(ex.id, d.status, d.embedError || null, role);
+    }
 }
 
 function _runnerResumeInflight(chatId, inFlight) {
@@ -1239,6 +1259,7 @@ function buildExchangeElement(exchange) {
             const tsMs = (vers.length > 0 && vers[exchange.assistant?.currentVersion || 0]?.timestamp) || exchange.timestamp || Date.now();
             const assistantTimestamp = assistantParsed.timestamp || new Date(tsMs).toISOString().slice(0,16).replace('T',' @ ');
             const assistantEl = createAssistantElement(exchange.id, assistantTimestamp, exchange.model);
+            if (exchange._asstMsgId) assistantEl.dataset.messageId = exchange._asstMsgId;
 
             const tsLen = exchange.assistant.content.length - assistantParsed.cleanContent.length;
             if (tsLen > 0) {
@@ -1246,6 +1267,8 @@ function buildExchangeElement(exchange) {
                 assistantEl.dataset.timestampStripped = 'true';
             }
             updateAssistantContent(assistantEl, assistantParsed.cleanContent, exchange.assistant.reasoning_content);
+            const aEmbed = assistantEl.querySelector('.embed-status');
+            if (aEmbed) _applyEmbedStatusAttrs(aEmbed, exchange.assistant.embedStatus || 'pending', exchange.assistant.embedError);
 
             if (exchange.assistant.isComplete) {
                 finalizeAssistantElement(assistantEl, exchange.id);
@@ -1279,6 +1302,7 @@ function buildExchangeElement(exchange) {
     const userEl = document.createElement('div');
     userEl.className = 'chat-message user';
     userEl.dataset.exchangeId = exchange.id;
+    if (exchange._userMsgId) userEl.dataset.messageId = exchange._userMsgId;
     userEl.innerHTML = `
         <div class="message-header">
             You <span class="message-timestamp">${userTimestamp}</span>
@@ -4107,6 +4131,7 @@ function renderExchange(exchange, targetContainer = null) {
     const userEl = document.createElement('div');
     userEl.className = 'chat-message user';
     userEl.dataset.exchangeId = exchange.id;
+    if (exchange._userMsgId) userEl.dataset.messageId = exchange._userMsgId;
 
     let userContent = renderMarkdown(userParsed.cleanContent);
 

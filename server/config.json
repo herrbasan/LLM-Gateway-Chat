@@ -12,6 +12,11 @@
     "embedChunkOverlapTokens": 128,
     "embedMaxInputTokens": 4000,
     "embedRequestTokenLimit": 4096,
+    "nvdbUrl": "http://127.0.0.1:3510",
+    "nvdbCollection": "chat",
+    "embedModelVersion": "qwen3-embedding-4b",
+    "queryInstruct": "Given a web search query, retrieve relevant passages that answer the query",
+    "relevanceFloor": 0.05,
     "users": [
         {
             "id": "admin-seed-user",

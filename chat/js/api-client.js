@@ -233,7 +233,7 @@ export class BackendClient {
         return this._request('POST', '/api/search', {
             query,
             mode: options.mode || 'all',
-            search_type: options.search_type || 'semantic',
+            search_type: options.search_type || 'hybrid',
             limit: options.limit || 10,
             date_from: options.date_from || null,
             date_to: options.date_to || null

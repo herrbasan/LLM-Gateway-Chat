@@ -18,7 +18,8 @@ const { normalizeAppEvent } = require('./hosted-apps');
 
 let DEPS = null;
 // deps = { gatewayUrl, gatewayKey, publicOrigin, embedMessageAsync, log, getInstructions, idleMs,
-//          embedBatch, getEmbedAvailable }
+//          embedBatch, getEmbedAvailable, getNvdbClient, nvdbCollection, getRerankerLoaded,
+//          queryInstruct, relevanceFloor }
 function init(deps) { DEPS = deps; }
 
 // Canonicalize storage URLs in message content (issue #36 architecture):
@@ -1275,7 +1276,16 @@ class Runner {
                 this.refresh();
                 return Array.isArray(this.conv?.messages) ? this.conv.messages : null;
             },
-            embedDeps: { embedBatch: DEPS.embedBatch, embedAvailable: DEPS.getEmbedAvailable ? DEPS.getEmbedAvailable() : true },
+            embedDeps: {
+                userId: this.user.id,
+                nvdbClient: DEPS.getNvdbClient ? DEPS.getNvdbClient() : this.dbInstance?.nvdbClient || null,
+                nvdbCollection: DEPS.nvdbCollection || this.dbInstance?.nvdbCollection || 'chat',
+                rerankerLoaded: DEPS.getRerankerLoaded ? DEPS.getRerankerLoaded() : false,
+                queryInstruct: DEPS.queryInstruct,
+                relevanceFloor: DEPS.relevanceFloor,
+                embedBatch: DEPS.embedBatch,
+                embedAvailable: DEPS.getEmbedAvailable ? DEPS.getEmbedAvailable() : true
+            },
             getRetirements: () => {
                 this.refresh();
                 return this.session.retirements || {};

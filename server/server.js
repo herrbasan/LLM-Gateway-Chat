@@ -7,7 +7,6 @@ const { Readable } = require('stream');
 const { EventEmitter } = require('events');
 
 const { Database: nDB } = require('../lib/ndb/napi');
-const { Database: nVDB } = require('../lib/nvdb/napi');
 const nLogger = require('../lib/nlogger-cjs');
 const convStore = require('./conversation-store');
 const runner = require('./runner');
@@ -17,14 +16,27 @@ const sttRelay = require('./stt-relay');
 const { decodePreviewText } = require('./preview-content');
 const {
     isEmbeddableMessage,
-    splitTextIntoChunks, minEmbedChunkCount, planEmbedBatches,
-    embedVectorId, deleteEmbedVectors,
+    splitTextIntoChunks, planEmbedBatches,
     EMBED_CHUNK_TOKENS: DEFAULT_EMBED_CHUNK_TOKENS,
     EMBED_CHUNK_OVERLAP_TOKENS: DEFAULT_EMBED_CHUNK_OVERLAP_TOKENS,
     EMBED_MAX_INPUT_TOKENS: DEFAULT_EMBED_MAX_INPUT_TOKENS,
     EMBED_REQUEST_TOKENS: DEFAULT_EMBED_REQUEST_TOKENS,
     EMBED_MAX_CONCURRENCY
 } = require('./embed');
+const { createV2Client, NvdbHttpError } = require('./nvdb-v2-client');
+const { documentHashes } = require('./nvdb-v2-hash');
+const {
+    DEFAULT_QUERY_INSTRUCT,
+    DEFAULT_RELEVANCE_FLOOR,
+    DEFAULT_MODEL_VERSION,
+    chatCollectionConfig,
+    chatChunkId,
+    buildMessageV2Docs,
+    buildChatVectorInput,
+    collectMessageChunkIds,
+    buildUserExpectedDocs,
+    parseChatChunkId
+} = require('./nvdb-chat');
 
 // Load minimal .env natively
 try {
@@ -69,6 +81,20 @@ const EMBED_CHUNK_OVERLAP_TOKENS = _overlapCfg === undefined || _overlapCfg === 
 const EMBED_MAX_INPUT_TOKENS = Math.min(Math.max(EMBED_CHUNK_TOKENS, parseInt(process.env.CHAT_EMBED_MAX_INPUT_TOKENS || cfg.embedMaxInputTokens) || DEFAULT_EMBED_MAX_INPUT_TOKENS), 32768);
 const EMBED_REQUEST_TOKENS = Math.min(Math.max(EMBED_MAX_INPUT_TOKENS, parseInt(process.env.CHAT_EMBED_REQUEST_TOKENS || cfg.embedRequestTokenLimit) || DEFAULT_EMBED_REQUEST_TOKENS), 8192);
 const EMBED_TOK_RATIO  = parseFloat(process.env.CHAT_EMBED_TOK_RATIO || cfg.embedTokRatio) || 2.5;
+// nVDB v2 lives in ONE shared collection served by `nvdb serve` (HTTP), keyed
+// per user by the chunk-id prefix — not one embedded index per user DB.
+const NVDB_URL = process.env.CHAT_NVDB_URL || cfg.nvdbUrl || 'http://127.0.0.1:3510';
+const NVDB_COLLECTION = process.env.CHAT_NVDB_COLLECTION || cfg.nvdbCollection || 'chat';
+const EMBED_MODEL_VERSION = process.env.CHAT_EMBED_MODEL_VERSION || cfg.embedModelVersion || DEFAULT_MODEL_VERSION;
+const QUERY_INSTRUCT = process.env.CHAT_QUERY_INSTRUCT ?? cfg.queryInstruct ?? DEFAULT_QUERY_INSTRUCT;
+const RELEVANCE_FLOOR = Number(process.env.CHAT_RELEVANCE_FLOOR ?? cfg.relevanceFloor ?? DEFAULT_RELEVANCE_FLOOR);
+// The writer and the integrity sweep must chunk identically, or every restart
+// would rewrite every document.
+const NVDB_CHUNK_OPTS = {
+    chunkTokens: EMBED_CHUNK_TOKENS,
+    overlapTokens: EMBED_CHUNK_OVERLAP_TOKENS,
+    tokRatio: EMBED_TOK_RATIO
+};
 const FILES_DIR       = process.env.CHAT_FILES_DIR     || cfg.filesDir           || path.join(path.dirname(path.resolve(USERS_DB_PATH)), 'files');
 // Workshop MCP server — backend-configured like gateway/TTS. The pool falls
 // back to this when a user has no own mcp-servers entry (the normal case).
@@ -129,11 +155,15 @@ async function fetchPrimeDirective() {
 let usersDb = null;
 let logger = null;
 
-// Registry of loaded user databases (dbPath -> { db, vdb, embeddingsCol, ready, needsFlush, pendingQueue })
+// Registry of loaded user databases (dbPath -> { db, nvdbClient, pendingQueue, … })
 const activeDbs = new Map();
+// Shared nVDB v2 client + the reranker state probed at startup. Both are set
+// once by initNvdb() before the listener opens, so nothing reads them early.
+let nvdbClient = null;
+let nvdbRerankerLoaded = false;
 let modelsProxyCache = null; // { at, data } — 60 s cache for GET /api/models
 
-(async () => {
+async function startBackend() {
 console.time('nLogger.init');
 logger = await nLogger.init({ logsDir: path.resolve(LOGS_DIR), sessionPrefix: 'chat' });
 console.timeEnd('nLogger.init');
@@ -305,9 +335,9 @@ setInterval(async () => {
         } catch (err) {}
     }
 
-    // 2. Iterate each mounted database instance for pending embeds and flushing
+    // 2. Iterate each mounted database instance for pending embeds
     for (const [dbPath, instance] of activeDbs.entries()) {
-        if (!instance.embeddingsCol) continue;
+        if (!instance.nvdbClient) continue;
 
         if (instance.pendingQueue.length > 0 && embedAvailable) {
             // Find the first item ready for retry (skip items in backoff)
@@ -325,29 +355,20 @@ setInterval(async () => {
                 embedMessageAsync(instance, item.msg, item.session, item.convNdbId, item.msgIdx, item.failCount || 0).catch(() => {});
             }
         }
-
-        if (instance.needsFlush > 0) {
-            try {
-                const t0 = Date.now();
-                instance.embeddingsCol.flush();
-                logger.info('nVDB flushed', { dbPath, docs: instance.needsFlush, ms: Date.now() - t0 }, 'Embed');
-                instance.needsFlush = 0;
-            } catch (err) {
-                logger.error('nVDB flush failed', err, { dbPath }, 'Embed');
-            }
-        }
     }
 }, 5000);
 
-})();
+}
 
 // ============================================
 // Database Instantiation (Lazy Mounting Engine)
 // ============================================
 
-function getOrLoadUserDb(dbPath) {
+function getOrLoadUserDb(dbPath, userId = null) {
     if (activeDbs.has(dbPath)) {
-        return activeDbs.get(dbPath);
+        const existing = activeDbs.get(dbPath);
+        existing.userId = existing.userId || userId || null;
+        return existing;
     }
     
     // We arrive here and must block initially for nDB.open
@@ -357,8 +378,6 @@ function getOrLoadUserDb(dbPath) {
     if (!fs.existsSync(absDbPath)) fs.mkdirSync(absDbPath, { recursive: true });
     
     const ndbPath = path.join(absDbPath, 'data.jsonl');
-    const nvdbDir = path.join(absDbPath, 'nvdb');
-    if (!fs.existsSync(nvdbDir)) fs.mkdirSync(nvdbDir, { recursive: true });
     
     console.time(`nDB.open:${dbPath}`);
     const db = nDB.open(ndbPath, {
@@ -367,130 +386,209 @@ function getOrLoadUserDb(dbPath) {
     });
     console.timeEnd(`nDB.open:${dbPath}`);
     
-    let vdb, embeddingsCol;
-    try {
-        vdb = new nVDB(nvdbDir);
-        const collections = vdb.listCollections();
-        if (collections.includes('embeddings')) {
-            embeddingsCol = vdb.getCollection('embeddings');
-        } else {
-            logger.info('Creating nVDB embeddings collection', { dbPath, dims: EMBEDDING_DIMS }, 'Server');
-            embeddingsCol = vdb.createCollection('embeddings', EMBEDDING_DIMS);
-        }
-        logger.info('nVDB collection ready for user', { dbPath }, 'Server');
-    } catch (err) {
-        logger.warn('nVDB failed init for user', { dbPath, error: err.message, stack: err.stack }, 'Server');
-    }
-    
+    // nVDB v2 is ONE shared HTTP collection for every user — the instance carries
+    // the client, collection and chunk contract so writers never reach for a
+    // module global (tests mount instances without one).
     const instance = {
         dbPath,
+        userId: userId || null,
         db,
-        vdb,
-        embeddingsCol,
+        nvdbClient,
+        nvdbCollection: NVDB_COLLECTION,
+        nvdbChunkOpts: NVDB_CHUNK_OPTS,
         pendingQueue: [],
-        needsFlush: 0,
         embedInFlight: 0,
-        embedWaiters: []
+        embedWaiters: [],
+        drainRunning: false
     };
     
     activeDbs.set(dbPath, instance);
     
-    // Reconcile pending embeddings on mount after a tiny delay
-    if (embeddingsCol) {
-        setTimeout(() => {
-            try { embeddingsCol.flush(); } catch(e){}
-            
-            const sessions = {};
-            for (const s of db.find('_type', 'session')) sessions[s.id] = s;
-            const stale = [];
-            const missingStatus = {}; // convNdbId -> [{ idx, chunks }] needing a status backfill
-            let upgrading = 0;
-            for (const c of db.find('_type', 'conversation')) {
-                if (!c.messages) continue;
-                const missing = [];
-                for (let idx = 0; idx < c.messages.length; idx++) {
-                    const m = c.messages[idx];
-                    if (!m.id) continue;
-                    if (!isEmbeddableMessage(m)) continue;
-                    if (!embeddingsCol.get(m.id)) {
-                        // Not in nVDB at all — re-embed regardless of prior status.
-                        // 'failed' messages are retried too (gap filling): transient
-                        // provider failures must not become permanent holes.
-                        stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-                    } else if (m.embedChunks) {
-                        // Vector(s) present and the chunk count is recorded: healthy,
-                        // unless a previous status write was lost.
-                        if (m.embedStatus !== 'embedded') missing.push({ idx, chunks: m.embedChunks });
-                    } else {
-                        // A vector is present but predates chunking: the old pipeline
-                        // kept one whole-document vector per message and
-                        // middle-truncated anything past 25k tokens, so long content
-                        // is only partly indexed. Re-embed it in chunks.
-                        const need = minEmbedChunkCount(
-                            buildEmbedText(m, sessions[c.id] || {}, idx),
-                            { chunkTokens: EMBED_CHUNK_TOKENS, tokRatio: EMBED_TOK_RATIO }
-                        );
-                        if (need > 1) {
-                            upgrading++;
-                            stale.push({ msg: m, session: sessions[c.id] || {}, convNdbId: c._id, idx });
-                        } else {
-                            missing.push({ idx, chunks: 1 });
-                        }
-                    }
-                }
-                if (missing.length > 0) missingStatus[c._id] = missing;
-            }
-            if (stale.length > 0) {
-                logger.info('Lazy reconciliation', { count: stale.length, upgradingLegacyVectors: upgrading, dbPath }, 'Server');
-                (async () => {
-                    let succeeded = 0;
-                    let failed = 0;
-                    let retriedLater = 0;
-                    const t0 = Date.now();
-                    let gapMs = 500;
-                    for (let i = 0; i < stale.length; i++) {
-                        const { msg, session, convNdbId, idx } = stale[i];
-                        try {
-                            await embedMessageAsync(instance, msg, session, convNdbId, idx);
-                            succeeded++;
-                        } catch (err) {
-                            // embedMessageAsync already retried internally and re-queued
-                            // transient failures into pendingQueue. Permanent failures
-                            // return without throwing, so a throw here means the message
-                            // was re-queued for the background drain — count it separately.
-                            retriedLater++;
-                            logger.warn('Reconciliation item deferred', { msgId: msg.id, kind: err.kind, error: err.message }, 'Embed');
-                        }
-                        await new Promise(r => setTimeout(r, gapMs));
-                        gapMs = Math.max(gapMs * 0.95, 200);
-                        if ((i + 1) % 50 === 0 || i === stale.length - 1) {
-                            const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-                            const done = i + 1;
-                            const remaining = stale.length - done;
-                            const rate = elapsed > 0 ? (done / (Date.now() - t0) * 60000).toFixed(1) : '0';
-                            logger.info('Reconciliation progress', { done, total: stale.length, succeeded, failed, retriedLater, remaining, elapsedSec: elapsed, ratePerMin: rate, dbPath }, 'Server');
-                        }
-                    }
-                    const totalSec = ((Date.now() - t0) / 1000).toFixed(1);
-                    logger.info('Reconciliation complete', { total: stale.length, succeeded, failed, retriedLater, elapsedSec: totalSec, dbPath }, 'Server');
-                })();
-            }
-            if (Object.keys(missingStatus).length > 0) {
-                let count = 0;
-                for (const [convNdbId, entries] of Object.entries(missingStatus)) {
-                    for (const { idx, chunks } of entries) {
-                        db.set(convNdbId, `messages.${idx}.embedStatus`, 'embedded');
-                        db.set(convNdbId, `messages.${idx}.embedChunks`, chunks);
-                        db.set(convNdbId, `messages.${idx}.embedError`, null);
-                        count++;
-                    }
-                }
-                logger.info('Embed status backfilled', { count, dbPath }, 'Server');
-            }
-        }, 3000);
+    // Reconcile this user's slice of the shared collection after mount: the
+    // envelope fingerprint sweep repairs lexical state, then the drain attaches
+    // whatever vectors nVDB is still missing (herrbasan/nVDB#3 keeps them queued).
+    if (instance.nvdbClient && instance.userId) {
+        setTimeout(() => reconcileUserNvdb(instance).catch(err => {
+            logger.error('nVDB reconciliation failed', err, { dbPath, userId: instance.userId }, 'Server');
+        }), 3000);
     }
     
     return instance;
+}
+
+// Attach a batch of vectors, treating a stale CAS as "a newer edit won" rather
+// than an outage: the newer document keeps its vectors, this batch is dropped and
+// the next reconciliation pass decides what is still missing. Returns false when
+// the batch was skipped — the caller must then stop draining, because those ids
+// would stay pending and the loop would spin.
+async function attachVectorsQuietly(instance, attachments) {
+    try {
+        await instance.nvdbClient.attachVectors(instance.nvdbCollection, attachments);
+        return true;
+    } catch (err) {
+        if (err instanceof NvdbHttpError && err.status === 409 && err.code === 'stale_vector_cas') {
+            L().debug('nVDB attach skipped: stale_vector_cas', { ids: attachments.length, dbPath: instance.dbPath }, 'Embed');
+            return false;
+        }
+        throw err;
+    }
+}
+
+// Startup reconciliation for one user: (A) envelope-fingerprint diff between the
+// stored conversations and this user's slice of the collection, then (B) the
+// async pending_embeddings drain. nVDB is shared by every local account, so both
+// steps are scoped by the user's chunk-id prefix.
+async function reconcileUserNvdb(instance) {
+    const { nvdbClient: client, userId } = instance;
+    if (!client || !userId) return;
+    const collection = instance.nvdbCollection;
+    const prefix = `${userId}:`;
+
+    // A — lexical truth. Fingerprints carry the envelope hash nVDB last wrote;
+    // a mismatch (or absence) means the document must be rewritten.
+    const fp = await client.fingerprints(collection);
+    const existing = new Map();
+    for (const entry of fp?.entries || []) {
+        if (typeof entry?.id === 'string' && entry.id.startsWith(prefix)) existing.set(entry.id, entry);
+    }
+
+    const { byId } = buildUserExpectedDocs({ userId, db: instance.db, chunkOpts: NVDB_CHUNK_OPTS });
+
+    const toUpsert = [];
+    for (const [id, rec] of byId) {
+        const known = existing.get(id);
+        if (!known || known.envelope_hash !== rec.envelope_hash) toUpsert.push(rec.doc);
+    }
+    const toDelete = [];
+    for (const id of existing.keys()) {
+        if (!byId.has(id)) toDelete.push(id);
+    }
+
+    const BATCH = 200;
+    let upserted = 0;
+    let deleted = 0;
+    for (let i = 0; i < toUpsert.length; i += BATCH) {
+        const chunk = toUpsert.slice(i, i + BATCH);
+        await client.upsert(collection, chunk, { commit: false });
+        upserted += chunk.length;
+    }
+    for (let i = 0; i < toDelete.length; i += BATCH) {
+        const chunk = toDelete.slice(i, i + BATCH);
+        await client.deleteIds(collection, chunk, { commit: false });
+        deleted += chunk.length;
+    }
+    if (upserted > 0 || deleted > 0) await client.commit(collection);
+    logger.info('nVDB reconciled', { userId, dbPath: instance.dbPath, upserted, deleted, unchanged: byId.size - upserted }, 'Server');
+
+    // B — vector drain. Everything nVDB queued for this user's chunk ids gets
+    // embedded in slices of 8 (one embed slot per slice, so interactive search
+    // keeps its turn) and attached in one batch of up to 256.
+    if (instance.drainRunning) return;
+    instance.drainRunning = true;
+    try {
+        const expectedChunks = new Map();
+        const attachedCounts = new Map();
+        for (const [id, rec] of byId) {
+            const key = `${rec.session.id}\u0000${rec.msgIdx}`;
+            const cur = expectedChunks.get(key);
+            if (cur) cur.count++;
+            else expectedChunks.set(key, { count: 1, convNdbId: rec.convNdbId, msgId: rec.msg?.id || null, sessionId: rec.session.id, msgIdx: rec.msgIdx });
+            const known = existing.get(id);
+            if (known && known.has_vector === true && known.envelope_hash === rec.envelope_hash) {
+                attachedCounts.set(key, (attachedCounts.get(key) || 0) + 1);
+            }
+        }
+        let lastPendingKey = null;
+
+        for (;;) {
+            if (!embedAvailable) break;
+            const res = await client.pendingEmbeddings(collection, 256);
+            const pending = Array.isArray(res?.pending) ? res.pending : [];
+            // Only this user's items, and only those whose stored text still matches.
+            const work = [];
+            for (const item of pending) {
+                const rec = byId.get(item?.id);
+                if (!rec) continue;
+                if (item.content_hash && item.content_hash !== rec.content_hash) continue;
+                work.push({ id: item.id, content_hash: rec.content_hash, doc: rec.doc });
+            }
+            if (work.length === 0) break;
+            // A batch the service keeps re-reporting never drains (it rejected
+            // some ids) — stop instead of spinning on it.
+            const pendingKey = work.map(w => w.id).join(',');
+            if (pendingKey === lastPendingKey) {
+                logger.warn('nVDB drain made no progress — stopping', { userId, pending: work.length }, 'Embed');
+                break;
+            }
+            lastPendingKey = pendingKey;
+
+            const attachments = [];
+            for (let i = 0; i < work.length; i += 8) {
+                const slice = work.slice(i, i + 8);
+                await acquireEmbedSlot(instance);
+                let vectors;
+                try {
+                    vectors = await embedBatch(slice.map(w => buildChatVectorInput(w.doc)));
+                } finally {
+                    releaseEmbedSlot(instance);
+                }
+                for (let j = 0; j < slice.length; j++) {
+                    const vector = vectors[j];
+                    if (!Array.isArray(vector) || vector.length !== EMBEDDING_DIMS) {
+                        throw new EmbedError('response', `invalid_vector_shape (${slice[j].id})`);
+                    }
+                    attachments.push({
+                        id: slice[j].id,
+                        content_hash: slice[j].content_hash,
+                        model_version: EMBED_MODEL_VERSION,
+                        vector
+                    });
+                }
+                if (attachments.length >= 256) {
+                    if (!(await attachVectorsQuietly(instance, attachments))) return;
+                    countAttached(attachments, attachedCounts);
+                    attachments.length = 0;
+                }
+            }
+            if (attachments.length > 0) {
+                if (!(await attachVectorsQuietly(instance, attachments))) return;
+                countAttached(attachments, attachedCounts);
+            }
+        }
+
+        // A message is only 'embedded' once every one of its chunks has a vector.
+        // Skip writes when nDB already matches so a clean mount stays write-free.
+        const convCache = new Map();
+        let marked = 0;
+        for (const [key, info] of expectedChunks) {
+            if ((attachedCounts.get(key) || 0) < info.count) continue;
+            if (!info.convNdbId || !info.msgId) continue;
+            let conv = convCache.get(info.sessionId);
+            if (conv === undefined) {
+                conv = instance.db.find('id', info.sessionId).find(d => d._type === 'conversation') || null;
+                convCache.set(info.sessionId, conv);
+            }
+            const stored = conv?.messages?.[info.msgIdx];
+            if (!stored || stored.id !== info.msgId) continue;
+            if (stored.embedStatus === 'embedded' && stored.embedChunks === info.count && !stored.embedError) continue;
+            instance.db.set(info.convNdbId, `messages.${info.msgIdx}.embedStatus`, 'embedded');
+            instance.db.set(info.convNdbId, `messages.${info.msgIdx}.embedChunks`, info.count);
+            instance.db.set(info.convNdbId, `messages.${info.msgIdx}.embedError`, null);
+            marked++;
+        }
+        if (marked > 0) logger.info('nVDB reconciliation marked messages embedded', { userId, marked }, 'Embed');
+    } finally {
+        instance.drainRunning = false;
+    }
+}
+
+function countAttached(attachments, counts) {
+    for (const att of attachments) {
+        const parsed = parseChatChunkId(att.id, undefined);
+        if (!parsed) continue;
+        const key = `${parsed.sessionId}\u0000${parsed.msgIdx}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+    }
 }
 
 // Embed event bus — SSE clients subscribe to receive real-time embed status updates
@@ -547,6 +645,11 @@ runner.init({
     idleMs: 10 * 60 * 1000,
     embedBatch,
     getEmbedAvailable: () => embedAvailable,
+    getNvdbClient: () => nvdbClient,
+    nvdbCollection: NVDB_COLLECTION,
+    getRerankerLoaded: () => nvdbRerankerLoaded,
+    queryInstruct: QUERY_INSTRUCT,
+    relevanceFloor: RELEVANCE_FLOOR,
     // Multiplexing (issue #19): forward every runner event into the user-level
     // listEvents pipe as an `r.<event>` frame carrying chatId — one SSE per TAB
     // instead of one per open chat (browser HTTP/1.1 cap is ~6 conns per host).
@@ -637,7 +740,7 @@ function requireAuth(req, res) {
         return null;
     }
     
-    const dbInstance = getOrLoadUserDb(user.dbPath);
+    const dbInstance = getOrLoadUserDb(user.dbPath, user.id);
     return { user, dbInstance };
 }
 
@@ -974,33 +1077,6 @@ async function embedBatch(texts) {
     return sorted.map(d => d.embedding);
 }
 
-function buildEmbedText(msg, session, msgIdx = -1) {
-    const parts = [];
-    if (session.mode === 'arena') {
-        parts.push(`[Arena: ${(session.title || '').slice(0, 60)}]`);
-        if (msg.speaker) parts.push(`[${msg.speaker}]`);
-    } else {
-        parts.push(`[Chat: ${(session.title || '').slice(0, 60)}]`);
-        parts.push(`[${msg.role}]`);
-    }
-    if (msg.model) parts.push(`[${msg.model}]`);
-    // For the first message of a session, prepend any user-authored summary
-    // (title/teaser/reflection) so semantic search can surface the chat by
-    // themes that may be only loosely represented in the message text itself.
-    if (msgIdx === 0 && session.summary) {
-        const s = session.summary;
-        const summaryBits = [];
-        if (s.title) summaryBits.push(s.title);
-        if (s.teaser) summaryBits.push(s.teaser);
-        if (s.reflection) summaryBits.push(s.reflection);
-        if (summaryBits.length > 0) {
-            parts.push(`[Summary: ${summaryBits.join(' ').slice(0, 800)}]`);
-        }
-    }
-    parts.push(msg.content || '');
-    return parts.join(' ');
-}
-
 // Per-DB gate on embedding requests. The box serves ONE embedding slot, so
 // unbounded fan-out (arena turns, bursts of appended messages) only deepens its
 // queue and starves interactive search. The slot is handed straight to the next
@@ -1020,8 +1096,8 @@ function releaseEmbedSlot(instance) {
 }
 
 async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _prevFails = 0) {
-    // Skip embedding for tool responses (prevents indexing massive JSON loads or duplicated session exports)
-    // and for empty messages (a vector with no content can only return content-free hits).
+    // Skip tool responses (massive JSON loads, duplicated session exports) and
+    // empty messages (a vector with no content can only return content-free hits).
     if (!isEmbeddableMessage(msg)) {
         if (msg.role !== 'tool') {
             L().debug('Embed skipped (empty content)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
@@ -1029,130 +1105,150 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         return;
     }
 
-    if (!instance.embeddingsCol) {
+    if (!instance.nvdbClient || !instance.userId) {
         if (msg.embedStatus === 'pending') {
-            L().info('Embed skipped (nVDB unavailable)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
+            L().info('Embed skipped (nVDB v2 unavailable or userId unknown)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
         }
         return;
     }
 
-    if (!embedAvailable) {
-        if (instance.pendingQueue.length < 500) {
-            instance.pendingQueue.push({ msg, session, convNdbId, msgIdx, failCount: _prevFails, nextRetryAt: 0 });
-        } else {
-            L().warn('Embed queue full — message dropped', { msgId: msg.id, role: msg.role, queueLen: instance.pendingQueue.length, dbPath: instance.dbPath }, 'Embed');
+    const chunkOpts = { ...NVDB_CHUNK_OPTS };
+    let docs = buildMessageV2Docs({ userId: instance.userId, session, msg, msgIdx, chunkOpts });
+    if (docs.length === 0) return;
+
+    // Lexical first: upserting the documents makes the message findable the
+    // moment it is written — a queued or failing vector can no longer hide it
+    // from keyword search.
+    const upsertDocs = async () => {
+        await instance.nvdbClient.upsert(NVDB_COLLECTION, docs, { commit: true });
+        const prevChunks = Math.max(0, Number(msg.embedChunks) || 0);
+        if (prevChunks > docs.length) {
+            const shrunk = [];
+            for (let i = docs.length; i <= prevChunks; i++) shrunk.push(chatChunkId(instance.userId, session.id, msgIdx, i));
+            await instance.nvdbClient.deleteIds(NVDB_COLLECTION, shrunk, { commit: true });
         }
-        throw new Error('Embedding endpoint unavailable — queued for retry');
+    };
+    try {
+        await upsertDocs();
+    } catch (err) {
+        // nVDB itself is the failing dependency here — retry the whole message
+        // (lexical + vector) on the same backoff schedule as an embed failure.
+        L().error('nVDB lexical upsert failed', err, { msgId: msg.id, chatId: session.id, idx: msgIdx }, 'Embed');
+        queueEmbedRetry(instance, { msg, session, convNdbId, msgIdx }, _prevFails);
+        throw err;
     }
 
-    // Chunk small: the box's prefill cost is quadratic in input length, so one
-    // whole-message request runs for minutes and queues every interactive lookup
-    // behind it, while the same text as ~1k-token chunks finishes in seconds.
-    const rawText = buildEmbedText(msg, session, msgIdx);
-    const chunkOpts = { chunkTokens: EMBED_CHUNK_TOKENS, tokRatio: EMBED_TOK_RATIO, overlapTokens: EMBED_CHUNK_OVERLAP_TOKENS };
-    let chunks = splitTextIntoChunks(rawText, chunkOpts);
-    let batches = planEmbedBatches(chunks, { maxRequestTokens: EMBED_REQUEST_TOKENS });
-
-    if (chunks.length > 1) {
-        L().info('Message chunked for embedding', { msgId: msg.id, role: msg.role, charLen: rawText.length, chunks: chunks.length, requests: batches.length }, 'Embed');
+    if (!embedAvailable) {
+        queueEmbedRetry(instance, { msg, session, convNdbId, msgIdx }, _prevFails);
+        throw new Error('Embedding endpoint unavailable — queued for retry');
     }
 
     let lastError = null;
 
-    await acquireEmbedSlot(instance);
-    try {
-        for (let attempt = 0; attempt < 3; attempt++) {
-            let inserted = 0;
-            try {
-                for (const batch of batches) {
-                    const vectors = await embedBatch(batch.map(c => c.text));
-                    for (let j = 0; j < batch.length; j++) {
-                        const vector = vectors[j];
-                        if (!Array.isArray(vector) || vector.length === 0 || vector.length !== EMBEDDING_DIMS) {
-                            throw new EmbedError('response', 'invalid_vector_shape');
-                        }
-                        instance.embeddingsCol.insert(embedVectorId(msg.id, batch[j].splitIdx), vector, JSON.stringify({
-                            chatId: session.id, msgIdx, chunk: batch[j].splitIdx
-                        }));
-                        inserted++;
-                    }
-                    instance.needsFlush += batch.length;
-                }
-
-                // Drop chunks left over from a longer previous version of this text
-                // (indices at and beyond the new count): a shortened message must not
-                // leave an orphan vector behind.
-                for (let i = chunks.length; i <= chunks.length + 1; i++) {
-                    try { instance.embeddingsCol.delete(embedVectorId(msg.id, i)); } catch (e) {}
-                }
-
-                // Mark message as embedded in the conversation doc (atomic field writes — no read-modify-write race)
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const attachments = [];
+            for (let i = 0; i < docs.length; i += 8) {
+                const slice = docs.slice(i, i + 8);
+                // One slot per slice: a long message must not hold the box while
+                // an interactive search waits behind it.
+                await acquireEmbedSlot(instance);
+                let vectors;
                 try {
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'embedded');
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedChunks`, chunks.length);
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedAttempts`, attempt + 1);
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, null);
-                    embedEvents.emit('status', {
-                        chatId: session.id, msgIdx, messageId: msg.id,
-                        embedStatus: 'embedded', embedError: null
-                    });
-                } catch (e) {
-                    L().error('Failed to persist embed status', e, { msgId: msg.id, convNdbId }, 'Embed');
+                    vectors = await embedBatch(slice.map(d => buildChatVectorInput(d)));
+                } finally {
+                    releaseEmbedSlot(instance);
                 }
-
-                L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, textLen: rawText.length, chunks: chunks.length, requests: batches.length, attempt: attempt + 1 }, 'Embed');
-                return;
-            } catch (err) {
-                lastError = err;
-
-                // Never leave a half-embedded message behind: a partial chunk set is
-                // invisible to the "is a vector present?" health check, which would
-                // then treat the message as complete.
-                if (inserted > 0) {
-                    instance.needsFlush += deleteEmbedVectors(instance.embeddingsCol, msg.id, inserted, null);
-                }
-
-                // Permanent payload problems — retrying cannot help
-                const isTokenOverflow = err.message?.includes('too many') && err.message?.includes('token');
-                const isClientError = err.kind === 'client';
-
-                // A token-ratio miss means the estimate under-counted this text: split
-                // it finer and go again rather than declaring the message unembeddable.
-                if (isTokenOverflow && attempt < 2) {
-                    chunkOpts.chunkTokens = Math.max(64, Math.floor(chunkOpts.chunkTokens / 2));
-                    chunks = splitTextIntoChunks(rawText, chunkOpts);
-                    batches = planEmbedBatches(chunks, { maxRequestTokens: EMBED_REQUEST_TOKENS });
-                    L().warn('Embed input overflowed — re-splitting smaller', { msgId: msg.id, chunkTokens: chunkOpts.chunkTokens, chunks: chunks.length }, 'Embed');
-                    continue;
-                }
-
-                if (isTokenOverflow || isClientError) {
-                    const reason = isTokenOverflow ? 'too_many_tokens' : (err.message || 'client_error');
-                    L().error('Embed permanent failure', err, { msgId: msg.id, kind: err.kind, charLen: rawText.length }, 'Embed');
-                    try {
-                        instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
-                        instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, reason);
-                        embedEvents.emit('status', {
-                            chatId: session.id, msgIdx, messageId: msg.id,
-                            embedStatus: 'failed', embedError: reason
-                        });
-                    } catch (e) {
-                        L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
+                for (let j = 0; j < slice.length; j++) {
+                    const vector = vectors[j];
+                    if (!Array.isArray(vector) || vector.length === 0 || vector.length !== EMBEDDING_DIMS) {
+                        throw new EmbedError('response', 'invalid_vector_shape');
                     }
-                    // Do NOT re-queue — this is a content problem, not a transient one
-                    return;
-                }
-
-                // Transient — back off before next attempt. Honor Retry-After if given.
-                if (attempt < 2) {
-                    const retryAfter = err.retryAfterMs || 0;
-                    const delay = Math.max(Math.pow(4, attempt) * 1000, retryAfter);
-                    await new Promise(r => setTimeout(r, delay));
+                    attachments.push({
+                        id: slice[j].id,
+                        content_hash: documentHashes(slice[j]).content_hash,
+                        model_version: EMBED_MODEL_VERSION,
+                        vector
+                    });
                 }
             }
+
+            try {
+                await instance.nvdbClient.attachVectors(NVDB_COLLECTION, attachments);
+            } catch (err) {
+                // A newer edit re-wrote these documents while we were embedding:
+                // its vectors and content win, so this stale batch is dropped.
+                if (err instanceof NvdbHttpError && err.status === 409 && err.code === 'stale_vector_cas') {
+                    L().debug('Embed superseded (stale_vector_cas)', { msgId: msg.id, chatId: session.id, idx: msgIdx, chunks: docs.length }, 'Embed');
+                    return;
+                }
+                throw err;
+            }
+
+            // Mark message as embedded in the conversation doc (atomic field writes — no read-modify-write race)
+            try {
+                instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'embedded');
+                instance.db.set(convNdbId, `messages.${msgIdx}.embedChunks`, docs.length);
+                instance.db.set(convNdbId, `messages.${msgIdx}.embedAttempts`, attempt + 1);
+                instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, null);
+                embedEvents.emit('status', {
+                    chatId: session.id, msgIdx, messageId: msg.id,
+                    embedStatus: 'embedded', embedError: null
+                });
+            } catch (e) {
+                L().error('Failed to persist embed status', e, { msgId: msg.id, convNdbId }, 'Embed');
+            }
+
+            L().info('Embedded', { msgId: msg.id, role: msg.role, chatId: session.id, idx: msgIdx, charLen: String(msg.content ?? '').length, chunks: docs.length, attempt: attempt + 1 }, 'Embed');
+            return;
+        } catch (err) {
+            lastError = err;
+
+            // Permanent payload problems — retrying cannot help
+            const isTokenOverflow = err.message?.includes('too many') && err.message?.includes('token');
+            const isClientError = err.kind === 'client';
+
+            // A token-ratio miss means the estimate under-counted this text: split
+            // it finer and rewrite the documents rather than declaring the message
+            // unembeddable.
+            if (isTokenOverflow && attempt < 2) {
+                chunkOpts.chunkTokens = Math.max(64, Math.floor(chunkOpts.chunkTokens / 2));
+                docs = buildMessageV2Docs({ userId: instance.userId, session, msg, msgIdx, chunkOpts });
+                try {
+                    await upsertDocs();
+                } catch (redoErr) {
+                    L().error('nVDB lexical re-upsert failed', redoErr, { msgId: msg.id, chatId: session.id, idx: msgIdx }, 'Embed');
+                    queueEmbedRetry(instance, { msg, session, convNdbId, msgIdx }, _prevFails);
+                    throw redoErr;
+                }
+                L().warn('Embed input overflowed — re-splitting smaller', { msgId: msg.id, chunkTokens: chunkOpts.chunkTokens, chunks: docs.length }, 'Embed');
+                continue;
+            }
+
+            if (isTokenOverflow || isClientError) {
+                const reason = isTokenOverflow ? 'too_many_tokens' : (err.message || 'client_error');
+                L().error('Embed permanent failure', err, { msgId: msg.id, kind: err.kind }, 'Embed');
+                try {
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
+                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, reason);
+                    embedEvents.emit('status', {
+                        chatId: session.id, msgIdx, messageId: msg.id,
+                        embedStatus: 'failed', embedError: reason
+                    });
+                } catch (e) {
+                    L().error('Failed to persist embed failure status', e, { msgId: msg.id }, 'Embed');
+                }
+                // Do NOT re-queue — this is a content problem, not a transient one
+                return;
+            }
+
+            // Transient — back off before next attempt. Honor Retry-After if given.
+            if (attempt < 2) {
+                const retryAfter = err.retryAfterMs || 0;
+                const delay = Math.max(Math.pow(4, attempt) * 1000, retryAfter);
+                await new Promise(r => setTimeout(r, delay));
+            }
         }
-    } finally {
-        releaseEmbedSlot(instance);
     }
 
     // Transient failure after all retries — re-queue for the background drain loop.
@@ -1163,16 +1259,22 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         embedStatus: 'pending', embedError: lastError?.message || 'unknown'
     });
 
-    const delays = [5000, 30000, 120000, 600000, 1800000];
-    const newFailCount = _prevFails + 1;
-    const delay = delays[Math.min(newFailCount - 1, delays.length - 1)];
-    instance.pendingQueue.push({
-        msg, session, convNdbId, msgIdx,
-        failCount: newFailCount,
-        nextRetryAt: Date.now() + delay
-    });
-    L().info('Embed re-queued with backoff', { msgId: msg.id, failCount: newFailCount, delayMs: delay, nextRetry: new Date(Date.now() + delay).toISOString() }, 'Embed');
+    queueEmbedRetry(instance, { msg, session, convNdbId, msgIdx }, _prevFails);
     throw lastError;
+}
+
+// Backoff schedule for a transient embed failure (or an nVDB outage). The item is
+// picked up by the 5-second drain once its time comes.
+function queueEmbedRetry(instance, item, prevFails) {
+    if (instance.pendingQueue.length >= 500) {
+        L().warn('Embed queue full — message dropped', { msgId: item.msg?.id, role: item.msg?.role, queueLen: instance.pendingQueue.length, dbPath: instance.dbPath }, 'Embed');
+        return;
+    }
+    const delays = [5000, 30000, 120000, 600000, 1800000];
+    const failCount = prevFails + 1;
+    const delay = delays[Math.min(failCount - 1, delays.length - 1)];
+    instance.pendingQueue.push({ ...item, failCount, nextRetryAt: Date.now() + delay });
+    L().info('Embed re-queued with backoff', { msgId: item.msg?.id, failCount, delayMs: delay, nextRetry: new Date(Date.now() + delay).toISOString() }, 'Embed');
 }
 
 
@@ -1548,7 +1650,7 @@ const routes = {
     usersDb.set(user._id, 'lastAccess', now);
     
     // Check if user requires initialization of settings in their chat db
-    const dbInstance = getOrLoadUserDb(user.dbPath);
+    const dbInstance = getOrLoadUserDb(user.dbPath, user.id);
     let settings = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
     if (!settings) {
         dbInstance.db.insert({
@@ -2263,17 +2365,19 @@ const routes = {
     db.delete(session._id);
     const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
     
-    // Extract file references for garbage collection
+    // Extract file references for garbage collection + the nVDB chunk ids this
+    // conversation owns (a shared collection, so nothing removes them implicitly).
     const fileRefsToRelease = [];
+    const idsToDelete = [];
     
     for (const c of convs) {
         if (c.messages) {
+          c.messages.forEach((m, idx) => {
+            if (m.id) idsToDelete.push(...collectMessageChunkIds(user.id, params.id, m, m.idx ?? idx, NVDB_CHUNK_OPTS));
+          });
           for (const m of c.messages) {
-            if (dbInstance.embeddingsCol && m.id) {
-              try { dbInstance.needsFlush += deleteEmbedVectors(dbInstance.embeddingsCol, m.id, m.embedChunks, L()); } catch(e) {}
-            }
-          if (m.attachments) {
-            for (const att of m.attachments) {
+            if (m.attachments) {
+              for (const att of m.attachments) {
                 if (att._file) {
                   fileRefsToRelease.push(att._file);
                 } else {
@@ -2292,6 +2396,10 @@ const routes = {
           }
         }
         db.delete(c._id);
+      }
+
+      if (idsToDelete.length > 0 && dbInstance.nvdbClient) {
+        await dbInstance.nvdbClient.deleteIds(NVDB_COLLECTION, idsToDelete, { commit: true });
       }
       
       const messages = db.find('sessionId', params.id);
@@ -2320,7 +2428,17 @@ const routes = {
 
     const body = await readBody(req);
     // Single implementation: shared with the runner's chat_archive_search (PB-b).
-    const data = await internalTools.searchArchive(dbInstance, body, { embedBatch, embedAvailable, log: L() });
+    const data = await internalTools.searchArchive(dbInstance, body, {
+      userId: user.id,
+      nvdbClient,
+      nvdbCollection: NVDB_COLLECTION,
+      rerankerLoaded: nvdbRerankerLoaded,
+      queryInstruct: QUERY_INSTRUCT,
+      relevanceFloor: RELEVANCE_FLOOR,
+      embedBatch,
+      embedAvailable,
+      log: L()
+    });
     json(res, data, 200, req);
   },
 
@@ -2624,12 +2742,40 @@ const server = http.createServer(async (req, res) => {
 // First-ever upgrade handling on this server — see stt-relay.js for the splice.
 server.on('upgrade', (req, socket, head) => stt.handleUpgrade(req, socket, head));
 
-// Start HTTP server
-server.listen(PORT, () => {
-  if (logger) {
-      logger.info('Chat Backend running', { port: PORT }, 'Server');
-      logger.info('Health endpoint', { url: `http://localhost:${PORT}/health` }, 'Server');
-  } else {
-      console.log(`Chat Backend running on port ${PORT}`);
-  }
-});
+// nVDB v2 is a hard dependency: a missing index or a missing reranker degrades
+// every search to noise, so startup fails loud instead of listening anyway.
+async function initNvdb() {
+    nvdbClient = createV2Client(NVDB_URL, { timeoutMs: 30_000 });
+    const nvdbHealth = await nvdbClient.health();
+    if (!nvdbHealth?.ok) {
+        throw new Error(`nvdb serve unhealthy at ${NVDB_URL}: ${JSON.stringify(nvdbHealth)}`);
+    }
+    if (!nvdbHealth.reranker_loaded) {
+        throw new Error(`nvdb serve at ${NVDB_URL} has reranker_loaded=false — start with --reranker-model`);
+    }
+    nvdbRerankerLoaded = true;
+    await nvdbClient.createCollection(NVDB_COLLECTION, chatCollectionConfig({
+        embedDims: EMBEDDING_DIMS,
+        embedModelVersion: EMBED_MODEL_VERSION
+    }));
+    L().info('nVDB v2 connected', { url: NVDB_URL, collection: NVDB_COLLECTION, rerankerLoaded: nvdbRerankerLoaded }, 'Server');
+}
+
+// Start HTTP server — only once users_db is open and nVDB v2 answered.
+startBackend()
+  .then(() => initNvdb())
+  .then(() => {
+    server.listen(PORT, () => {
+      if (logger) {
+          logger.info('Chat Backend running', { port: PORT }, 'Server');
+          logger.info('Health endpoint', { url: `http://localhost:${PORT}/health` }, 'Server');
+      } else {
+          console.log(`Chat Backend running on port ${PORT}`);
+      }
+    });
+  })
+  .catch(err => {
+    logger?.error('FATAL: nVDB v2 startup failed', err, { url: NVDB_URL, collection: NVDB_COLLECTION }, 'Server');
+    console.error(err);
+    process.exit(1);
+  });

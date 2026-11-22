@@ -15,6 +15,16 @@ const retireView = require('./retire-view');
 const { formatMessageTs } = require('./api-view');
 const { preflightPreviewUrl } = require('./preview-content');
 const { openHostedApp } = require('./hosted-apps');
+const { resolveSearchOptions, describeSearchOptions } = require('./nvdb-search-options');
+const {
+    DEFAULT_QUERY_INSTRUCT,
+    DEFAULT_RELEVANCE_FLOOR,
+    userPrincipal,
+    normalizeMode,
+    toUnixSeconds,
+    formatQueryForEmbedding,
+    parseChatChunkId
+} = require('./nvdb-chat');
 
 let LOG = { info() {}, warn() {}, error() {}, debug() {} };
 // List-event emitter (issue #33): metadata mutations broadcast chat.updated so
@@ -37,9 +47,26 @@ function init({ log, emitListEvent }) {
 }
 
 // ============================================
-// Archive search — extracted from the /api/search route (byte-faithful port).
-// deps = { embedBatch, embedAvailable }
+// Archive search — nVDB v2 (native BM25 + dense RRF + level-2 rerank).
+// deps = { embedBatch, embedAvailable, nvdbClient?, nvdbCollection?, userId?,
+//          rerankerLoaded?, queryInstruct?, relevanceFloor? }
 // ============================================
+
+const HYBRID_DEFAULTS = {
+    enabled: true,
+    adaptive: true,
+    rrfK: 20,
+    candidateK: 200,
+    lexicalWeight: 0.3,
+    vectorWeight: 1.0,
+    maxPerDocument: 2
+};
+
+const RERANK_DEFAULTS = {
+    enabled: true,
+    shortlist: 20,
+    weight: 0.2
+};
 
 // Knowledge-role default: an unfiltered search is a knowledge search, so the
 // legacy tool/system transcripts (some of them indexed before the tool-skip rule
@@ -53,131 +80,215 @@ function isSearchEligible(msg, explicitRole) {
     return !LEGACY_NON_KNOWLEDGE_ROLES.has(msg.role);
 }
 
-// Deterministic order for the flat index: newest first, chatId/idx as stable
-// tie-breaks. nDB find() order is HashMap order — identical queries would
-// otherwise return a different keyword result set run to run.
-function compareRecency(a, b) {
-    const ta = Date.parse(a.msg.createdAt);
-    const tb = Date.parse(b.msg.createdAt);
-    const va = Number.isNaN(ta) ? 0 : ta;
-    const vb = Number.isNaN(tb) ? 0 : tb;
-    if (va !== vb) return vb - va;
-    if (a.chatId !== b.chatId) return a.chatId < b.chatId ? -1 : 1;
-    return (a.idx ?? 0) - (b.idx ?? 0);
-}
-
 async function searchArchive(dbInstance, body, deps = {}) {
-    const { db, embeddingsCol } = dbInstance;
-    const { embedBatch, embedAvailable } = deps;
+    const { db } = dbInstance;
 
     const query = (body.query || '').trim();
-    const limit = body.limit || 10;
-    const filterMode = body.mode || body.filter?.mode;
-    const filterRole = body.role || body.filter?.role;
-    const searchType = body.search_type || 'semantic';
+    const limit = Math.max(1, Number(body.limit) || 10);
+    const filterMode = body.mode || body.filter?.mode || null;
+    const filterRole = body.role || body.filter?.role || null;
+    const searchType = body.search_type || 'hybrid';
     const dateFrom = body.date_from || null;
     const dateTo = body.date_to || null;
+    const searchOverrides = body.search || null;
 
     LOG.info('Search request', { query: query.slice(0, 50), role: filterRole, type: searchType, mode: filterMode }, 'Search');
 
-    if (!query) return { results: [], query, search_type: searchType, method: 'text' };
+    if (!query) return { results: [], query, search_type: searchType, method: searchType };
 
-    const convs = db.find('_type', 'conversation');
-    const userSessions = db.find('_type', 'session');
-    const convById = new Map();
-    const msgIndex = []; // flat list of { chatId, idx, msg, session }
-    const explicitRole = filterRole && filterRole !== 'all' ? filterRole : null;
+    const nvdbClient = deps.nvdbClient || dbInstance.nvdbClient;
+    const collection = deps.nvdbCollection || dbInstance.nvdbCollection || 'chat';
+    const userId = deps.userId || dbInstance.userId;
+    const rerankerLoaded = deps.rerankerLoaded !== undefined ? Boolean(deps.rerankerLoaded) : Boolean(dbInstance.rerankerLoaded);
+    const queryInstruct = deps.queryInstruct !== undefined ? deps.queryInstruct : DEFAULT_QUERY_INSTRUCT;
+    const relevanceFloor = deps.relevanceFloor !== undefined ? Number(deps.relevanceFloor) : DEFAULT_RELEVANCE_FLOOR;
+    const embedBatch = deps.embedBatch;
+    const embedAvailable = deps.embedAvailable !== false;
 
-    for (const c of convs) {
-        convById.set(c.id, c);
-        const session = userSessions.find(s => s.id === c.id);
-        if (!c.messages) continue;
-        for (const msg of c.messages) {
-            if (dateFrom || dateTo) {
-                const d = new Date(msg.createdAt);
-                if (dateFrom && d < new Date(dateFrom)) continue;
-                if (dateTo && d > new Date(dateTo)) continue;
+    if (!nvdbClient) throw new Error('searchArchive: nvdbClient is required');
+    const principals = [userPrincipal(userId)];
+
+    let baseSwitches;
+    let degradedMethod = null;
+    if (searchType === 'hybrid') {
+        baseSwitches = { dense: true, lexical: true, rerank: rerankerLoaded };
+        if (!embedAvailable || !embedBatch) {
+            LOG.warn('Hybrid search degraded to lexical-only: embedding unavailable', { query: query.slice(0, 50) }, 'Search');
+            baseSwitches = { dense: false, lexical: true, rerank: false };
+            degradedMethod = 'keyword-fallback';
+        }
+    } else if (searchType === 'semantic') {
+        if (!embedAvailable || !embedBatch) throw new Error('Semantic search unavailable: embedding endpoint is down');
+        baseSwitches = { dense: true, lexical: false, rerank: false };
+    } else if (searchType === 'keyword') {
+        baseSwitches = { dense: false, lexical: true, rerank: false };
+    } else {
+        throw new Error(`Invalid search_type: ${searchType}`);
+    }
+
+    const mergedOverrides = searchOverrides ? { ...baseSwitches, ...searchOverrides } : baseSwitches;
+    const options = resolveSearchOptions({
+        query,
+        overrides: mergedOverrides,
+        hybrid: HYBRID_DEFAULTS,
+        rerank: RERANK_DEFAULTS,
+        rerankerAvailable: rerankerLoaded,
+        diversityField: 'parent_id'
+    });
+
+    let queryVector = null;
+    if (options.dense) {
+        try {
+            const vectors = await embedBatch([formatQueryForEmbedding(query, queryInstruct)]);
+            queryVector = vectors?.[0];
+            if (!Array.isArray(queryVector) || queryVector.length === 0) {
+                throw new Error('searchArchive: embedding endpoint returned no query vector');
             }
-            if (filterMode && filterMode !== 'all' && session?.mode && session.mode !== filterMode) continue;
-            if (filterRole && filterRole !== 'all' && msg.role !== filterRole) continue;
-            // Eligibility applies to the index itself, so neither the semantic
-            // mapping nor the keyword fallback can resurrect an ineligible message
-            // (a legacy vector for a tool/empty message must not leak).
-            if (!isSearchEligible(msg, explicitRole)) continue;
-            msgIndex.push({ chatId: c.id, idx: msg.idx, msg, session });
+        } catch (err) {
+            if (searchType === 'hybrid' && options.lexical) {
+                LOG.warn('Hybrid search query embed failed — falling back to lexical', { query: query.slice(0, 50), error: err.message }, 'Search');
+                options.dense = false;
+                options.rerank = false;
+                queryVector = null;
+                degradedMethod = 'keyword-fallback';
+            } else {
+                throw err;
+            }
         }
     }
-    msgIndex.sort(compareRecency);
+
+    const filters = {};
+    const promoted = [];
+    const explicitRole = filterRole && filterRole !== 'all' ? filterRole : null;
+    if (explicitRole) {
+        promoted.push({ field: 'role', op: 'eq', value: explicitRole });
+    }
+    if (filterMode && filterMode !== 'all') {
+        promoted.push({ field: 'mode', op: 'eq', value: normalizeMode(filterMode) });
+    }
+    if (promoted.length > 0) filters.promoted = promoted;
+
+    const minTs = toUnixSeconds(dateFrom);
+    const maxTs = toUnixSeconds(dateTo);
+    if (minTs !== null || maxTs !== null) {
+        filters.created_at = {};
+        if (minTs !== null) filters.created_at.min = minTs;
+        if (maxTs !== null) filters.created_at.max = maxTs;
+    }
+
+    const hybridTopK = options.rerank
+        ? Math.max(limit * 2, options.shortlist)
+        : Math.max(limit * 2, 10);
+    const hybridQuery = {
+        lexical: {
+            text: query,
+            top_k: hybridTopK,
+            principals,
+            fuzzy_edits: 1,
+            explain: false,
+            group_by_parent: options.diversity ? { max_per_parent: options.maxPerDocument } : null,
+            filters
+        },
+        query_vector: queryVector,
+        dense: options.dense,
+        lexical_enabled: options.lexical,
+        candidate_k: options.candidateK,
+        rrf_k: options.rrfK,
+        lexical_weight: options.lexicalWeight,
+        vector_weight: options.vectorWeight
+    };
+    const hybridResult = await nvdbClient.hybridSearch(collection, hybridQuery);
+    const rawHits = hybridResult?.hits || [];
+
+    let orderedHits;
+    if (options.rerank && rawHits.length > 0) {
+        const l2 = await nvdbClient.level2(collection, {
+            query_text: query,
+            principals,
+            hits: rawHits,
+            shortlist: options.shortlist,
+            rerank_weight: options.rerankWeight,
+            relevance_floor: relevanceFloor
+        });
+        if (l2.rejected) {
+            return {
+                results: [],
+                query,
+                search_type: searchType,
+                method: 'hybrid',
+                mode: describeSearchOptions(options),
+                rejected: true,
+                bestRerankScore: l2.best_rerank_score ?? null,
+                rejectedCount: (l2.hits || []).length
+            };
+        }
+        orderedHits = (l2.hits || []).map(item => ({ hybrid: item.hybrid, rerankScore: item.rerank_score ?? null }));
+    } else {
+        orderedHits = rawHits.map(h => ({ hybrid: h, rerankScore: null }));
+    }
 
     const results = [];
     const seen = new Set();
+    const convCache = new Map();
 
-    if ((searchType === 'semantic' || searchType === 'hybrid') && embeddingsCol && embedAvailable) {
-        try {
-            const vectors = await embedBatch([query]);
-            const queryVector = vectors[0];
+    for (const entry of orderedHits) {
+        if (results.length >= limit) break;
+        const doc = entry.hybrid?.hit;
+        if (!doc) continue;
 
-            const vectorResults = await embeddingsCol.search({
-                vector: queryVector,
-                // nVDB reads `topK` — a snake_case `top_k` is ignored and falls
-                // back to its default 10 (proven: topK30 → 30 hits, top_k 30 → 10).
-                topK: limit * 3
-            });
+        const parsed = parseChatChunkId(doc.id, userId);
+        if (!parsed) continue;
 
-            for (const hit of vectorResults) {
-                if (results.length >= limit) break;
+        const seenKey = `${parsed.sessionId}#${parsed.msgIdx}`;
+        if (seen.has(seenKey)) continue;
+        seen.add(seenKey);
 
-                const payload = hit.payload ? JSON.parse(hit.payload) : null;
-                const chatId = payload?.chatId;
-                const msgIdx = typeof payload?.msgIdx === 'number' ? payload.msgIdx : -1;
-                const msgId = payload?.messageId || hit.id;
-                const seenKey = chatId ? `${chatId}#${msgIdx}` : msgId;
-
-                if (seen.has(seenKey)) continue;
-                seen.add(seenKey);
-
-                let entry;
-                if (chatId && msgIdx >= 0) {
-                    entry = msgIndex.find(e => e.chatId === chatId && e.idx === msgIdx);
-                    if (!entry) continue;
-                } else {
-                    entry = msgIndex.find(e => e.msg.id === msgId);
-                    if (!entry) continue;
-                }
-
-                LOG.info('Search vector hit', { chatId: chatId?.slice(-20), msgIdx, score: hit.score.toFixed(3), role: entry.msg.role }, 'Search');
-
-                results.push({
-                    score: hit.score,
-                    message: { id: entry.msg.id, idx: entry.idx, role: entry.msg.role, model: entry.msg.model, content: entry.msg.content.slice(0, 300), createdAt: entry.msg.createdAt },
-                    session: entry.session ? { id: entry.session.id, title: entry.session.title, mode: entry.session.mode, createdAt: entry.session.createdAt } : null
-                });
-            }
-        } catch (err) {
-            LOG.error('Semantic search failed', err, {}, 'Search');
+        let cached = convCache.get(parsed.sessionId);
+        if (!cached) {
+            const docs = db.find('id', parsed.sessionId) || [];
+            cached = {
+                conv: docs.find(d => d._type === 'conversation') || null,
+                session: docs.find(d => d._type === 'session') || null
+            };
+            convCache.set(parsed.sessionId, cached);
         }
-    }
+        const { conv, session } = cached;
+        if (!conv?.messages) continue;
 
-    const semanticHadResults = results.length > 0;
-    if ((searchType === 'keyword' || searchType === 'hybrid' || (searchType === 'semantic' && !semanticHadResults)) && results.length < limit) {
-        const lowerQuery = query.toLowerCase();
-        const textHits = msgIndex
-            .filter(e => e.msg.content?.toLowerCase().includes(lowerQuery))
-            .slice(0, limit - results.length);
-
-        for (const entry of textHits) {
-            if (results.length >= limit) break;
-            const seenKey = `${entry.chatId}#${entry.idx}`;
-            if (seen.has(seenKey)) continue;
-            seen.add(seenKey);
-
-            results.push({
-                score: 0,
-                message: { id: entry.msg.id, idx: entry.idx, role: entry.msg.role, model: entry.msg.model, content: entry.msg.content.slice(0, 300), createdAt: entry.msg.createdAt },
-                session: entry.session ? { id: entry.session.id, title: entry.session.title, mode: entry.session.mode, createdAt: entry.session.createdAt } : null,
-                source: 'text-fallback'
-            });
+        let msg = conv.messages[parsed.msgIdx];
+        if (!msg || (msg.idx !== undefined && msg.idx !== parsed.msgIdx)) {
+            msg = conv.messages.find(m => m.idx === parsed.msgIdx);
         }
+        if (!msg) continue;
+        if (!isSearchEligible(msg, explicitRole)) continue;
+
+        const score = entry.rerankScore !== null
+            ? entry.rerankScore
+            : options.dense && !options.lexical && typeof entry.hybrid.vector_score === 'number'
+                ? entry.hybrid.vector_score
+                : entry.hybrid.rrf_score ?? doc.score ?? 0;
+
+        results.push({
+            score,
+            rrfScore: entry.hybrid.rrf_score ?? null,
+            rerankScore: entry.rerankScore,
+            lexicalRank: entry.hybrid.lexical_rank ?? null,
+            vectorRank: entry.hybrid.vector_rank ?? null,
+            message: {
+                id: msg.id,
+                idx: msg.idx ?? parsed.msgIdx,
+                role: msg.role,
+                model: msg.model,
+                content: msg.content.slice(0, 300),
+                createdAt: msg.createdAt
+            },
+            session: session ? {
+                id: session.id,
+                title: session.title,
+                mode: session.mode,
+                createdAt: session.createdAt
+            } : null
+        });
     }
 
     LOG.info('Search', { query: query.slice(0, 80), results: results.length, type: searchType }, 'Search');
@@ -185,7 +296,9 @@ async function searchArchive(dbInstance, body, deps = {}) {
         results,
         query,
         search_type: searchType,
-        method: searchType === 'keyword' ? 'text' : searchType === 'hybrid' ? (results.some(r => r.score > 0) ? 'hybrid' : 'text') : (results.some(r => r.score > 0) ? 'semantic' : 'text-fallback')
+        method: degradedMethod || (searchType === 'keyword' ? 'keyword' : searchType === 'semantic' ? 'semantic' : 'hybrid'),
+        mode: describeSearchOptions(options),
+        rejected: false
     };
 }
 
@@ -193,7 +306,7 @@ async function searchArchive(dbInstance, body, deps = {}) {
 // identity: without them a content-free identity guess (which message was that?)
 // is the only option, and the 500-char excerpt is not an identity.
 function shapeSearchToolResult(data) {
-    return {
+    const out = {
         query: data.query,
         method: data.method,
         results: data.results.map(r => ({
@@ -209,6 +322,13 @@ function shapeSearchToolResult(data) {
             content: r.message?.content?.slice(0, 500)
         }))
     };
+    if (data.mode !== undefined) out.searchMode = data.mode;
+    if (data.rejected) {
+        out.rejected = true;
+        out.bestRerankScore = data.bestRerankScore;
+        out.note = 'No relevant matches passed the relevance floor.';
+    }
+    return out;
 }
 
 // ============================================
@@ -342,7 +462,7 @@ const ARCHIVE_TOOL_DEFS = [
                     query: { type: 'string', description: 'The search query' },
                     mode: { type: 'string', enum: ['direct', 'arena', 'all'], description: 'Filter by session type (default: all)' },
                     role: { type: 'string', enum: ['user', 'assistant', 'tool', 'system', 'all'], description: 'Filter by message role (default: all — excludes tool and system noise; name "tool" or "system" explicitly to inspect those legacy messages, empty messages are never returned)' },
-                    search_type: { type: 'string', enum: ['semantic', 'keyword', 'hybrid'], description: 'Search method (default: semantic)' },
+                    search_type: { type: 'string', enum: ['semantic', 'keyword', 'hybrid'], description: 'Search method (default: hybrid — native BM25 + dense RRF + rerank; use keyword for lexical-only or semantic for dense-only)' },
                     limit: { type: 'number', description: 'Max results (default 10)' },
                     date_from: { type: 'string', description: 'ISO date — messages after this date' },
                     date_to: { type: 'string', description: 'ISO date — messages before this date' }
@@ -653,7 +773,7 @@ async function executeInternalTool(name, args, ctx) {
                 query: args.query, mode: args.mode || 'all',
                 role: args.role || 'all',
                 limit: args.limit || 10,
-                search_type: args.search_type || 'semantic',
+                search_type: args.search_type || 'hybrid',
                 date_from: args.date_from || null,
                 date_to: args.date_to || null
             }, embedDeps || {});
@@ -755,7 +875,7 @@ async function executeInternalTool(name, args, ctx) {
                 .join(' ');
             const queryText = assistantTexts.slice(0, 3000);
 
-            const searchData = await searchArchive(dbInstance, { query: queryText, limit: (args.limit || 5) + 1 }, embedDeps || {});
+            const searchData = await searchArchive(dbInstance, { query: queryText, search_type: 'semantic', limit: (args.limit || 5) + 3 }, embedDeps || {});
             const similar = searchData.results
                 .filter(r => r.session?.id !== args.session_id)
                 .slice(0, args.limit || 5);

@@ -28,20 +28,6 @@ function isEmbeddableMessage(msg) {
     return String(msg.content ?? '').trim() !== '';
 }
 
-function buildEmbedText(msg, session) {
-    const parts = [];
-    if (session?.mode === 'arena') {
-        parts.push(`[Arena: ${(session.title || '').slice(0, 60)}]`);
-        if (msg.speaker) parts.push(`[${msg.speaker}]`);
-    } else {
-        parts.push(`[Chat: ${(session?.title || '').slice(0, 60)}]`);
-        parts.push(`[${msg.role}]`);
-    }
-    if (msg.model) parts.push(`[${msg.model}]`);
-    parts.push(msg.content || '');
-    return parts.join(' ');
-}
-
 // Cut-point preference: paragraph > line > sentence. Returns the offset to cut
 // at inside `window`, or 0 when no usable boundary exists (hard cut instead).
 function lastBreakOffset(window) {
@@ -91,17 +77,6 @@ function splitTextIntoChunks(text, opts = {}) {
     return chunks;
 }
 
-// Lower bound on a text's chunk count. Boundary cuts only ever produce MORE
-// chunks, so a stored count below this means the message was embedded whole (or
-// middle-truncated by the old pipeline) and needs re-embedding.
-function minEmbedChunkCount(text, opts = {}) {
-    const chunkTokens = Math.max(64, opts.chunkTokens || EMBED_CHUNK_TOKENS);
-    const ratio = opts.tokRatio || TOK_CHARS_RATIO;
-    const maxChars = Math.max(1, Math.floor(chunkTokens * ratio));
-    const len = String(text ?? '').length;
-    return len <= maxChars ? 1 : Math.ceil(len / maxChars);
-}
-
 // Pack chunk items into requests: many small chunks per request, but never more
 // than that many tokens of prefill queued at the box at once.
 function planEmbedBatches(items, opts = {}) {
@@ -120,27 +95,6 @@ function planEmbedBatches(items, opts = {}) {
     }
     if (current.length > 0) batches.push(current);
     return batches;
-}
-
-function embedVectorId(messageId, splitIdx) {
-    return splitIdx > 0 ? `${messageId}_${splitIdx}` : messageId;
-}
-
-// Drop every vector a message owns. `knownChunks` is the stored chunk count; one
-// extra index is swept so a message that shrank since it was embedded leaves no
-// orphan behind.
-function deleteEmbedVectors(embeddingsCol, messageId, knownChunks, log) {
-    if (!embeddingsCol || !messageId) return 0;
-    const count = Math.max(1, Number(knownChunks) || 1);
-    let deleted = 0;
-    for (let i = 0; i <= count; i++) {
-        try {
-            if (embeddingsCol.delete(embedVectorId(messageId, i))) deleted++;
-        } catch (err) {
-            if (log) log.warn('Embed vector delete failed', { messageId, splitIdx: i, error: err.message }, 'Embed');
-        }
-    }
-    return deleted;
 }
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -175,12 +129,8 @@ async function fetchRetry(url, options, retries) {
 
 module.exports = {
     isEmbeddableMessage,
-    buildEmbedText,
     splitTextIntoChunks,
-    minEmbedChunkCount,
     planEmbedBatches,
-    embedVectorId,
-    deleteEmbedVectors,
     fetchRetry,
     EMBEDDING_DIMS,
     EMBED_CHUNK_TOKENS,

@@ -8,7 +8,7 @@
 // Spec: docs/pa-implementation-spec.md (Part 2).
 // ============================================
 
-const { deleteEmbedVectors } = require('./embed');
+const { buildMessageV2Docs, collectMessageChunkIds } = require('./nvdb-chat');
 
 // Derive the compact `_file` nURI ('bucket:file.ext') from an attachment's
 // URL-ish fields. Returns null when nothing is derivable.
@@ -143,6 +143,35 @@ function guardCtx(fnName, ctx) {
     if (typeof ctx?.embedMessageAsync !== 'function') throw new Error(`${fnName}: ctx.embedMessageAsync required`);
 }
 
+// A splice re-numbers every message after it, and chunk ids carry the stored
+// index (`user:session:msgIdx#chunk`), so the shifted tail is re-keyed in nVDB:
+// the old ids go, the new ones are written. The new documents hash identically
+// to the old (same text), so nVDB relinks their vectors instead of re-embedding.
+async function syncShiftedTailToNvdb(ctx, session, conv, startIdx, prevMessages) {
+    const client = ctx.dbInstance?.nvdbClient;
+    if (!client) return;
+    const collection = ctx.dbInstance.nvdbCollection || 'chat';
+    const chunkOpts = ctx.dbInstance.nvdbChunkOpts || {};
+    const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
+    const userId = ctx.user.id;
+
+    const oldIds = [];
+    for (let i = startIdx; i < prevMessages.length; i++) {
+        oldIds.push(...collectMessageChunkIds(userId, session.id, prevMessages[i], i, chunkOpts));
+    }
+
+    const docs = [];
+    for (let i = startIdx; i < conv.messages.length; i++) {
+        docs.push(...buildMessageV2Docs({ userId, session, msg: conv.messages[i], msgIdx: i, chunkOpts }));
+    }
+
+    const newIds = new Set(docs.map(d => d.id));
+    const removedIds = oldIds.filter(id => !newIds.has(id));
+    if (removedIds.length > 0) await client.deleteIds(collection, removedIds, { commit: docs.length === 0 });
+    if (docs.length > 0) await client.upsert(collection, docs, { commit: true });
+    log.info('nVDB shifted tail re-keyed', { sessionId: session.id, from: startIdx, deleted: removedIds.length, upserted: docs.length }, 'Embed');
+}
+
 // ctx = { user, dbInstance, embedMessageAsync, log? }
 // msg = { conversationId, role?, content?, attachments?, speaker?, model?,
 //         toolName?/toolArgs?/toolStatus?/toolImages?, reasoning_content?/…, tool_calls? }
@@ -204,6 +233,7 @@ async function insertConversationMessageAt(ctx, { conversationId, message: msg, 
     const pos = Math.max(0, Math.min(atIdx ?? conv.messages.length, conv.messages.length));
 
     const message = normalizeStoredMessage({ ...msg, id: msg.id || 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10), idx: pos, createdAt: new Date().toISOString() });
+    const prevMessages = conv.messages.slice();
     conv.messages.splice(pos, 0, message);
     for (let i = pos + 1; i < conv.messages.length; i++) conv.messages[i].idx = i;
     conv.messageCount = conv.messages.length;
@@ -217,6 +247,9 @@ async function insertConversationMessageAt(ctx, { conversationId, message: msg, 
     db.set(session._id, 'updatedAt', session.updatedAt);
 
     log.info('Message inserted', { sessionId: conversationId, role: message.role, idx: pos }, 'Message');
+    // The shifted tail is re-keyed before the embed fires: `conv.messages[pos]`
+    // is the new message, and embedMessageAsync's own upsert is idempotent.
+    if (pos < prevMessages.length) await syncShiftedTailToNvdb(ctx, session, conv, pos, prevMessages);
     ctx.embedMessageAsync(ctx.dbInstance, message, session, conv._id, pos).catch(err => {
         log.warn('Fire-and-forget embed rejected (already re-queued)', { sessionId: conversationId, idx: pos, kind: err?.kind, error: err?.message }, 'Embed');
     });
@@ -273,6 +306,7 @@ async function deleteConversationMessage(ctx, { conversationId, messageId } = {}
     const pos = conv.messages.findIndex(m => m.id === messageId);
     if (pos === -1) throw new Error(`deleteConversationMessage: message not found: ${messageId}`);
 
+    const prevMessages = conv.messages.slice();
     const removed = conv.messages.splice(pos, 1)[0];
     for (let i = 0; i < conv.messages.length; i++) conv.messages[i].idx = i;
 
@@ -287,11 +321,8 @@ async function deleteConversationMessage(ctx, { conversationId, messageId } = {}
     db.set(session._id, 'messageCount', session.messageCount);
     db.set(session._id, 'updatedAt', session.updatedAt);
 
-    // Drop the embedding vector(s) if any exist (keeps nVDB in step with nDB).
-    if (ctx.dbInstance.embeddingsCol && removed.id) {
-        ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) +
-            deleteEmbedVectors(ctx.dbInstance.embeddingsCol, removed.id, removed.embedChunks, log);
-    }
+    // Re-key the shifted tail (and drop the removed message's chunks) in nVDB.
+    await syncShiftedTailToNvdb(ctx, session, conv, pos, prevMessages);
 
     log.info('Message deleted', { sessionId: conversationId, messageId, role: removed.role, remaining: conv.messages.length }, 'Message');
     return { removed, messageCount: conv.messages.length };
@@ -319,6 +350,7 @@ async function editUserMessageAndTruncate(ctx, { conversationId, messageId, cont
 
     const removed = conv.messages.slice(pos + 1);
     const removedIds = removed.map(m => m.id);
+    const removedStart = pos + 1;
     target.content = content;
     target.updatedAt = new Date().toISOString();
     conv.messages = conv.messages.slice(0, pos + 1);
@@ -335,12 +367,20 @@ async function editUserMessageAndTruncate(ctx, { conversationId, messageId, cont
     db.set(session._id, 'messageCount', session.messageCount);
     db.set(session._id, 'updatedAt', session.updatedAt);
 
-    if (ctx.dbInstance.embeddingsCol) {
-        for (const m of removed) {
-            ctx.dbInstance.needsFlush = (ctx.dbInstance.needsFlush || 0) +
-                deleteEmbedVectors(ctx.dbInstance.embeddingsCol, m.id, m.embedChunks, log);
+    if (ctx.dbInstance.nvdbClient && removed.length > 0) {
+        const chunkOpts = ctx.dbInstance.nvdbChunkOpts || {};
+        const ids = [];
+        for (let i = 0; i < removed.length; i++) {
+            ids.push(...collectMessageChunkIds(ctx.user.id, session.id, removed[i], removedStart + i, chunkOpts));
         }
+        if (ids.length > 0) await ctx.dbInstance.nvdbClient.deleteIds(ctx.dbInstance.nvdbCollection || 'chat', ids, { commit: true });
     }
+
+    // The edited message is the pending turn again: re-upsert + re-embed it so
+    // search reflects the new text immediately.
+    ctx.embedMessageAsync(ctx.dbInstance, target, session, conv._id, pos).catch(err => {
+        log.warn('Fire-and-forget embed rejected (already re-queued)', { sessionId: conversationId, idx: pos, kind: err?.kind, error: err?.message }, 'Embed');
+    });
 
     log.info('User message edited + truncated', { sessionId: conversationId, messageId, removed: removedIds.length }, 'Message');
     return { edited: target, removedCount: removedIds.length };
@@ -372,6 +412,10 @@ async function editAssistantMessageContent(ctx, { conversationId, messageId, con
     db.set(conv._id, 'updatedAt', conv.updatedAt);
     session.updatedAt = conv.updatedAt;
     db.set(session._id, 'updatedAt', session.updatedAt);
+
+    ctx.embedMessageAsync(ctx.dbInstance, target, session, conv._id, pos).catch(err => {
+        log.warn('Fire-and-forget embed rejected (already re-queued)', { sessionId: conversationId, idx: pos, kind: err?.kind, error: err?.message }, 'Embed');
+    });
 
     log.info('Assistant message edited', { sessionId: conversationId, messageId }, 'Message');
     return { edited: target };
