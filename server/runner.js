@@ -9,7 +9,7 @@
 // ============================================
 
 const convStore = require('./conversation-store');
-const { buildApiMessages, parseFileRef, LEADING_TS_REGEX } = require('./api-view');
+const { buildApiMessages, parseFileRef, parseBucketPath, LEADING_TS_REGEX } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
 const { countApiMessages, breakdownApiMessages } = require('./token-count');
 const mcpPool = require('./mcp-pool');
@@ -61,12 +61,17 @@ async function getModels() {
 
 const registry = new Map(); // `${userId}:${conversationId}` -> Runner
 
-function getRunner(user, dbInstance, conversationId) {
+async function getRunner(user, dbInstance, conversationId) {
     const key = `${user.id}:${conversationId}`;
     let r = registry.get(key);
     if (!r) {
-        r = new Runner(user, dbInstance, conversationId);
-        registry.set(key, r);
+        const candidate = new Runner(user, dbInstance, conversationId);
+        await candidate.init();
+        r = registry.get(key);
+        if (!r) {
+            registry.set(key, candidate);
+            r = candidate;
+        }
     }
     return r;
 }
@@ -213,9 +218,8 @@ class Runner {
         this.user = user;
         this.dbInstance = dbInstance;
         this.conversationId = conversationId;
-        const { db } = dbInstance;
-        this.session = convStore.findSessionOrThrow(db, conversationId); // throws → route maps 404
-        this.conv = convStore.findOrCreateConversation(db, this.session, user);
+        this.session = null;
+        this.conv = null;
         this.views = new Set();
         this.inFlight = null;
         // Model captured per send (first-wins per batch run): a later send
@@ -234,13 +238,23 @@ class Runner {
         this._lastMsgHashes = null;
         // Context-pill count cache (see buildSnapshot) — invalidated by key change.
         this._countCache = null;
+        this._storageOriginCache = undefined;
+    }
+
+    /**
+     * Hydration is a network round-trip now (nDB lives behind `ndb serve`), so
+     * the constructor only stores identity and init() loads the session doc.
+     */
+    async init() {
+        await this.refresh();
+        this._storageOriginCache = await this._loadStorageOrigin();
         // Orphaned run? The previous process died mid-chain and left its stamp
         // behind — mark the conversation LOUDLY, then clear the stamp. Without
         // this a restart mid-run is a permanent silent stall (2026-08-25).
         if (this.session.activeRun) {
-            this._persistFailureNote('Run interrupted — the server restarted while a run was in flight. Send a message to continue.')
-                .catch(err => DEPS.log().error('Orphan-run note failed', null, { chatId: conversationId, error: err?.message }, 'Runner'));
-            this._clearActiveRunStamp();
+            await this._persistFailureNote('Run interrupted — the server restarted while a run was in flight. Send a message to continue.')
+                .catch(err => DEPS.log().error('Orphan-run note failed', null, { chatId: this.conversationId, error: err?.message }, 'Runner'));
+            await this._clearActiveRunStamp();
         }
         this.scheduleIdle();
     }
@@ -248,13 +262,13 @@ class Runner {
     ctx() {
         return { user: this.user, dbInstance: this.dbInstance, embedMessageAsync: DEPS.embedMessageAsync, log: DEPS.log() };
     }
-    // nDB find() does NOT return live references — the conv/session objects held
+    // nDB queries do NOT return live references — the conv/session objects held
     // here go stale when appendConversationMessage (or the old client) writes.
     // Re-read at every state-consuming point. (First acceptance bug, 2026-08-24.)
-    refresh() {
+    async refresh() {
         const { db } = this.dbInstance;
-        this.session = convStore.findSessionOrThrow(db, this.conversationId);
-        this.conv = convStore.findOrCreateConversation(db, this.session, this.user);
+        this.session = await convStore.findSessionOrThrow(db, this.conversationId);
+        this.conv = await convStore.findOrCreateConversation(db, this.session, this.user);
     }
     scheduleIdle() {
         clearTimeout(this.idleTimer);
@@ -273,19 +287,19 @@ class Runner {
     // Active-run stamp: durable "a run chain is in flight" marker on the
     // session doc — set when the loop starts, cleared when it drains. Survives
     // a process kill, which is exactly when it's needed (orphan detection).
-    _setActiveRunStamp() {
-        this.refresh();
+    async _setActiveRunStamp() {
+        await this.refresh();
         this.session.activeRun = { startedAt: new Date().toISOString() };
-        this.dbInstance.db.update(this.session._id, this.session);
+        await this.dbInstance.db.update(this.session._id, this.session);
         // Let attached views reflect in-flight state in the chat list (#23).
         this.broadcast('run.state', { running: true });
     }
 
-    _clearActiveRunStamp() {
-        this.refresh();
+    async _clearActiveRunStamp() {
+        await this.refresh();
         if (!this.session.activeRun) return;
         delete this.session.activeRun;
-        this.dbInstance.db.update(this.session._id, this.session);
+        await this.dbInstance.db.update(this.session._id, this.session);
         this.broadcast('run.state', { running: false });
     }
 
@@ -358,9 +372,9 @@ class Runner {
         DEPS.emitUserEvent?.(this.user.id, this.conversationId, event, data);
     }
 
-    recordAppEvent(raw) {
+    async recordAppEvent(raw) {
         const input = normalizeAppEvent(raw);
-        this.refresh();
+        await this.refresh();
         const issued = this.conv.messages.find(m => m.role === 'tool'
             && m.toolName === 'chat_app_open'
             && m.toolUi?.kind === 'hosted-app'
@@ -387,8 +401,10 @@ class Runner {
         };
         events.push(event);
         const updatedAt = new Date().toISOString();
-        this.dbInstance.db.set(this.conv._id, 'appEvents', events);
-        this.dbInstance.db.set(this.conv._id, 'updatedAt', updatedAt);
+        await this.dbInstance.db.patch(this.conv._id, [
+            { op: 'set', path: 'appEvents', value: events },
+            { op: 'set', path: 'updatedAt', value: updatedAt }
+        ]);
         this.conv.appEvents = events;
         this.conv.updatedAt = updatedAt;
         this.broadcast('app.event', event);
@@ -400,9 +416,9 @@ class Runner {
         return (Array.isArray(this.conv.appEvents) ? this.conv.appEvents : []).filter(event => !event.consumedAt);
     }
 
-    _consumeAppEventsInRun() {
+    async _consumeAppEventsInRun() {
         if (!this._appEventIdsInRun || this._appEventIdsInRun.size === 0) return;
-        this.refresh();
+        await this.refresh();
         const consumedAt = new Date().toISOString();
         let changed = false;
         const events = (Array.isArray(this.conv.appEvents) ? this.conv.appEvents : []).map(event => {
@@ -412,8 +428,10 @@ class Runner {
         });
         this._appEventIdsInRun.clear();
         if (!changed) return;
-        this.dbInstance.db.set(this.conv._id, 'appEvents', events);
-        this.dbInstance.db.set(this.conv._id, 'updatedAt', consumedAt);
+        await this.dbInstance.db.patch(this.conv._id, [
+            { op: 'set', path: 'appEvents', value: events },
+            { op: 'set', path: 'updatedAt', value: consumedAt }
+        ]);
         this.conv.appEvents = events;
         this.conv.updatedAt = consumedAt;
     }
@@ -443,18 +461,20 @@ class Runner {
         return cloned;
     }
 
-    // Storage-box origin for URL canonicalization — cached per runner. The pool
-    // is per-user; getForUser is idempotent so this is a lookup, not a connect.
+    // Storage-box origin for URL canonicalization — resolved once at init (the
+    // user's MCP server list is a DB read now, so viewMessage cannot reach for
+    // it synchronously). A null origin still canonicalizes the known spellings.
+    async _loadStorageOrigin() {
+        const pool = await mcpPool.getForUser(this.user, this.dbInstance);
+        return pool.getStorageOrigin();
+    }
+
     _storageOrigin() {
-        if (this._storageOriginCache !== undefined) return this._storageOriginCache;
-        let origin = null;
-        try { origin = mcpPool.getForUser(this.user, this.dbInstance).getStorageOrigin(); } catch { origin = null; }
-        this._storageOriginCache = origin;
-        return origin;
+        return this._storageOriginCache === undefined ? null : this._storageOriginCache;
     }
 
     async buildSnapshot() {
-        this.refresh();
+        await this.refresh();
         const lastAssistant = [...this.conv.messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
         // The pill means "how close am I to the limit" — the on-the-wire payload
         // (post retirement transform), NOT the raw stored history. Run
@@ -543,7 +563,7 @@ class Runner {
         // A retry after a lost response must not append the same user turn twice.
         // The optional client id makes send idempotent while the view keeps its
         // optimistic outbox entry outside canonical history (#54).
-        this.refresh();
+        await this.refresh();
         if (clientId) {
             const existing = this.conv.messages.find(m => m.role === 'user' && m.clientId === clientId);
             if (existing) return { message: existing, duplicate: true };
@@ -559,7 +579,7 @@ class Runner {
         if (!this.pendingModel) this.pendingModel = message.model || null;
         if (body.model && body.model !== this.session.model) {
             this.session.model = body.model;
-            this.dbInstance.db.set(this.session._id, 'model', body.model);
+            await this.dbInstance.db.set(this.session._id, 'model', body.model);
             // #27 — converge all attached views on the actual conversation model.
             this.broadcast('model.changed', { model: body.model });
         }
@@ -575,24 +595,24 @@ class Runner {
         // its per-model default (thinking on for local models). Forcing
         // enable_thinking=false made small models roleplay the tool manual
         // (2026-08-25) — thinking is the scratchpad that digests it.
-        this.kick();
+        await this.kick();
         return { message };
     }
 
-    kick() {
+    async kick() {
         if (this.running) return; // queued — the loop picks it up (batch)
         this.running = true;
-        this._setActiveRunStamp();
+        await this._setActiveRunStamp();
         this.runLoop()
             .catch(async err => {
                 DEPS.log().error('Runner runLoop crashed', null, { chatId: this.conversationId, error: err?.message, stack: err?.stack }, 'Runner');
                 this.broadcast('error', { code: 'runner', message: err?.message || 'runLoop crashed' });
                 await this._persistFailureNote(`Runner crashed: ${err?.message || 'unknown error'}`).catch(() => {});
             })
-            .finally(() => {
+            .finally(async () => {
                 this.running = false;
-                if (this.pendingSends > 0) this.kick();
-                else this._clearActiveRunStamp();
+                if (this.pendingSends > 0) await this.kick();
+                else await this._clearActiveRunStamp();
             });
     }
 
@@ -627,7 +647,7 @@ class Runner {
                 // next tool hop's payload included it. Another turn then sends a
                 // history ending on the model's own answer — nothing to answer
                 // (kimi-k3 empty → 502 ×3, DeepSeek 400; 2026-10-04).
-                more = this._hasUnansweredTurn();
+                more = await this._hasUnansweredTurn();
                 if (!more) DEPS.log().info('Queued send already answered — no extra turn', { chatId: this.conversationId }, 'Runner');
             }
             else more = false;
@@ -635,8 +655,8 @@ class Runner {
     }
 
     // The stored history ends on something the model has not answered yet.
-    _hasUnansweredTurn() {
-        this.refresh();
+    async _hasUnansweredTurn() {
+        await this.refresh();
         const messages = this.conv.messages;
         return messages.length > 0 && messages[messages.length - 1].role !== 'assistant';
     }
@@ -650,7 +670,7 @@ class Runner {
     // render→look→fix loop of the run that produced it.
     async _stripTransientToolImages() {
         try {
-            this.refresh();
+            await this.refresh();
         } catch { return; } // conversation gone — nothing to strip
         const messages = this.conv.messages || [];
         const pending = messages.filter(m => m.role === 'tool' && m.toolImagesTransient === true && Array.isArray(m.toolImages) && m.toolImages.length > 0);
@@ -659,7 +679,7 @@ class Runner {
             m.toolImagesTransient = undefined;
             m.toolImagesStripped = true;
         }
-        this.dbInstance.db.set(this.conv._id, 'messages', messages);
+        await this.dbInstance.db.set(this.conv._id, 'messages', messages);
         DEPS.log().info('Stripped transient tool image(s) at run start', { chatId: this.conversationId, count: pending.length }, 'Runner');
     }
 
@@ -679,7 +699,7 @@ class Runner {
     // this dangling: every turn since logged "MCP pool unavailable: pool is not
     // defined" and ran tool-less.
     async _assembleTools(modelSupportsVision) {
-        const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        const pool = await mcpPool.getForUser(this.user, this.dbInstance);
         let tools = internalTools.getToolDefs({ chunkTransform: this.session.chunkTransform === true });
         let mcpTools = [];
         try {
@@ -695,21 +715,56 @@ class Runner {
         return tools.concat(internalTools.filterVisionTools(mcpTools, { modelSupportsVision }));
     }
 
+    /**
+     * Image bytes for the payload, read BEFORE the sync projection runs. Bucket
+     * reads are HTTP calls to `ndb serve` now, so buildApiMessages cannot pull
+     * them inline; this prefetch keeps api-view a pure function.
+     */
+    async _prefetchImageBuffers(messages) {
+        const cache = new Map();
+        const pending = new Map();
+        const load = (bucket, id, ext) => {
+            const key = `${bucket}:${id}.${ext}`;
+            if (!pending.has(key)) {
+                pending.set(key, this.dbInstance.db.getFile(bucket, `${id}.${ext}`)
+                    .then(file => { cache.set(key, file ? file.buffer : null); })
+                    .catch(err => {
+                        DEPS.log().warn('Image prefetch failed', { chatId: this.conversationId, key, error: err.message }, 'Runner');
+                        cache.set(key, null);
+                    }));
+            }
+            return pending.get(key);
+        };
+        const jobs = [];
+        for (const m of messages) {
+            for (const att of Array.isArray(m.attachments) ? m.attachments : []) {
+                const ref = parseFileRef(att?._file);
+                if (ref) jobs.push(load(ref.bucket, ref.id, ref.ext));
+            }
+            for (const url of Array.isArray(m.toolImages) ? m.toolImages : []) {
+                const ref = parseBucketPath(url);
+                if (ref) jobs.push(load(ref.bucket, ref.id, ref.ext));
+            }
+        }
+        await Promise.all(jobs);
+        return (bucket, id, ext) => cache.get(`${bucket}:${id}.${ext}`) ?? null;
+    }
+
     async _assemblePayload(turnModel = null) {
         const instructions = await DEPS.getInstructions();
-        const pool = mcpPool.getForUser(this.user, this.dbInstance);
-        const mcpOrigin = pool.getStorageOrigin();
+        const pool = await mcpPool.getForUser(this.user, this.dbInstance);
+        const mcpOrigin = await pool.getStorageOrigin();
         const pendingAppEvents = this._pendingAppEvents();
         if (turnModel && this._appEventIdsInRun) {
             for (const event of pendingAppEvents) this._appEventIdsInRun.add(event.id);
         }
         const systemPrompt = buildSystemPrompt({
             instructions,
-            user: this.userProfile(),
+            user: await this.userProfile(),
             sessionPrompt: this.session.systemPrompt || '',
             archiveTools: { sessionId: this.conversationId, mcpOrigin, serverSide: true },
             mcpResources: null,
-            memoryToolsAvailable: pool.hasToolPrefix('memory.'),
+            memoryToolsAvailable: await pool.hasToolPrefix('memory.'),
             // #28 — the model of THIS turn, so the seat knows its own substrate.
             // turnModel is authoritative: runOnce clears pendingModel BEFORE
             // assembly, so pendingModel here would already be null (2026-08-31
@@ -726,13 +781,14 @@ class Runner {
                 || this.conv.messages.some(m => m.voice === true),
             appEvents: pendingAppEvents
         });
+        const readImageBytes = await this._prefetchImageBuffers(this.conv.messages);
         const { messages, retireStats } = buildApiMessages(this.conv.messages, {
             systemPrompt,
             publicOrigin: DEPS.publicOrigin,
             chunkTransform: this.session.chunkTransform === true,
             retirements: this.session.retirements || {},
             log: DEPS.log(),
-            readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
+            readImageBytes
         });
         // §5a reporting needs the no-measures number (rawTokens). With no active
         // retirements raw === wire (markers aside) — skip the second projection.
@@ -746,7 +802,7 @@ class Runner {
                 chunkTransform: false,
                 retirements: {},
                 log: DEPS.log(),
-                readImageBytes: (bucket, id, ext) => this.dbInstance.db.getFile(bucket, id, ext)
+                readImageBytes
             }).messages;
         }
         return { apiMessages: messages, rawMessages, retireStats, mcpOrigin };
@@ -762,7 +818,7 @@ class Runner {
     // (native path). The analysis persists, so later turns keep it as context.
     async _ensureVisionAnalysis(modelSupportsVision) {
         if (modelSupportsVision) return;
-        this.refresh();
+        await this.refresh();
         const msgs = this.conv.messages;
         // Only TRAILING user messages (since the last assistant reply) — new,
         // unprocessed sends. History must not re-analyze on a model switch.
@@ -782,7 +838,7 @@ class Runner {
         }
         if (pending.length === 0) return;
 
-        const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        const pool = await mcpPool.getForUser(this.user, this.dbInstance);
         await pool.ensureConnected();
         // The workshop MCP server (mcp/compact, sse/compact) exposes a SINGLE
         // dispatcher tool named 'tools' — vision.session_create / vision.analyze
@@ -798,7 +854,7 @@ class Runner {
         }
         const callVision = async (method, payload) => {
             const result = await pool.callTool(dispatcher, { method, payload });
-            const text = this.extractToolResult(result).text;
+            const text = (await this.extractToolResult(result)).text;
             let obj = null;
             try { obj = JSON.parse(text); } catch { obj = null; }
             return { obj, text };
@@ -813,9 +869,9 @@ class Runner {
             try {
                 let b64, mime;
                 if (ref) {
-                    const buffer = this.dbInstance.db.getFile(ref.bucket, ref.id, ref.ext);
-                    if (!buffer) throw new Error(`bucket read empty for ${att._file}`);
-                    b64 = Buffer.from(buffer).toString('base64');
+                    const file = await this.dbInstance.db.getFile(ref.bucket, `${ref.id}.${ref.ext}`);
+                    if (!file || file.buffer.length === 0) throw new Error(`bucket read empty for ${att._file}`);
+                    b64 = file.buffer.toString('base64');
                     mime = att.type || EXT_MIME_LOCAL[ref.ext] || 'application/octet-stream';
                 } else {
                     const comma = att.dataUrl.indexOf(',');
@@ -857,7 +913,7 @@ class Runner {
             }
         }
         if (dirty) {
-            this.dbInstance.db.set(this.conv._id, 'messages', msgs);
+            await this.dbInstance.db.set(this.conv._id, 'messages', msgs);
         }
     }
 
@@ -922,7 +978,7 @@ class Runner {
     }
 
     async runOnce() {
-        this.refresh();
+        await this.refresh();
         // Per-send capture: the model the FIRST queued send chose, not whatever
         // session.model says now (a second view may have switched it mid-queue).
         const model = this.pendingModel || this.session.model;
@@ -1135,7 +1191,7 @@ class Runner {
         if (outcome === 'tool_calls' && this._toolsAdvertised && f) {
             return await this.executeToolCalls(f); // true → runLoop continues immediately
         }
-        if (outcome !== 'error' && outcome !== 'aborted') this._consumeAppEventsInRun();
+        if (outcome !== 'error' && outcome !== 'aborted') await this._consumeAppEventsInRun();
         return false;
     }
 
@@ -1145,7 +1201,7 @@ class Runner {
     async executeToolCalls(f) {
         const toolCalls = f.toolCalls.filter(Boolean);
         if (toolCalls.length === 0) return false;
-        const pool = mcpPool.getForUser(this.user, this.dbInstance);
+        const pool = await mcpPool.getForUser(this.user, this.dbInstance);
         await pool.ensureConnected();
         // chat.progress spec §2.1: find the workshop dispatcher (same scan as the
         // auto-vision block) so chat.send calls can be detected below.
@@ -1191,7 +1247,7 @@ class Runner {
                     : isChatSend
                         ? await this._callToolWithChatProgress(pool, chatDispatcher, args, f)
                         : await pool.callTool(tc.function.name, args, { onProgress });
-                ({ text: resultText, images: resultImages, ui: resultUi } = this.extractToolResult(result));
+                ({ text: resultText, images: resultImages, ui: resultUi } = await this.extractToolResult(result));
                 const labelNotes = [];
                 if (labelHits.stripped.length > 0) labelNotes.push('chunk label(s) were stripped from your arguments');
                 if (labelHits.resolved.length > 0) labelNotes.push(`bare chunk label(s) (${labelHits.resolved.join(', ')}) were resolved to their full content`);
@@ -1240,7 +1296,7 @@ class Runner {
         const poll = async () => {
             try {
                 const result = await pool.callTool(dispatcher, { method: 'chat.status', payload: {} });
-                const obj = JSON.parse(this.extractToolResult(result).text);
+                const obj = JSON.parse((await this.extractToolResult(result)).text);
                 if (!obj || !Array.isArray(obj.sessions)) throw new Error('chat.status returned no sessions array');
                 lastSessions = obj.sessions;
                 this.broadcast('chat.progress', { sessions: lastSessions, messageId: f.messageId, exchangeId: f.exchangeId });
@@ -1271,9 +1327,9 @@ class Runner {
             log: DEPS.log(),
             mcpOrigin: this._mcpOrigin || null,
             publicOrigin: DEPS.publicOrigin,
-            // () => stored messages array (fresh) — null when not yet loaded.
-            getStoredMessages: () => {
-                this.refresh();
+            // async () => stored messages array (fresh) — null when not loaded.
+            getStoredMessages: async () => {
+                await this.refresh();
                 return Array.isArray(this.conv?.messages) ? this.conv.messages : null;
             },
             embedDeps: {
@@ -1286,15 +1342,15 @@ class Runner {
                 embedBatch: DEPS.embedBatch,
                 embedAvailable: DEPS.getEmbedAvailable ? DEPS.getEmbedAvailable() : true
             },
-            getRetirements: () => {
-                this.refresh();
+            getRetirements: async () => {
+                await this.refresh();
                 return this.session.retirements || {};
             },
             setRetirements: async (map) => {
-                this.refresh();
+                await this.refresh();
                 this.session.retirements = map;
                 this.session.updatedAt = new Date().toISOString();
-                this.dbInstance.db.update(this.session._id, this.session);
+                await this.dbInstance.db.update(this.session._id, this.session);
                 // Let attached views update the retirement indicator live.
                 this.broadcast('retirements', { retirements: map });
             }
@@ -1305,7 +1361,7 @@ class Runner {
     // Images: base64 → nDB bucket (internal storeFile — no HTTP hop, no 401s).
     // A tool-owned UI action may arrive as result.ui or as the `ui` field of a
     // JSON text payload (the workshop dispatcher's result shape, #56).
-    extractToolResult(result) {
+    async extractToolResult(result) {
         const parts = result?.content;
         const text = !Array.isArray(parts)
             ? (typeof result === 'string' ? result : JSON.stringify(result ?? ''))
@@ -1323,8 +1379,8 @@ class Runner {
             else if (p?.type === 'image' && p.data) {
                 const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' })[p.mimeType] || 'bin';
                 const filename = `tool_${Date.now()}_${images.length}.${ext}`;
-                const meta = this.dbInstance.db.storeFile('images', filename, Buffer.from(p.data, 'base64'), p.mimeType || 'application/octet-stream');
-                images.push(`/api/buckets/images/${meta._file.id}.${meta._file.ext}`);
+                const meta = await this.dbInstance.db.storeFile('images', Buffer.from(p.data, 'base64'), filename);
+                images.push(`/api/buckets/images/${meta.hash}.${meta.ext}`);
             }
         }
         const joined = texts.join('\n');
@@ -1588,7 +1644,7 @@ class Runner {
     // that already has its answer — re-running it would duplicate work.
     async retry() {
         if (this.running) throw new Error('A run is already in progress.');
-        this.refresh();
+        await this.refresh();
         const ids = [];
         for (let i = this.conv.messages.length - 1; i >= 0; i--) {
             const m = this.conv.messages[i];
@@ -1599,13 +1655,13 @@ class Runner {
         for (const id of ids) {
             await convStore.deleteConversationMessage(this.ctx(), { conversationId: this.conversationId, messageId: id });
         }
-        this.refresh(); // conv/session objects are stale after the writes
+        await this.refresh(); // conv/session objects are stale after the writes
         for (const id of ids) this.broadcast('msg.deleted', { messageId: id, role: 'assistant' });
         // The failed run may have been one that should never have started (a
         // queued send already answered): removing its note is the whole repair.
-        if (!this._hasUnansweredTurn()) return { retried: false, removed: ids.length };
+        if (!(await this._hasUnansweredTurn())) return { retried: false, removed: ids.length };
         this.pendingSends++;
-        this.kick();
+        await this.kick();
         return { retried: true, removed: ids.length };
     }
 
@@ -1615,7 +1671,7 @@ class Runner {
     // messages) goes, matching the old exchange-level delete and preventing an
     // orphaned assistant (which would 400 the next gateway payload).
     async deleteMessage(messageId) {
-        this.refresh();
+        await this.refresh();
         const pos = this.conv.messages.findIndex(m => m.id === messageId);
         if (pos === -1) throw new Error(`deleteMessage: message not found: ${messageId}`);
 
@@ -1633,7 +1689,7 @@ class Runner {
                 conversationId: this.conversationId, messageId: id
             });
         }
-        this.refresh(); // conv/session objects are stale after the writes
+        await this.refresh(); // conv/session objects are stale after the writes
         this.broadcast('msg.deleted', { messageId, role: target.role });
         this.touch();
         return { deleted: true, messageId, removedCount: ids.length };
@@ -1644,7 +1700,7 @@ class Runner {
     // edit updates the answer in place WITHOUT re-running (correcting/trimming,
     // not re-generating the turn).
     async editMessage(messageId, content) {
-        this.refresh();
+        await this.refresh();
         const target = this.conv.messages.find(m => m.id === messageId);
         if (!target) throw new Error(`editMessage: message not found: ${messageId}`);
 
@@ -1652,7 +1708,7 @@ class Runner {
             await convStore.editAssistantMessageContent(this.ctx(), {
                 conversationId: this.conversationId, messageId, content
             });
-            this.refresh();
+            await this.refresh();
             this.broadcast('snapshot', await this.buildSnapshot());
             return { edited: true, messageId };
         }
@@ -1660,17 +1716,18 @@ class Runner {
         const { edited, removedCount } = await convStore.editUserMessageAndTruncate(this.ctx(), {
             conversationId: this.conversationId, messageId, content
         });
-        this.refresh();
+        await this.refresh();
         // Full snapshot: one edit + N removals is cleaner as a re-render than
         // N incremental events.
         this.broadcast('snapshot', await this.buildSnapshot());
         this.pendingSends++;
-        this.kick();
+        await this.kick();
         return { edited: true, messageId, removedCount };
     }
 
-    userProfile() {
-        const doc = this.dbInstance.db.find('id', this.user.id).find(d => d._type === 'user_settings');
+    async userProfile() {
+        const docs = await this.dbInstance.db.findAll('id', this.user.id);
+        const doc = docs.find(d => d._type === 'user_settings');
         return {
             name: doc?.displayName || this.user.displayName || '',
             location: doc?.settings?.location || '',

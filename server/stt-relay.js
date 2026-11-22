@@ -97,6 +97,14 @@ function createRelay({ cfg, getAuthUser, requireAuth, L }) {
             socket.destroy();
         };
 
+        // Auth is a network read now (chat_users lives behind ndb serve), so the
+        // upgrade is authorised asynchronously — never splice an unknown socket.
+        resolveAndSplice().catch((err) => {
+            L().error('STT upgrade failed', err, {}, 'STT');
+            fail(500, 'Internal Server Error');
+        });
+
+        async function resolveAndSplice() {
         let url;
         try {
             url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -108,7 +116,7 @@ function createRelay({ cfg, getAuthUser, requireAuth, L }) {
         const upstreamPath = url.pathname.slice('/api/stt'.length);
         if (!WS_PATHS.has(upstreamPath)) { fail(404, 'Not Found'); return; }
 
-        const user = getAuthUser(req);
+        const user = await getAuthUser(req);
         if (!user || user.rights?.login === false) { fail(401, 'Unauthorized'); return; }
 
         const browserKey = req.headers['sec-websocket-key'];
@@ -205,6 +213,7 @@ function createRelay({ cfg, getAuthUser, requireAuth, L }) {
         socket.on('error', () => kill());
         upstream.on('close', kill);
         socket.on('close', kill);
+        }
     }
 
     return { proxyRest, handleUpgrade, sttBase };

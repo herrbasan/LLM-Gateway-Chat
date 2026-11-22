@@ -25,7 +25,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 
-const { Database: nDB } = require('../lib/ndb/napi');
+const { createNdbClient } = require('./ndb-client');
 const { createV2Client, NvdbHttpError } = require('./nvdb-v2-client');
 const { chatCollectionConfig, buildChatVectorInput, buildUserExpectedDocs } = require('./nvdb-chat');
 const { gatewayIdentityHeaders } = require('./gateway-identity');
@@ -56,7 +56,10 @@ try {
     cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 } catch { /* defaults below */ }
 
-const USERS_DB_PATH = process.env.CHAT_USERS_DB || cfg.usersDbPath || 'server/data/users_db/data.jsonl';
+const NDB_URL = process.env.CHAT_NDB_URL || cfg.ndbUrl || 'http://127.0.0.1:8323';
+const NDB_TOKEN = process.env.CHAT_NDB_TOKEN || cfg.ndbToken || null;
+const NDB_USERS_DB = process.env.CHAT_NDB_USERS_DB || cfg.ndbUsersDb || 'chat_users';
+const NDB_USER_PREFIX = process.env.CHAT_NDB_USER_PREFIX || cfg.ndbUserPrefix || 'chat_';
 const NVDB_URL = process.env.CHAT_NVDB_URL || cfg.nvdbUrl || 'http://127.0.0.1:3510';
 const NVDB_COLLECTION = process.env.CHAT_NVDB_COLLECTION || cfg.nvdbCollection || 'chat';
 const EMBED_URL = process.env.CHAT_EMBED_URL || cfg.embedUrl || 'http://192.168.0.100:3400/v1/embeddings';
@@ -86,13 +89,6 @@ function log(msg) {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function resolveRootPath(p) {
-    if (typeof p !== 'string' || !p.trim()) {
-        throw new Error(`Path is required (got ${JSON.stringify(p)})`);
-    }
-    return path.isAbsolute(p) ? p : path.resolve(ROOT, p);
 }
 
 // ============================================
@@ -229,51 +225,46 @@ async function embedViaGateway(texts, retries) {
 // Users
 // ============================================
 
-function loadTargetUsers(filter) {
-    const usersDb = nDB.open(resolveRootPath(USERS_DB_PATH), { persistence: 'lazy' });
-    let rows;
-    try {
-        rows = usersDb.find('_type', 'user');
-    } finally {
-        usersDb.close();
-    }
+async function loadTargetUsers(ndb, filter) {
+    const usersDb = ndb.db(NDB_USERS_DB);
+    const rows = await usersDb.queryAll({ filter: { _type: 'user' } });
 
     const byId = new Map();
     const broken = [];
     for (const row of rows) {
-        if (!row?.id || !row.dbPath) {
+        if (!row?.id || !row.username) {
             broken.push(row?.username || row?.id || row?._id || '(unknown)');
             continue;
         }
         if (!byId.has(row.id)) {
-            byId.set(row.id, { id: row.id, username: row.username || null, dbPath: row.dbPath });
+            byId.set(row.id, { id: row.id, username: row.username, dbPath: row.dbPath || null });
         }
     }
 
     const all = [...byId.values()];
     if (!filter) {
         if (broken.length > 0) {
-            throw new Error(`users_db entries without id or dbPath: ${broken.join(', ')} — cannot locate their data`);
+            throw new Error(`users_db entries without id or username: ${broken.join(', ')} — cannot locate their data`);
         }
-        if (all.length === 0) throw new Error(`No users found in ${USERS_DB_PATH}`);
+        if (all.length === 0) throw new Error(`No users found in ${NDB_USERS_DB} (${NDB_URL})`);
         return all;
     }
 
     const matched = all.filter(u => u.id === filter || u.username === filter);
     if (matched.length === 0) {
         const known = all.map(u => (u.username ? `${u.username} (${u.id})` : u.id)).join(', ') || 'none';
-        throw new Error(`--user=${filter} matched no user in ${USERS_DB_PATH} (known: ${known})`);
+        throw new Error(`--user=${filter} matched no user in ${NDB_USERS_DB} (known: ${known})`);
     }
     return matched;
 }
 
-function readUserDocs(user) {
-    const ndbPath = path.join(resolveRootPath(user.dbPath), 'data.jsonl');
-    const db = nDB.open(ndbPath, { persistence: 'lazy' });
+async function readUserDocs(ndb, user) {
+    const dbName = `${NDB_USER_PREFIX}${user.username}`;
+    const handle = ndb.db(dbName);
     try {
-        return buildUserExpectedDocs({ userId: user.id, db, chunkOpts: CHUNK_OPTS });
-    } finally {
-        db.close();
+        return await buildUserExpectedDocs({ userId: user.id, db: handle, chunkOpts: CHUNK_OPTS });
+    } catch (err) {
+        throw new Error(`cannot read '${dbName}' on ${NDB_URL}: ${err.message}`);
     }
 }
 
@@ -492,7 +483,14 @@ async function main() {
     if (!health?.ok) throw new Error(`nvdb serve unhealthy at ${NVDB_URL}`);
     log(`connected to nvdb serve (${NVDB_URL}, reranker_loaded=${health.reranker_loaded})`);
 
-    const users = loadTargetUsers(opts.user);
+    const ndb = createNdbClient(NDB_URL, { token: NDB_TOKEN, timeoutMs: 30_000 });
+    const ndbHealth = await ndb.health();
+    if (!ndbHealth?.ok) throw new Error(`ndb serve unhealthy at ${NDB_URL}`);
+    const mounted = (await ndb.listDbs()).map(d => d.name);
+    if (!mounted.includes(NDB_USERS_DB)) {
+        throw new Error(`ndb serve at ${NDB_URL} has no '${NDB_USERS_DB}' database (mounted: ${mounted.join(', ') || 'none'})`);
+    }
+    const users = await loadTargetUsers(ndb, opts.user);
     log(`target users: ${users.map(u => (u.username ? `${u.username} (${u.id})` : u.id)).join(', ')}`);
 
     if (!opts.dryRun) {
@@ -508,7 +506,7 @@ async function main() {
     const allById = new Map();
     const allExpected = [];
     for (const user of users) {
-        const built = readUserDocs(user);
+        const built = await readUserDocs(ndb, user);
         for (const [id, entry] of built.byId) allById.set(id, entry);
         allExpected.push(...built.expected);
         log(`[user] ${user.id}: chunks=${built.expected.length}`);

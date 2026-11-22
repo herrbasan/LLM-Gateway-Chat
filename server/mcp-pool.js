@@ -349,11 +349,22 @@ class UserPool {
         this.user = user;
         this.dbInstance = dbInstance;
         this.log = wrapLog(log);
-        this.servers = [];
+        this.servers = null;          // built by ensureSettings() from the user's stored settings
         this.registry = new Map(); // llmName -> { server, originalName, definition }
         this._connected = false;
+        this._settingsLoaded = false;
+    }
 
-        const settingsDoc = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
+    /**
+     * The user's MCP server list lives in their `chat_<user>` DB and is
+     * therefore one HTTP round-trip away — load it once, before anything reads
+     * `servers`/`registry` (server URLs are backend config for the normal case;
+     * a user entry overrides it).
+     */
+    async ensureSettings() {
+        if (this._settingsLoaded) return;
+        const docs = await this.dbInstance.db.findAll('id', this.user.id);
+        const settingsDoc = docs.find(d => d._type === 'user_settings');
         const s = settingsDoc?.settings || {};
         // The browser syncs its localStorage config into the kebab-case namespace
         // ('mcp-servers' / 'mcp-enabledTools'); the doc default uses camelCase.
@@ -362,9 +373,11 @@ class UserPool {
             ? s['mcp-servers']
             : (Array.isArray(s.mcpServers) ? s.mcpServers : []);
         this.servers = (userList.length ? userList : DEFAULT_SERVERS).map(cfg => new ServerConn(cfg, this.log, () => this.rebuildRegistry()));
+        this._settingsLoaded = true;
     }
 
     async ensureConnected() {
+        await this.ensureSettings();
         if (this._connected) return;
         this._connected = true;
         // _tryConnect schedules its own retry on failure — servers that are
@@ -437,14 +450,16 @@ class UserPool {
     // Workshop origin for storage PUTs (browser_fetch / attachment_save /
     // saveToStorage). Mirrors the client's getMcpServerOrigin: first
     // configured server URL's origin.
-    getStorageOrigin() {
+    async getStorageOrigin() {
+        await this.ensureSettings();
         const srv = this.servers.find(s => s.cfg?.url || s.url);
         const raw = srv?.cfg?.url || srv?.url;
         if (!raw) return null;
         try { return sseUrlBase(raw); } catch { return null; }
     }
 
-    hasToolPrefix(prefix) {
+    async hasToolPrefix(prefix) {
+        await this.ensureSettings();
         for (const llmName of this.registry.keys()) {
             if (llmName.startsWith(prefix)) return true;
         }
@@ -474,12 +489,13 @@ function init({ log, defaultServers }) {
     DEFAULT_SERVERS = Array.isArray(defaultServers) ? defaultServers : [];
 }
 
-function getForUser(user, dbInstance) {
+async function getForUser(user, dbInstance) {
     let p = pools.get(user.id);
     if (!p) {
         p = new UserPool(user, dbInstance, LOG);
         pools.set(user.id, p);
     }
+    await p.ensureSettings();
     return p;
 }
 

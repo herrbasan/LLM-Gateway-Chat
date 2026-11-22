@@ -22,11 +22,12 @@ const STREAM_STALL_MS = 300000;
 
 const registry = new Map(); // `${userId}:${conversationId}` -> ArenaRunner
 
-function getArenaRunner(user, dbInstance, conversationId) {
+async function getArenaRunner(user, dbInstance, conversationId) {
     const key = `${user.id}:${conversationId}`;
     let r = registry.get(key);
     if (!r) {
         r = new ArenaRunner(user, dbInstance, conversationId);
+        await r.init();
         registry.set(key, r);
     }
     return r;
@@ -57,9 +58,8 @@ class ArenaRunner {
         this.user = user;
         this.dbInstance = dbInstance;
         this.conversationId = conversationId;
-        const { db } = dbInstance;
-        this.session = convStore.findSessionOrThrow(db, conversationId);
-        this.conv = convStore.findOrCreateConversation(db, this.session, user);
+        this.session = null;
+        this.conv = null;
         this.views = new Set();
         this.running = false;
         this.abortRequested = false;
@@ -70,14 +70,19 @@ class ArenaRunner {
         this._stallTimer = null;
     }
 
+    /** Hydration is a network round-trip now — constructors cannot await. */
+    async init() {
+        await this.refresh();
+    }
+
     ctx() {
         return { user: this.user, dbInstance: this.dbInstance, embedMessageAsync: DEPS.embedMessageAsync, log: DEPS.log() };
     }
 
-    refresh() {
+    async refresh() {
         const { db } = this.dbInstance;
-        this.session = convStore.findSessionOrThrow(db, this.conversationId);
-        this.conv = convStore.findOrCreateConversation(db, this.session, this.user);
+        this.session = await convStore.findSessionOrThrow(db, this.conversationId);
+        this.conv = await convStore.findOrCreateConversation(db, this.session, this.user);
     }
 
     config() {
@@ -96,14 +101,14 @@ class ArenaRunner {
     }
 
     // ---- view attach (SSE: snapshot + live events) — same contract as chat ----
-    attach(req, res) {
+    async attach(req, res) {
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache, no-transform',
             'Connection': 'keep-alive'
         });
         res.write(':ok\n\n');
-        this.sendTo(res, 'snapshot', this.buildSnapshot());
+        this.sendTo(res, 'snapshot', await this.buildSnapshot());
         this.views.add(res);
         const ka = setInterval(() => { try { res.write(':ka\n\n'); } catch { /* view gone */ } }, 15000);
         req.on('close', () => { clearInterval(ka); this.views.delete(res); });
@@ -123,8 +128,8 @@ class ArenaRunner {
         return cloned;
     }
 
-    buildSnapshot() {
-        this.refresh();
+    async buildSnapshot() {
+        await this.refresh();
         return {
             meta: {
                 id: this.session.id,
@@ -168,11 +173,14 @@ class ArenaRunner {
         const { db } = this.dbInstance;
         const cfg = { ...this.config(), ...config };
         this.session.arenaConfig = cfg;
-        db.set(this.session._id, 'arenaConfig', cfg);
-        db.set(this.session._id, 'updatedAt', new Date().toISOString());
+        const updatedAt = new Date().toISOString();
+        await db.patch(this.session._id, [
+            { op: 'set', path: 'arenaConfig', value: cfg },
+            { op: 'set', path: 'updatedAt', value: updatedAt }
+        ]);
 
         // Persist the topic as a moderator system message if the conversation is empty.
-        this.refresh();
+        await this.refresh();
         if (this.conv.messages.length === 0 && cfg.topic) {
             const { message } = await convStore.appendConversationMessage(this.ctx(), {
                 conversationId: this.conversationId,
@@ -233,10 +241,10 @@ class ArenaRunner {
     }
 
     async runOneTurn() {
-        // nDB find() returns detached copies — this.conv is frozen at the last
+        // nDB queries return detached copies — this.conv is frozen at the last
         // refresh, so without this every turn would build the payload from the
         // conversation as it was at mount (topic-only → models repeat themselves).
-        this.refresh();
+        await this.refresh();
         const speakerKey = this.activeSpeaker;
         const model = this.speakerModel(speakerKey);
         const speakerName = this.speakerName(speakerKey);

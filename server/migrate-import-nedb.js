@@ -1,3 +1,8 @@
+// HISTORICAL ONE-OFF — NOT PART OF THE RUNTIME.
+// The production backend talks to "ndb serve" over HTTP (server/ndb-client.js);
+// nothing in server/ loads this file. It still requires the legacy NAPI build at
+// ../lib/ndb/napi, which the v2 cutover removed from the runtime path — run it
+// only against an old checkout where that submodule is still present.
 // ============================================
 // migrate-import-nedb — STEP 1 of 2
 // Import legacy NeDB backups into nDB (per-message documents)

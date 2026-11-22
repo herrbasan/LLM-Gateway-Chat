@@ -470,4 +470,4 @@ function buildApiMessages(messages, options = {}) {
     return { messages: merged, retireStats, rawMessages: merged };
 }
 
-module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, withInputSource, formatMessageTs, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef };
+module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, withInputSource, formatMessageTs, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef, parseBucketPath };

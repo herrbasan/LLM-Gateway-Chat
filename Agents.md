@@ -11,9 +11,9 @@
 
 ## Session Start (mandatory, before any other work)
 
-1. **Submodule update check:** run `.\sync-submodules.ps1` (double-clickable wrapper: `sync-submodules.cmd`). It attaches each submodule to its tracked branch (declared in `.gitmodules`), fast-forwards it, then commits the pointer bump(s). **Why a script and not automatic:** git pins one commit SHA per submodule — that is what makes a checkout reproducible. There *is* a track-latest mode (`git submodule update --remote`, which follows the `branch` declared in `.gitmodules`), but it has a cost that makes it unusable here (below). A submodule's upstream can move while this repo sits untouched (a push to `nui_wc2` from another machine is invisible here until someone advances the pin). Hooks don't help either — they fire on *your* git actions, and the drift happens over time with no action. So the sync is an explicit step; run it at the start of every work session. Keeping the pin at the upstream tip between sessions means running this same script on a schedule — there is no git mechanism that advances the pin while staying on the branch. **Never replace that fast-forward with `git submodule update --remote`:** it tracks the latest commit but checks each submodule out at a DETACHED HEAD, so the submodule has no branch and no upstream, VS Code has nothing to compare and stays silent, and the local branch rots unseen — `lib/nui_wc2`'s `main` had drifted 28 commits behind before anyone noticed (2026-09-11). Keeping each submodule ON its tracked branch is what makes drift visible: VS Code opens detected submodules as their own repositories and autofetches them, so the parent reports the submodule as modified the moment a branch tip passes the recorded SHA. Divergence fails loud instead of being papered over — nothing here edits a submodule, so local commits or a wrong branch means a human must look. **Checking attachment:** `git submodule status`'s `(heads/main)` parenthetical is `git describe` output and does *not* mean "on that branch" — it is true even in detached HEAD. Use `git -C lib/<name> symbolic-ref -q --short HEAD`. Windows gotcha: a running server keeps ndb's napi `.node` binary locked — stop the server before updating `lib/ndb`, and load-test after: `node -e "require('./lib/ndb/napi')"`.
+1. **Submodule update check:** run `.\sync-submodules.ps1` (double-clickable wrapper: `sync-submodules.cmd`). It attaches each submodule to its tracked branch (declared in `.gitmodules`), fast-forwards it, then commits the pointer bump(s). **Why a script and not automatic:** git pins one commit SHA per submodule — that is what makes a checkout reproducible. There *is* a track-latest mode (`git submodule update --remote`, which follows the `branch` declared in `.gitmodules`), but it has a cost that makes it unusable here (below). A submodule's upstream can move while this repo sits untouched (a push to `nui_wc2` from another machine is invisible here until someone advances the pin). Hooks don't help either — they fire on *your* git actions, and the drift happens over time with no action. So the sync is an explicit step; run it at the start of every work session. Keeping the pin at the upstream tip between sessions means running this same script on a schedule — there is no git mechanism that advances the pin while staying on the branch. **Never replace that fast-forward with `git submodule update --remote`:** it tracks the latest commit but checks each submodule out at a DETACHED HEAD, so the submodule has no branch and no upstream, VS Code has nothing to compare and stays silent, and the local branch rots unseen — `lib/nui_wc2`'s `main` had drifted 28 commits behind before anyone noticed (2026-09-11). Keeping each submodule ON its tracked branch is what makes drift visible: VS Code opens detected submodules as their own repositories and autofetches them, so the parent reports the submodule as modified the moment a branch tip passes the recorded SHA. Divergence fails loud instead of being papered over — nothing here edits a submodule, so local commits or a wrong branch means a human must look. **Checking attachment:** `git submodule status`'s `(heads/main)` parenthetical is `git describe` output and does *not* mean "on that branch" — it is true even in detached HEAD. Use `git -C lib/<name> symbolic-ref -q --short HEAD`. Windows gotcha (historical): the old napi `.node` binary was locked by the running server. `lib/ndb` is no longer used at runtime — nDB speaks HTTP (below) — so the submodule can be removed once no process holds it.
 2. **Vendored SDK update check:** run `.\sync-vendor.ps1 -CheckOnly` (or double-click `sync-vendor.cmd`). It checks GitHub releases for `herrbasan/nVoice` against `lib/vendor.json` and notifies if an update is available. Run `.\sync-vendor.ps1` to sync release files into `lib/stt/` (`nvoice-client.js`, `tts-player.js`, `README.md`) and record the version. Diff `lib/tts/nspeech-client.js` against upstream `herrbasan/nSpeech` → `lib/nspeech-client/nspeech-client.js` as needed.
-3. **nDB binary pin (only when you need a version other than the submodule's):** the nDB prebuilt ships *inside* the `lib/ndb` submodule, so step 1 is the normal refresh. `.\sync-ndb.ps1 [-CheckOnly] [-Tag vX.Y.Z]` (or double-click `sync-ndb.cmd`) installs the nDB release pinned in `lib/vendor.json`'s `nDB` entry — SHA-256-verified against the release sidecars before it touches the load path, then load-probed through `lib/ndb-load-probe.js`. Use it to override the submodule's committed binary; e.g. `-Tag v1.4.0` rolls back, and that deliberately shows `lib/ndb` as modified (at the pinned tag the install is byte-identical and the tree stays clean). `bin/ndb.exe` is gitignored upstream, so the CLI never dirties the submodule.
+3. **nDB service check:** the backend talks to a standalone `ndb serve` daemon (default `http://127.0.0.1:8323`) over HTTP — there is no NAPI binding and no `lib/ndb` runtime dependency anymore (`sync-ndb.ps1` / `sync-ndb.cmd` / `lib/ndb-load-probe.js` were removed with the cutover). The service must mount `chat_users` and allow per-user database creation (`--dir <root>`); startup refuses to listen otherwise, naming the URL and the missing database.
 
 ## Operating Rules
 
@@ -23,7 +23,7 @@
 
 ## Project Overview
 
-Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM Gateway for chat streaming and embeddings; persistence in embedded Rust DBs (nDB documents, nVDB vectors).
+Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM Gateway for chat streaming and embeddings; persistence in Rust daemons over HTTP (`ndb serve` documents, `nvdb serve` vectors).
 
 **The refactor SHIPPED 2026-08-28:** the ConversationRunner architecture runs live — conversations are server-side sessions, the browser is a disposable attach/detach view over `snapshot + events`, persistence is a side effect of the runner's traffic. The existing `chat/` UI is wired to the runner (`send` → `/send`, render ← `/events`); tools execute server-side; the arena conversation is a server-side autonomous session with `chat-arena/` as spectator view; TTS is proxied same-origin via `/api/tts/*` (f319393). Remaining direct-gateway remnant: arena summary generation + legacy import; dead browser orchestration (client-sdk/mcp-client/conversation state machine) awaits the PD cleanup pass. Completed phase plans and session handovers are archived under `docs/_Archive/`.
 
@@ -34,7 +34,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 | Language | Vanilla JS (ES2022+), HTML5, CSS3 — no TypeScript, no build |
 | UI | NUI Web Components (git submodule `lib/nui_wc2/`) |
 | Backend | Node.js raw `http` + hand-rolled router (`server/server.js`) — zero framework deps |
-| Structured DB | nDB (Rust JSON-Lines store, submodule `lib/ndb/`) |
+| Structured DB | Shared `ndb serve` v2 HTTP daemon (`http://127.0.0.1:8323`, `chat_users` + per-user `chat_<username>` databases) — `server/ndb-client.js`, no NAPI |
 | Dead deps | `express` + `@seald-io/nedb` in package.json are never imported — remove in a cleanup pass |
 | Vector DB | Shared `nvdb serve` v2 HTTP daemon (`http://127.0.0.1:3510`, `chat` collection, native per-user ACL + ONNX reranker) |
 | Embedding | Gateway `/v1/embeddings` (Qwen3-Embedding-4B, 2560d) |
@@ -46,11 +46,11 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 ```
 ├── chat/            # Main SPA (index.html, css/, js/)
 ├── chat-arena/      # Arena mode (LLM-to-LLM autonomous conversations)
-├── lib/             # Submodules: nui_wc2, ndb, nlogger; tts/
+├── lib/             # Submodules: nui_wc2, nlogger; tts/ (lib/ndb is legacy — runtime uses ndb serve)
 ├── server/          # Backend: server.js (router+routes), runner.js, arena-runner.js,
 │                    #   conversation-store.js, api-view.js, system-prompt.js, mcp-pool.js,
 │                    #   internal-tools.js, embed.js, stt-relay.js, config.json, migrations (historical)
-│   ├── data/        # nDB + nVDB files (gitignored, per-user subdirs)
+│   ├── data/        # legacy on-disk nDB/nVDB (gitignored; live data now lives in ndb serve)
 │   └── logs/        # JSON Lines logs (gitignored)
 └── docs/            # Governing spec + codebase survey
 ```
@@ -79,7 +79,7 @@ Vanilla JavaScript SPA + own Node.js backend. No build step. Connects to an LLM 
 |--------|------|
 | `server/runner.js` | ConversationRunner — single author of chat conversation state; gateway stream, tool loop, queued sends |
 | `server/arena-runner.js` | ArenaRunner — autonomous N-participant runner variant; no tools; refreshes store state every turn; derives turn/speaker from history on (re)start |
-| `server/conversation-store.js` | Shared stored-form authoring: append/insert-at/edit messages, session↔conversation resolution. nDB `find()` returns detached copies — **re-read at every use point, never cache across writes** |
+| `server/conversation-store.js` | Shared stored-form authoring: append/insert-at/edit messages, session↔conversation resolution. nDB queries return detached copies over HTTP — **re-read (`await`) at every use point, never cache across writes** |
 | `server/api-view.js` | Stored → provider payload projection (ported `getMessagesForApi`), vision base64 inlining |
 | `server/system-prompt.js` | System-prompt assembly (prime-directive blob + metadata + tool context) |
 | `server/mcp-pool.js`, `internal-tools.js` | Server-side tool execution (MCP SSE pool + internal archive/storage/bucket tools) |
@@ -140,9 +140,27 @@ Existing `/api/chats/*` CRUD (list/rename/pin/delete), `/api/search`, `/api/buck
 
 - One conversation document per session (`_type: 'conversation'`, inline `messages[]`).
 - Message **stored form**: `role`, `content`, timestamp prefix, attachments offloaded to `_file` nURIs, tool message shape (`toolName`/`toolArgs`/`toolStatus`/`toolImages`), assistant metadata (`reasoning_content`, `thinking_signature`, `streamStats`, `usage`, `context`), per-message `embedStatus`.
-- **nDB `find()` returns detached copies** — re-read at every use point, never cache across writes (`runner.refresh()`). Objects held across writes go stale.
-- Search index in shared `nvdb serve` v2 (`chat` collection): chunk IDs `${userId}:${sessionId}:${msgIdx}#${chunkIdx}`, native ACL `["user:<userId>"]`, promoted `role`/`mode`/`session_id`/`msg_idx`, native `created_at` range, hybrid RRF + Level-2 ONNX rerank. Users in `users_db` (scrypt-hashed, per-user `dbPath` isolation).
+- **nDB reads return detached copies** (JSON over HTTP) — awaited re-reads at every use point, never cached across writes (`await runner.refresh()`). Objects held across writes go stale.
+- Search index in shared `nvdb serve` v2 (`chat` collection): chunk IDs `${userId}:${sessionId}:${msgIdx}#${chunkIdx}`, native ACL `["user:<userId>"]`, promoted `role`/`mode`/`session_id`/`msg_idx`, native `created_at` range, hybrid RRF + Level-2 ONNX rerank. Users and auth sessions in the `chat_users` database (scrypt-hashed), conversations in per-user `chat_<username>` databases.
 - **Message ordering is contractual:** the in-flight assistant message is persisted at its RESERVED position (`insertConversationMessageAt`, `atIdx` reserved at run start); queued sends append after it. Without this, an abort during a queued send produces an assistant-FINAL payload (providers treat as prefill; thinking-mode prefills 400).
+
+### nDB v2 (HTTP) and the nDB -> nVDB sync
+
+- **One client, no bindings.** `server/ndb-client.js` is the only nDB interface: `ndb serve` over HTTP/1.1 (default `http://127.0.0.1:8323`), zero dependencies, every non-2xx a typed `NdbError` carrying the engine's `code` (`not_found`, `cursor_expired`, `cursor_ahead`, `create_disabled`, `file_referenced`, ...). `ndb serve` owns the data; the Node process holds none.
+- **Config:** `server/config.json` -> `ndbUrl`, `ndbUsersDb` (`chat_users`), `ndbUserPrefix` (`chat_`); overridable via `CHAT_NDB_URL` / `CHAT_NDB_USERS_DB` / `CHAT_NDB_USER_PREFIX` / `CHAT_NDB_TOKEN` (the tests use these).
+- **Startup is gated:** `/health` must answer `ok`, `chat_users` must be in `/v2/dbs`, and every configured user's `chat_<username>` database is mounted or created. Creation needs `ndb serve --dir <root>`; without it the error names `create_disabled` instead of guessing. Idempotent indexes: `_type`/`id` hash, `updatedAt`/`createdAt` btree, plus `username`/`token`/`userId` on `chat_users` and `sessionId` on user DBs.
+- **Per-user isolation is a database name**, not a path: `getOrLoadUserDb(user)` mounts `chat_<username>`. `dbPath` on a user doc is migration metadata only. Admin-created users get their database created before the user record is written.
+- **Writes are atomic PATCH batches.** `arrayPush`+`set`+`set` chains became one `db.patch(id, ops)`; a batch containing an unresolvable path rolls back entirely. Reads return detached copies.
+- **Pagination runs in Rust** (`POST /v2/dbs/:n/query` with `filter`, `sort: {field, dir}`, `offset`, `limit`, `fields`). `GET /api/chats` returns `{data, total, offset, limit}` and `db.queryAll()` pages until `total`, so nothing is silently truncated.
+- **Buckets:** `storeFile(bucket, buffer, filename)` -> `{ref, hash, ext, size}` (full 64-hex SHA-256 for new files), `getFile(bucket, "hash.ext")`, `releaseFile(bucket, "hash.ext")` (409 `file_referenced` while a live or restorable document points at it). The `/api/buckets/...` route accepts **both** 8-hex legacy ids and 64-hex ids.
+- **Sync engine (`server/nvdb-sync.js`)** keeps the shared `chat` collection in line with each user database:
+  - the watermark (`{_type: 'nvdb_watermark', key: 'nvdb_wm_<username>', source_epoch_uuid, synced_seq}`) lives in **`chat_users`** — writing it into the user's own DB would advance that DB's `last_seq` and the sync would chase itself forever (nDB assigns `_id`, so the doc is addressed by `key`);
+  - same epoch and `synced_seq < last_seq` -> replay `changes(seq, limit 250)`, rebuild only the touched conversations/sessions, delete orphaned chunk ids, commit, then advance the watermark **after** the nVDB commit;
+  - `delete` events carry no document body, so they trigger a live-session sweep (this user's fingerprints vs the live session ids);
+  - no watermark / epoch changed / `409 cursor_expired` -> pinned-snapshot rebuild with a BLAKE3 envelope hash-diff (unchanged chunks keep their vectors), watermark saved, then one incremental catch-up pass;
+  - same-epoch `synced_seq > last_seq` (and `409 cursor_ahead`) throw loudly — the monotonic seq invariant is broken.
+- **Tests:** `node server/ndb-http-e2e.test.mjs` (multi-DB + `createDb`, PATCH atomicity, Rust pagination, buckets incl. legacy 8-hex, all four sync paths) and `node server/nvdb-v2-e2e.test.mjs`; both spawn throwaway `ndb.exe` / `nvdb.exe` on ephemeral ports in a temp directory.
+
 - Aborted runs persist **content only** — reasoning cut mid-stream is a malformed thinking block.
 
 ### Context & cost management
@@ -188,7 +206,7 @@ Tools run in the runner, not the browser. `server/mcp-pool.js` (per-user MCP poo
 
 - **NUI components only** for UI controls (`nui-input`, `nui-select`, …) — never raw HTML controls. Style via theme variables (`--color-base`, `--text-color`, `--nui-accent`, `--nui-space`, …), not custom CSS on components.
 - **Code style:** 4-space indent, single quotes, semicolons, ES6 modules. Flat explicit logic; dense colocation; minimal comments (structural markers only).
-- **Data model:** one conversation document per session (`_type: 'conversation'`, inline `messages` array with per-message `embedStatus`). Vectors in nVDB keyed by message ID with `{ chatId, msgIdx }` payload. Users in `users_db` (scrypt-hashed, per-user `dbPath` isolation) — reconciled with nPort identity at P3.
+- **Data model:** one conversation document per session (`_type: 'conversation'`, inline `messages` array with per-message `embedStatus`). Vectors in nVDB keyed by message ID with `{ chatId, msgIdx }` payload. Users in the `chat_users` database (scrypt-hashed), conversations in per-user `chat_<username>` databases — reconciled with nPort identity at P3.
 - **A new chat is a client-side draft until it is started** (#60). `New Chat` opens a setup card in a container keyed `DRAFT_CHAT_ID` (`'__draft'`) and writes nothing; `Start chat` or the first send materializes it — one `POST /api/chats` carrying the card's model/title/instructions (`_materializeDraft`), then the container/maps are re-keyed to the server id. `Cancel` (or Escape while focus is inside the card) returns to the chat New Chat was pressed from, and the card offers no Cancel at all when there is no conversation to return to. Switching to another chat discards a draft outright, so an abandoned New Chat can never accumulate an empty conversation (the DB had 437 sessions at the time this shipped). The card's model list comes from the same `buildModelSelectItems` the sidebar uses. The first `msg.user` retires the card/welcome (`_runnerUser`) because the attach-snapshot can land *before* the send and re-render the empty state above the first message.
 - **Embedding pipeline** (server-side, stays): fire-and-forget after message POST, startup reconciliation nDB↔nVDB, SSE `embed-status` events, retry with escalating backoff.
 - **Image lifecycle:** base64 intercepted client-side → bucket upload → lightweight URL in message JSON. On chat delete, refs are garbage-collected via `db.releaseFile` (orphans → `.trash`).
@@ -220,4 +238,4 @@ Reach the target UI state in the integrated browser (`http://localhost:8080/chat
 - Context saga + cost plan (archived, shipped 2026-08-29): [docs/_Archive/context-length-saga.md](docs/_Archive/context-length-saga.md) · [docs/_Archive/plan-context-cost-and-reporting.md](docs/_Archive/plan-context-cost-and-reporting.md)
 - Gateway API docs live in the **LLM-Gateway** repo (`docs/api_rest.md` there) — the copy in this repo was removed as drift-prone.
 - NUI: `lib/nui_wc2/Agents.md`, `lib/nui_wc2/LLM-CHEATSHEET.md`
-- nDB / nVDB: `lib/ndb/AGENTS.md`, `lib/ndb/docs/`
+- nDB: `D:\DEV\nDB\docs\ndb-serve-design.md` (wire contract) · nVDB: `lib/nvdb`-mirror docs / `D:\DEV\nVDB`

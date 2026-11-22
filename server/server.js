@@ -6,7 +6,8 @@ const zlib = require('zlib');
 const { Readable } = require('stream');
 const { EventEmitter } = require('events');
 
-const { Database: nDB } = require('../lib/ndb/napi');
+const { createNdbClient, NdbError } = require('./ndb-client');
+const { createNvdbSync } = require('./nvdb-sync');
 const nLogger = require('../lib/nlogger-cjs');
 const convStore = require('./conversation-store');
 const runner = require('./runner');
@@ -35,7 +36,8 @@ const {
     buildChatVectorInput,
     collectMessageChunkIds,
     buildUserExpectedDocs,
-    parseChatChunkId
+    parseChatChunkId,
+    expectedDocsFromDocs
 } = require('./nvdb-chat');
 
 // Load minimal .env natively
@@ -63,6 +65,12 @@ const PORT           = process.env.CHAT_PORT           || cfg.port              
 const LOGS_DIR       = process.env.CHAT_LOGS_DIR       || cfg.logsDir           || 'server/logs';
 const LOG_RETENTION  = process.env.CHAT_LOG_RETENTION  || cfg.logRetentionDays  || 1;
 const USERS_DB_PATH  = process.env.CHAT_USERS_DB       || cfg.usersDbPath       || 'server/data/users_db/data.jsonl';
+// nDB v2 is a shared `ndb serve` daemon (System of Record). Every document the
+// chat owns lives there — no NAPI bindings, no in-process database.
+const NDB_URL        = process.env.CHAT_NDB_URL        || cfg.ndbUrl             || 'http://127.0.0.1:8323';
+const NDB_TOKEN      = process.env.CHAT_NDB_TOKEN      || cfg.ndbToken           || null;
+const NDB_USERS_DB   = process.env.CHAT_NDB_USERS_DB   || cfg.ndbUsersDb         || 'chat_users';
+const NDB_USER_PREFIX = process.env.CHAT_NDB_USER_PREFIX || cfg.ndbUserPrefix    || 'chat_';
 const SESSION_TTL    = (cfg.sessionTtlMinutes || 1440) * 60 * 1000;
 const EMBED_URL      = process.env.CHAT_EMBED_URL      || cfg.embedUrl          || 'http://192.168.0.100:3400/v1/embeddings';
 const EMBEDDING_DIMS = parseInt(process.env.CHAT_EMBED_DIMS || cfg.embedDims)   || 2560;
@@ -153,15 +161,29 @@ async function fetchPrimeDirective() {
 // ============================================
 
 let usersDb = null;
+let ndbClient = null;
 let logger = null;
 
-// Registry of loaded user databases (dbPath -> { db, nvdbClient, pendingQueue, … })
+// Names the service actually has mounted, refreshed on every createDb. A user
+// DB that is neither mounted nor creatable is a loud startup/mount failure —
+// never a silent fallback to a differently-named database.
+const mountedDbNames = new Set();
+
+// Registry of loaded user databases (userId -> { db, nvdbClient, pendingQueue, … })
 const activeDbs = new Map();
 // Shared nVDB v2 client + the reranker state probed at startup. Both are set
 // once by initNvdb() before the listener opens, so nothing reads them early.
 let nvdbClient = null;
 let nvdbRerankerLoaded = false;
 let modelsProxyCache = null; // { at, data } — 60 s cache for GET /api/models
+
+// Idempotent indexes: every hot lookup filter gets a hash index; sorts use a
+// btree so Rust paginates without a full scan.
+async function ensureDbIndexes(handle, label) {
+    for (const field of ['_type', 'id']) await handle.createIndex(field, 'hash');
+    for (const field of ['updatedAt', 'createdAt']) await handle.createIndex(field, 'btree');
+    logger.info('nDB indexes ensured', { db: label }, 'Server');
+}
 
 async function startBackend() {
 console.time('nLogger.init');
@@ -180,15 +202,35 @@ process.on('uncaughtException', (err) => {
     logger.error('UNCAUGHT EXCEPTION (server kept alive)', err.stack || err.message, {}, 'Server');
 });
 
-// 1. Initialise users_db global registry
-const usersDbDir = path.dirname(path.resolve(USERS_DB_PATH));
-if (!fs.existsSync(usersDbDir)) fs.mkdirSync(usersDbDir, { recursive: true });
+// 1. Connect to the nDB v2 service and verify the required database is mounted.
+//    Both are hard dependencies: an unreachable service or a missing DB would
+//    otherwise surface as "user vanished" later — fail loud HERE, with the URL.
+ndbClient = createNdbClient(NDB_URL, { token: NDB_TOKEN, timeoutMs: 30_000 });
+const ndbHealth = await ndbClient.health();
+if (!ndbHealth?.ok) {
+    throw new Error(`ndb serve unhealthy at ${NDB_URL}: ${JSON.stringify(ndbHealth)}`);
+}
+const ndbDbList = await ndbClient.listDbs();
+mountedDbNames.clear();
+for (const entry of ndbDbList) mountedDbNames.add(entry.name);
+if (!mountedDbNames.has(NDB_USERS_DB)) {
+    throw new Error(
+        `ndb serve at ${NDB_URL} has no '${NDB_USERS_DB}' database mounted ` +
+        `(mounted: ${[...mountedDbNames].sort().join(', ') || 'none'})`
+    );
+}
+usersDb = ndbClient.db(NDB_USERS_DB);
+logger.info('nDB v2 connected', {
+    url: NDB_URL,
+    engine: ndbHealth.engine,
+    version: ndbHealth.version,
+    usersDb: NDB_USERS_DB,
+    mounted: [...mountedDbNames].sort(),
+    allowCreate: ndbHealth.allow_create === true
+}, 'Auth');
 
-usersDb = nDB.open(USERS_DB_PATH, {
-    trash_ttl: 86400 * 7, // 7 days
-    trash_purge_interval: 3600 // 1 hour
-});
-logger.info('users_db opened', { path: USERS_DB_PATH }, 'Auth');
+await ensureDbIndexes(usersDb, NDB_USERS_DB);
+for (const field of ['username', 'token', 'userId']) await usersDb.createIndex(field, 'hash');
 
 // 2. User Seeding (Auth + Routing schema)
 const usersToSeed = [];
@@ -210,26 +252,26 @@ if (superAdminUser && superAdminPass) {
 
 // Source 2: config.json
 for (const u of (cfg.users || [])) {
-    if (!u.dbPath) {
-        logger.error('User missing dbPath, skipping', { username: u.username }, 'Auth');
+    if (!u.username) {
+        logger.error('User missing username, skipping', { id: u.id }, 'Auth');
         continue;
     }
     usersToSeed.push(u);
 }
 
 if (usersToSeed.length === 0) {
-    logger.error('FATAL: No valid users configured (need at least one with a dbPath via ENV or config.users)', {}, 'Auth');
+    logger.error('FATAL: No valid users configured (need at least one with a username via ENV or config.users)', {}, 'Auth');
     console.error('FATAL: No valid users configured.');
     process.exit(1);
 }
 
 for (const userDef of usersToSeed) {
-    const existing = usersDb.find('id', userDef.id).filter(d => d._type === 'user');
+    const existing = (await usersDb.findAll('id', userDef.id)).filter(d => d._type === 'user');
     if (existing.length === 0) {
         // Hash password with scryptSync and random salt
         const salt = crypto.randomBytes(16).toString('hex');
         const hash = crypto.scryptSync(userDef.password, salt, 64).toString('hex');
-        usersDb.insert({
+        await usersDb.insert({
             _type: 'user',
             id: userDef.id,
             username: userDef.username,
@@ -274,44 +316,65 @@ for (const userDef of usersToSeed) {
         }
 
         if (changed) {
-            revokeAllSessions(userDef.id); // force re-login on config footprint change
-            usersDb.update(doc._id, doc);
+            await revokeAllSessions(userDef.id); // force re-login on config footprint change
+            await usersDb.update(doc._id, doc);
             logger.info('User updated', { id: userDef.id, username: userDef.username, reason: changeReason }, 'Auth');
         }
     }
 }
-usersDb.compact();
+await usersDb.compact();
+
+// 3. Every registered user needs a mounted `chat_<username>` database. Creating
+//    it here (idempotent per name) means a missing database is a startup error,
+//    not a surprise at first message.
+for (const userDef of usersToSeed) {
+    await ensureUserDb(userDef.username);
+}
 
 // ============================================
 // Maintenance Loops (Global across mounted DBs)
 // ============================================
 
-// Compaction for users_db and all mounted isolated DBs
-setInterval(() => {
-  if (usersDb) {
-    try { usersDb.compact(); } catch(e) {}
+// Maintenance timers must never overlap: an `ndb serve` compaction holds the
+// DB's writer lock, so stacking them only lengthens the stall. Each pass is
+// fully awaited before the next can start.
+let compactInFlight = false;
+setInterval(async () => {
+  if (compactInFlight) {
+    logger.warn('nDB compaction still running — skipping this tick', {}, 'Server');
+    return;
   }
-  for (const [dbPath, instance] of activeDbs.entries()) {
+  compactInFlight = true;
+  try {
     try {
-      instance.db.compact();
-    } catch(err) {
-      logger.error('nDB compact failed', err, { dbPath }, 'Server');
+      await usersDb.compact();
+    } catch (err) {
+      logger.error('nDB compact failed', err, { db: NDB_USERS_DB }, 'Server');
     }
+    for (const [userId, instance] of activeDbs.entries()) {
+      try {
+        await instance.db.compact();
+      } catch (err) {
+        logger.error('nDB compact failed', err, { userId, db: instance.dbName }, 'Server');
+      }
+    }
+  } finally {
+    compactInFlight = false;
   }
 }, 5 * 60 * 1000);
 
 // File Bucket Garbage Collection (runs every 6 hours)
-// gcBuckets() returns a number (count of trashed files), not an object.
-// Log unconditionally when >0 so orphaning is always visible in logs.
-setInterval(() => {
-  for (const [dbPath, instance] of activeDbs.entries()) {
+// gcBuckets() resolves to { moved } — log unconditionally when >0 so orphaning
+// is always visible in logs.
+setInterval(async () => {
+  for (const [userId, instance] of activeDbs.entries()) {
     try {
-      const trashed = instance.db.gcBuckets();
-      if (trashed > 0) {
-        logger.info('File GC completed', { dbPath, trashed }, 'Storage');
+      const { moved } = await instance.db.gcBuckets();
+      if (moved > 0) {
+        logger.info('File GC completed', { userId, db: instance.dbName, trashed: moved }, 'Storage');
       }
-    } catch(err) {
-      logger.error('nDB gcBuckets failed', err, { dbPath }, 'Storage');
+    } catch (err) {
+      logger.error('nDB gcBuckets failed', err, { userId, db: instance.dbName }, 'Storage');
     }
   }
 }, 6 * 60 * 60 * 1000);
@@ -336,7 +399,7 @@ setInterval(async () => {
     }
 
     // 2. Iterate each mounted database instance for pending embeds
-    for (const [dbPath, instance] of activeDbs.entries()) {
+    for (const [userId, instance] of activeDbs.entries()) {
         if (!instance.nvdbClient) continue;
 
         if (instance.pendingQueue.length > 0 && embedAvailable) {
@@ -361,58 +424,95 @@ setInterval(async () => {
 }
 
 // ============================================
-// Database Instantiation (Lazy Mounting Engine)
+// Database Instantiation (nDB v2 shared service)
 // ============================================
 
-function getOrLoadUserDb(dbPath, userId = null) {
-    if (activeDbs.has(dbPath)) {
-        const existing = activeDbs.get(dbPath);
-        existing.userId = existing.userId || userId || null;
+/** The nDB database name a username owns, and its validity. */
+function userDbName(username) {
+    if (typeof username !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(username)) {
+        throw new Error(`userDbName: invalid username '${String(username)}' (expected [a-zA-Z0-9_-]+)`);
+    }
+    return `${NDB_USER_PREFIX}${username}`;
+}
+
+/**
+ * Verify that `chat_<username>` is mounted, creating it when the service allows
+ * creation (`--dir` given). A second resolved database that the user record does
+ * not own is an operator error, not something to paper over.
+ */
+async function ensureUserDb(username) {
+    const name = userDbName(username);
+    if (mountedDbNames.has(name)) return name;
+    let descriptor;
+    try {
+        descriptor = await ndbClient.createDb(name, { format: 'v2', persistence: 'immediate' });
+    } catch (err) {
+        if (err instanceof NdbError && err.code === 'create_disabled') {
+            throw new Error(
+                `ndb at ${NDB_URL} refuses to create '${name}' (create_disabled): ` +
+                `start ndb serve with --dir <root> so per-user databases can be created`
+            );
+        }
+        throw new Error(`ndb at ${NDB_URL} could not create '${name}': ${err.code || err.name}: ${err.message}`);
+    }
+    mountedDbNames.add(name);
+    logger.info('nDB user database created', { db: name, documents: descriptor?.documents ?? 0 }, 'Server');
+    const handle = ndbClient.db(name);
+    await ensureDbIndexes(handle, name);
+    for (const field of ['sessionId']) await handle.createIndex(field, 'hash');
+    return name;
+}
+
+/**
+ * Mount (once) the user's database handle. Both verified at startup / user
+ * creation, so this is pure handle construction — no I/O, no silent creation.
+ */
+function getOrLoadUserDb(user) {
+    const name = userDbName(user.username);
+    if (!mountedDbNames.has(name)) {
+        throw new Error(
+            `user database '${name}' is not mounted on ndb serve at ${NDB_URL} ` +
+            `(user ${user.id}); restart the service or re-create the database`
+        );
+    }
+    const existing = activeDbs.get(user.id);
+    if (existing) {
+        existing.username = user.username;
         return existing;
     }
-    
-    // We arrive here and must block initially for nDB.open
-    logger.info('Mounting isolated user DB lazily', { dbPath }, 'Server');
-    
-    const absDbPath = path.resolve(dbPath);
-    if (!fs.existsSync(absDbPath)) fs.mkdirSync(absDbPath, { recursive: true });
-    
-    const ndbPath = path.join(absDbPath, 'data.jsonl');
-    
-    console.time(`nDB.open:${dbPath}`);
-    const db = nDB.open(ndbPath, {
-        trash_ttl: 86400 * 7, // 7 days
-        trash_purge_interval: 3600 // 1 hour
-    });
-    console.timeEnd(`nDB.open:${dbPath}`);
-    
+
+    logger.info('Mounting user database', { userId: user.id, db: name }, 'Server');
+
     // nVDB v2 is ONE shared HTTP collection for every user — the instance carries
     // the client, collection and chunk contract so writers never reach for a
     // module global (tests mount instances without one).
     const instance = {
-        dbPath,
-        userId: userId || null,
-        db,
+        userId: user.id,
+        username: user.username,
+        dbName: name,
+        db: ndbClient.db(name),
         nvdbClient,
         nvdbCollection: NVDB_COLLECTION,
         nvdbChunkOpts: NVDB_CHUNK_OPTS,
         pendingQueue: [],
         embedInFlight: 0,
         embedWaiters: [],
-        drainRunning: false
+        drainRunning: false,
+        reconcileRunning: null
     };
-    
-    activeDbs.set(dbPath, instance);
-    
+
+    activeDbs.set(user.id, instance);
+
     // Reconcile this user's slice of the shared collection after mount: the
-    // envelope fingerprint sweep repairs lexical state, then the drain attaches
-    // whatever vectors nVDB is still missing (herrbasan/nVDB#3 keeps them queued).
-    if (instance.nvdbClient && instance.userId) {
+    // incremental change feed (or a pinned-snapshot rebuild) repairs lexical
+    // state, then the drain attaches whatever vectors nVDB is still missing
+    // (herrbasan/nVDB#3 keeps them queued).
+    if (instance.nvdbClient) {
         setTimeout(() => reconcileUserNvdb(instance).catch(err => {
-            logger.error('nVDB reconciliation failed', err, { dbPath, userId: instance.userId }, 'Server');
+            logger.error('nVDB reconciliation failed', err, { userId: user.id, db: name }, 'Server');
         }), 3000);
     }
-    
+
     return instance;
 }
 
@@ -427,62 +527,47 @@ async function attachVectorsQuietly(instance, attachments) {
         return true;
     } catch (err) {
         if (err instanceof NvdbHttpError && err.status === 409 && err.code === 'stale_vector_cas') {
-            L().debug('nVDB attach skipped: stale_vector_cas', { ids: attachments.length, dbPath: instance.dbPath }, 'Embed');
+            L().debug('nVDB attach skipped: stale_vector_cas', { ids: attachments.length, db: instance.dbName }, 'Embed');
             return false;
         }
         throw err;
     }
 }
 
-// Startup reconciliation for one user: (A) envelope-fingerprint diff between the
-// stored conversations and this user's slice of the collection, then (B) the
-// async pending_embeddings drain. nVDB is shared by every local account, so both
-// steps are scoped by the user's chunk-id prefix.
-async function reconcileUserNvdb(instance) {
-    const { nvdbClient: client, userId } = instance;
-    if (!client || !userId) return;
+// ============================================
+// nVDB reconciliation (Phase 4b - incremental nDB -> nVDB sync)
+// ============================================
+//
+// The engine lives in ./nvdb-sync.js (testable against a throwaway ndb serve).
+// The watermark lives in `chat_users` � deliberately NOT in the user's own DB,
+// because writing it there would advance that DB's own `last_seq` and the sync
+// would chase its own tail forever.
+const nvdbSync = createNvdbSync({
+    usersDb: () => usersDb,
+    log: () => L(),
+    chunkOpts: NVDB_CHUNK_OPTS,
+    expectedDocsFromDocs,
+    parseChatChunkId,
+    afterSync: (instance, result) => drainPendingVectors(instance, result)
+});
+const reconcileUserNvdb = nvdbSync.reconcileUserNvdb;
+
+async function drainPendingVectors(instance, syncResult) {
+    const { nvdbClient: client, userId, db } = instance;
     const collection = instance.nvdbCollection;
     const prefix = `${userId}:`;
 
-    // A — lexical truth. Fingerprints carry the envelope hash nVDB last wrote;
-    // a mismatch (or absence) means the document must be rewritten.
-    const fp = await client.fingerprints(collection);
-    const existing = new Map();
-    for (const entry of fp?.entries || []) {
-        if (typeof entry?.id === 'string' && entry.id.startsWith(prefix)) existing.set(entry.id, entry);
+    if (!embedAvailable) return;
+    const probe = await client.pendingEmbeddings(collection, 256);
+    const hasOwnWork = (probe?.pending || []).some(item => typeof item?.id === 'string' && item.id.startsWith(prefix));
+    if (!hasOwnWork) {
+        logger.info('nVDB sync complete', { userId, db: instance.dbName, mode: syncResult?.mode, pending: 0 }, 'Embed');
+        return;
     }
 
-    const { byId } = buildUserExpectedDocs({ userId, db: instance.db, chunkOpts: NVDB_CHUNK_OPTS });
+    const { byId } = await buildUserExpectedDocs({ userId, db, chunkOpts: NVDB_CHUNK_OPTS });
+    const existing = await userFingerprints(instance);
 
-    const toUpsert = [];
-    for (const [id, rec] of byId) {
-        const known = existing.get(id);
-        if (!known || known.envelope_hash !== rec.envelope_hash) toUpsert.push(rec.doc);
-    }
-    const toDelete = [];
-    for (const id of existing.keys()) {
-        if (!byId.has(id)) toDelete.push(id);
-    }
-
-    const BATCH = 200;
-    let upserted = 0;
-    let deleted = 0;
-    for (let i = 0; i < toUpsert.length; i += BATCH) {
-        const chunk = toUpsert.slice(i, i + BATCH);
-        await client.upsert(collection, chunk, { commit: false });
-        upserted += chunk.length;
-    }
-    for (let i = 0; i < toDelete.length; i += BATCH) {
-        const chunk = toDelete.slice(i, i + BATCH);
-        await client.deleteIds(collection, chunk, { commit: false });
-        deleted += chunk.length;
-    }
-    if (upserted > 0 || deleted > 0) await client.commit(collection);
-    logger.info('nVDB reconciled', { userId, dbPath: instance.dbPath, upserted, deleted, unchanged: byId.size - upserted }, 'Server');
-
-    // B — vector drain. Everything nVDB queued for this user's chunk ids gets
-    // embedded in slices of 8 (one embed slot per slice, so interactive search
-    // keeps its turn) and attached in one batch of up to 256.
     if (instance.drainRunning) return;
     instance.drainRunning = true;
     try {
@@ -559,22 +644,36 @@ async function reconcileUserNvdb(instance) {
         // A message is only 'embedded' once every one of its chunks has a vector.
         // Skip writes when nDB already matches so a clean mount stays write-free.
         const convCache = new Map();
-        let marked = 0;
+        const opsByConv = new Map();
         for (const [key, info] of expectedChunks) {
             if ((attachedCounts.get(key) || 0) < info.count) continue;
             if (!info.convNdbId || !info.msgId) continue;
             let conv = convCache.get(info.sessionId);
             if (conv === undefined) {
-                conv = instance.db.find('id', info.sessionId).find(d => d._type === 'conversation') || null;
+                conv = (await instance.db.findAll('id', info.sessionId)).find(d => d._type === 'conversation') || null;
                 convCache.set(info.sessionId, conv);
             }
             const stored = conv?.messages?.[info.msgIdx];
             if (!stored || stored.id !== info.msgId) continue;
             if (stored.embedStatus === 'embedded' && stored.embedChunks === info.count && !stored.embedError) continue;
-            instance.db.set(info.convNdbId, `messages.${info.msgIdx}.embedStatus`, 'embedded');
-            instance.db.set(info.convNdbId, `messages.${info.msgIdx}.embedChunks`, info.count);
-            instance.db.set(info.convNdbId, `messages.${info.msgIdx}.embedError`, null);
-            marked++;
+            const ops = opsByConv.get(info.convNdbId) || [];
+            ops.push(
+                { op: 'set', path: `messages.${info.msgIdx}.embedStatus`, value: 'embedded' },
+                { op: 'set', path: `messages.${info.msgIdx}.embedChunks`, value: info.count },
+                { op: 'set', path: `messages.${info.msgIdx}.embedError`, value: null }
+            );
+            opsByConv.set(info.convNdbId, ops);
+        }
+        let marked = 0;
+        for (const [convNdbId, ops] of opsByConv) {
+            try {
+                await instance.db.patch(convNdbId, ops);
+                marked += ops.length / 3;
+            } catch (err) {
+                // The message was deleted between the read and the write: the
+                // mark is moot, but the rejection stays visible.
+                logger.warn('Embed status mark skipped', { userId, convNdbId, error: err.message }, 'Embed');
+            }
         }
         if (marked > 0) logger.info('nVDB reconciliation marked messages embedded', { userId, marked }, 'Embed');
     } finally {
@@ -685,7 +784,7 @@ function parseCookies(req) {
     return list;
 }
 
-function getAuthUser(req) {
+async function getAuthUser(req) {
     const cookies = parseCookies(req);
     const token = cookies.userToken;
     if (!token) return null;
@@ -694,54 +793,73 @@ function getAuthUser(req) {
     // independently so the same credentials can attach from several devices at
     // once (stress-testing the runner's multi-view model). nPort will own the
     // token/identity eventually; here the token maps to a user via userId.
-    const session = usersDb.find('token', token).find(d => d._type === 'auth_session');
+    const sessionRows = await usersDb.findAll('token', token);
+    const session = sessionRows.find(d => d._type === 'auth_session');
     if (!session) return null;
 
-    const user = usersDb.find('id', session.userId).find(d => d._type === 'user');
+    const userRows = await usersDb.findAll('id', session.userId);
+    const user = userRows.find(d => d._type === 'user');
     if (!user) return null;
 
     if (SESSION_TTL > 0 && session.lastAccess) {
         if (Date.now() - new Date(session.lastAccess).getTime() > SESSION_TTL) {
-            usersDb.delete(session._id); // expired session
+            await usersDb.delete(session._id); // expired session
             return null;
         }
         // Refresh lastAccess only if more than half the TTL has elapsed
         if (Date.now() - new Date(session.lastAccess).getTime() > SESSION_TTL / 2) {
-            touchSession(session, user);
+            await touchSession(session, user);
         }
     } else if (SESSION_TTL > 0) {
-        touchSession(session, user);
+        await touchSession(session, user);
     }
 
     return user;
 }
 
 // Refresh a session's lastAccess (caller throttles) and mirror to the user doc
-// so admin's last-seen stays current.
-function touchSession(session, user) {
+// so admin's last-seen stays current. One PATCH per doc — never a read-modify-write.
+async function touchSession(session, user) {
     const now = new Date().toISOString();
-    usersDb.set(session._id, 'lastAccess', now);
+    await usersDb.set(session._id, 'lastAccess', now);
     user.lastAccess = now;
-    usersDb.set(user._id, 'lastAccess', now);
+    await usersDb.set(user._id, 'lastAccess', now);
 }
 
 // Revoke every active session for a user (password change, config change, admin edit).
-function revokeAllSessions(userId) {
-    for (const s of usersDb.find('userId', userId).filter(d => d._type === 'auth_session')) {
-        usersDb.delete(s._id);
-    }
+async function revokeAllSessions(userId) {
+    const sessions = (await usersDb.findAll('userId', userId)).filter(d => d._type === 'auth_session');
+    for (const s of sessions) await usersDb.delete(s._id);
 }
 
+/**
+ * Resolve the request's identity ONCE, in the router, before any handler runs.
+ * Auth docs live behind `ndb serve`, so every lookup is a network round-trip;
+ * doing it per request (not per requireAuth call) keeps the handlers readable
+ * and the cost flat.
+ */
+async function resolveAuth(req) {
+    const user = await getAuthUser(req);
+    if (!user || user.rights?.login === false) return null;
+    // A mount failure is an infrastructure fault, not a rejected credential: it
+    // propagates so the router can answer 5xx instead of pretending 401.
+    const dbInstance = getOrLoadUserDb(user);
+    return { user, dbInstance };
+}
+
+// Synchronous gate for handlers: the router resolved `req.auth` before dispatch.
+// An unresolved request is a routing bug and says so.
 function requireAuth(req, res) {
-    const user = getAuthUser(req);
-    if (!user || user.rights?.login === false) {
+    if (req.auth === undefined) {
+        throw new Error(`requireAuth: auth was not resolved for ${req.method} ${req.url}`);
+    }
+    const authResult = req.auth;
+    if (!authResult || authResult.user?.rights?.login === false) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return null;
     }
-    
-    const dbInstance = getOrLoadUserDb(user.dbPath, user.id);
-    return { user, dbInstance };
+    return authResult;
 }
 
 // ============================================
@@ -1100,14 +1218,14 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
     // empty messages (a vector with no content can only return content-free hits).
     if (!isEmbeddableMessage(msg)) {
         if (msg.role !== 'tool') {
-            L().debug('Embed skipped (empty content)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
+            L().debug('Embed skipped (empty content)', { msgId: msg.id, role: msg.role, db: instance.dbName }, 'Embed');
         }
         return;
     }
 
     if (!instance.nvdbClient || !instance.userId) {
         if (msg.embedStatus === 'pending') {
-            L().info('Embed skipped (nVDB v2 unavailable or userId unknown)', { msgId: msg.id, role: msg.role, dbPath: instance.dbPath }, 'Embed');
+            L().info('Embed skipped (nVDB v2 unavailable or userId unknown)', { msgId: msg.id, role: msg.role, db: instance.dbName }, 'Embed');
         }
         return;
     }
@@ -1185,12 +1303,14 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
                 throw err;
             }
 
-            // Mark message as embedded in the conversation doc (atomic field writes — no read-modify-write race)
+            // Mark message as embedded in the conversation doc (one atomic PATCH — no read-modify-write race)
             try {
-                instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'embedded');
-                instance.db.set(convNdbId, `messages.${msgIdx}.embedChunks`, docs.length);
-                instance.db.set(convNdbId, `messages.${msgIdx}.embedAttempts`, attempt + 1);
-                instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, null);
+                await instance.db.patch(convNdbId, [
+                    { op: 'set', path: `messages.${msgIdx}.embedStatus`, value: 'embedded' },
+                    { op: 'set', path: `messages.${msgIdx}.embedChunks`, value: docs.length },
+                    { op: 'set', path: `messages.${msgIdx}.embedAttempts`, value: attempt + 1 },
+                    { op: 'set', path: `messages.${msgIdx}.embedError`, value: null }
+                ]);
                 embedEvents.emit('status', {
                     chatId: session.id, msgIdx, messageId: msg.id,
                     embedStatus: 'embedded', embedError: null
@@ -1229,8 +1349,10 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
                 const reason = isTokenOverflow ? 'too_many_tokens' : (err.message || 'client_error');
                 L().error('Embed permanent failure', err, { msgId: msg.id, kind: err.kind }, 'Embed');
                 try {
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedStatus`, 'failed');
-                    instance.db.set(convNdbId, `messages.${msgIdx}.embedError`, reason);
+                    await instance.db.patch(convNdbId, [
+                        { op: 'set', path: `messages.${msgIdx}.embedStatus`, value: 'failed' },
+                        { op: 'set', path: `messages.${msgIdx}.embedError`, value: reason }
+                    ]);
                     embedEvents.emit('status', {
                         chatId: session.id, msgIdx, messageId: msg.id,
                         embedStatus: 'failed', embedError: reason
@@ -1267,7 +1389,7 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
 // picked up by the 5-second drain once its time comes.
 function queueEmbedRetry(instance, item, prevFails) {
     if (instance.pendingQueue.length >= 500) {
-        L().warn('Embed queue full — message dropped', { msgId: item.msg?.id, role: item.msg?.role, queueLen: instance.pendingQueue.length, dbPath: instance.dbPath }, 'Embed');
+        L().warn('Embed queue full — message dropped', { msgId: item.msg?.id, role: item.msg?.role, queueLen: instance.pendingQueue.length, db: instance.dbName }, 'Embed');
         return;
     }
     const delays = [5000, 30000, 120000, 600000, 1800000];
@@ -1361,13 +1483,13 @@ const routes = {
           const filename = `ex_${exchangeId}_${i}.${ext}`;
           
           const buffer = Buffer.from(file.data, 'base64');
-          const meta = dbInstance.db.storeFile('images', filename, buffer, file.type);
+          const meta = await dbInstance.db.storeFile('images', buffer, filename);
           
           savedFiles.push({
             name: file.name,
             type: file.type,
-            url: `/api/buckets/images/${meta._file.id}.${meta._file.ext}`,
-            _file: `images:${meta._file.id}.${meta._file.ext}`
+            url: `/api/buckets/images/${meta.hash}.${meta.ext}`,
+            _file: meta.ref
           });
         }
         json(res, { success: true, files: savedFiles });
@@ -1430,30 +1552,20 @@ const routes = {
         if (dotPos === -1) throw new Error('invalid filename');
         const id = filename.slice(0, dotPos);
         const ext = filename.slice(dotPos + 1).toLowerCase();
+        // Content addressing changed with nDB v2: new uploads carry the full
+        // 64-hex SHA-256, older ones the legacy 8-hex prefix. Both are valid refs
+        // and the engine serves either.
+        if (!/^(?:[0-9a-f]{8}|[0-9a-f]{64})$/.test(id) || !/^[a-z0-9]{0,10}$/.test(ext)) {
+          json(res, { error: 'Invalid file reference' }, 400);
+          return;
+        }
 
-        // Active bucket first; if missing, try restore from trash then retry.
-        // GC previously trashed URL-only refs (no compact _file) — recover them.
-        let buffer = null;
-        try {
-          buffer = dbInstance.db.getFile(bucket, id, ext);
-        } catch (_) {
-          buffer = null;
-        }
-        if (!buffer && typeof dbInstance.db.restoreFile === 'function') {
-          try {
-            const restored = dbInstance.db.restoreFile(bucket, id, ext);
-            if (restored) {
-              logger.info('Restored bucket file from trash', { bucket, id, ext }, 'Storage');
-              buffer = dbInstance.db.getFile(bucket, id, ext);
-            }
-          } catch (restoreErr) {
-            logger.warn('Bucket restore attempt failed', { bucket, id, ext, err: restoreErr.message }, 'Storage');
-          }
-        }
-        if (!buffer) {
+        const file = await dbInstance.db.getFile(bucket, `${id}.${ext}`);
+        if (!file || file.buffer.length === 0) {
           json(res, { error: 'File not found' }, 404);
           return;
         }
+        const buffer = file.buffer;
 
         const mime = {
           'png': 'image/png',
@@ -1584,7 +1696,7 @@ const routes = {
     if (/^https?:\/\//i.test(raw)) {
       target = raw;
     } else {
-      const origin = mcpPool.getForUser(user, dbInstance).getStorageOrigin();
+      const origin = await (await mcpPool.getForUser(user, dbInstance)).getStorageOrigin();
       target = origin.replace(/\/+$/, '') + (raw.startsWith('/') ? raw : '/' + raw);
     }
     try {
@@ -1620,7 +1732,8 @@ const routes = {
         return json(res, { error: 'Username and password required' }, 400);
     }
     
-    const user = usersDb.find('username', username).find(d => d._type === 'user');
+    const userRows = await usersDb.findAll('username', username);
+    const user = userRows.find(d => d._type === 'user');
     if (!user) {
         // Delay to mitigate brute force
         await new Promise(r => setTimeout(r, 2000));
@@ -1645,15 +1758,16 @@ const routes = {
     // the same credentials may attach from multiple devices simultaneously).
     const userToken = 'sess_' + crypto.randomUUID().replace(/-/g, '');
     const now = new Date().toISOString();
-    usersDb.insert({ _type: 'auth_session', token: userToken, userId: user.id, createdAt: now, lastAccess: now });
+    await usersDb.insert({ _type: 'auth_session', token: userToken, userId: user.id, createdAt: now, lastAccess: now });
     user.lastAccess = now;
-    usersDb.set(user._id, 'lastAccess', now);
+    await usersDb.set(user._id, 'lastAccess', now);
     
     // Check if user requires initialization of settings in their chat db
-    const dbInstance = getOrLoadUserDb(user.dbPath, user.id);
-    let settings = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
+    const dbInstance = getOrLoadUserDb(user);
+    const settingsDocs = await dbInstance.db.findAll('id', user.id);
+    const settings = settingsDocs.find(d => d._type === 'user_settings');
     if (!settings) {
-        dbInstance.db.insert({
+        await dbInstance.db.insert({
             _type: 'user_settings',
             id: user.id,
             displayName: user.displayName,
@@ -1679,8 +1793,9 @@ const routes = {
     // Revoke only THIS session — other devices stay logged in.
     const token = parseCookies(req).userToken;
     if (token) {
-        const session = usersDb.find('token', token).find(d => d._type === 'auth_session');
-        if (session) usersDb.delete(session._id);
+        const sessionRows = await usersDb.findAll('token', token);
+        const session = sessionRows.find(d => d._type === 'auth_session');
+        if (session) await usersDb.delete(session._id);
     }
     
     res.writeHead(200, {
@@ -1694,7 +1809,7 @@ const routes = {
 
   'GET /api/auth/session': async (req, res) => {
     // Only check if cookie has valid token, do not bounce or redirect
-    const user = getAuthUser(req);
+    const user = req.auth?.user || null;
     if (!user) {
         return json(res, { error: 'Unauthorized' }, 401);
     }
@@ -1726,7 +1841,7 @@ const routes = {
     if (!authResult) return;
     if (!authResult.user.rights?.admin) return json(res, { error: 'Forbidden' }, 403, req);
 
-    const users = usersDb.find('_type', 'user').map(u => ({
+    const users = (await usersDb.findAll('_type', 'user')).map(u => ({
         id: u.id,
         username: u.username,
         displayName: u.displayName,
@@ -1746,18 +1861,30 @@ const routes = {
     const body = await readBody(req);
     const { username, password, displayName, dbPath, rights } = body;
 
-    if (!username || !password || !dbPath) {
-        return json(res, { error: 'Username, password, and dbPath are required' }, 400, req);
+    if (!username || !password) {
+        return json(res, { error: 'Username and password are required' }, 400, req);
     }
     
-    // Validate bounds
-    if (typeof username !== 'string' || !/^[a-zA-Z0-9_\-]+$/.test(username)) {
+    // Validate bounds — the username also names the user's nDB database, so it
+    // must satisfy both the app rule and nDB's `[a-zA-Z0-9._-]` name rule.
+    if (typeof username !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(username)) {
         return json(res, { error: 'Invalid username format' }, 400, req);
     }
 
-    const existing = usersDb.find('username', username).filter(d => d._type === 'user');
+    const existing = (await usersDb.findAll('username', username)).filter(d => d._type === 'user');
     if (existing.length > 0) {
         return json(res, { error: 'Username already exists' }, 400, req);
+    }
+
+    // The per-user database is created here: a registered user without a
+    // readable database is a broken account, so a create failure aborts the
+    // request loudly (nothing is registered).
+    let dbName;
+    try {
+        dbName = await ensureUserDb(username);
+    } catch (err) {
+        logger.error('User database creation failed', err, { username }, 'Admin');
+        return json(res, { error: `Could not create the user database: ${err.message}` }, 503, req);
     }
 
     const salt = require('crypto').randomBytes(16).toString('hex');
@@ -1769,17 +1896,17 @@ const routes = {
         id: newUserId,
         username: username,
         displayName: displayName || username,
-        dbPath: dbPath,
+        dbPath: dbPath || dbName,
         passwordHash: salt + ':' + hash,
         rights: rights || { login: true, read: true, write: true },
         lastAccess: null,
         createdAt: new Date().toISOString()
     };
 
-    usersDb.insert(newUser);
-    usersDb.compact();
+    await usersDb.insert(newUser);
+    await usersDb.compact();
 
-    logger.info('User created via admin API', { adminId: authResult.user.id, newUserId, username }, 'Admin');
+    logger.info('User created via admin API', { adminId: authResult.user.id, newUserId, username, db: dbName }, 'Admin');
 
     json(res, { 
         success: true, 
@@ -1803,14 +1930,14 @@ const routes = {
         return json(res, { error: 'Cannot delete yourself' }, 400, req);
     }
 
-    const users = usersDb.find('id', targetId).filter(d => d._type === 'user');
+    const users = (await usersDb.findAll('id', targetId)).filter(d => d._type === 'user');
     if (users.length === 0) {
         return json(res, { error: 'User not found' }, 404, req);
     }
 
     const userToDelete = users[0];
-    usersDb.delete(userToDelete._id);
-    usersDb.compact();
+    await usersDb.delete(userToDelete._id);
+    await usersDb.compact();
 
     logger.info('User deleted via admin API', { adminId: authResult.user.id, targetId, username: userToDelete.username }, 'Admin');
     json(res, { success: true }, 200, req);
@@ -1825,7 +1952,7 @@ const routes = {
     if (!body) return json(res, { error: 'Invalid payload' }, 400, req);
 
     const targetId = params.id;
-    const users = usersDb.find('id', targetId).filter(d => d._type === 'user');
+    const users = (await usersDb.findAll('id', targetId)).filter(d => d._type === 'user');
     if (users.length === 0) {
         return json(res, { error: 'User not found' }, 404, req);
     }
@@ -1856,9 +1983,9 @@ const routes = {
     }
 
     if (changed) {
-        revokeAllSessions(targetId); // force re-login
-        usersDb.update(targetUser._id, targetUser);
-        usersDb.compact();
+        await revokeAllSessions(targetId); // force re-login
+        await usersDb.update(targetUser._id, targetUser);
+        await usersDb.compact();
         logger.info('User updated via admin API', { adminId: authResult.user.id, targetId, username: targetUser.username }, 'Admin');
     }
 
@@ -1873,16 +2000,16 @@ const routes = {
     if (!body || !body.password) return json(res, { error: 'Password required' }, 400, req);
 
     const targetId = params.id;
-    const users = usersDb.find('id', targetId).filter(d => d._type === 'user');
+    const users = (await usersDb.findAll('id', targetId)).filter(d => d._type === 'user');
     if (users.length === 0) return json(res, { error: 'User not found' }, 404, req);
 
     const userToUpdate = users[0];
     const newSalt = crypto.randomBytes(16).toString('hex');
     userToUpdate.passwordHash = newSalt + ':' + crypto.scryptSync(body.password, newSalt, 64).toString('hex');
-    revokeAllSessions(targetId); // force re-login
+    await revokeAllSessions(targetId); // force re-login
     
-    usersDb.update(userToUpdate._id, userToUpdate);
-    usersDb.compact();
+    await usersDb.update(userToUpdate._id, userToUpdate);
+    await usersDb.compact();
 
     logger.info('User password reset via admin API', { adminId: authResult.user.id, targetId, username: userToUpdate.username }, 'Admin');
     json(res, { success: true }, 200, req);
@@ -1897,7 +2024,7 @@ const routes = {
     if (!authResult) return;
     const { user, dbInstance } = authResult;
 
-    let settingsDoc = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
+    let settingsDoc = (await dbInstance.db.findAll('id', user.id)).find(d => d._type === 'user_settings');
     if (!settingsDoc) {
       settingsDoc = {
         _type: 'user_settings',
@@ -1917,7 +2044,7 @@ const routes = {
             ttsSpeed: 1.0
         }
       };
-      dbInstance.db.insert(settingsDoc);
+      await dbInstance.db.insert(settingsDoc);
     }
     json(res, settingsDoc, 200, req);
   },
@@ -1930,7 +2057,7 @@ const routes = {
     const body = await readBody(req);
     if (!body || !body.settings) return json(res, { error: 'Invalid settings payload' }, 400, req);
 
-    let settingsDoc = dbInstance.db.find('id', user.id).find(d => d._type === 'user_settings');
+    let settingsDoc = (await dbInstance.db.findAll('id', user.id)).find(d => d._type === 'user_settings');
     if (!settingsDoc) {
       settingsDoc = {
         _type: 'user_settings',
@@ -1938,10 +2065,10 @@ const routes = {
         displayName: user.displayName,
         settings: body.settings
       };
-      dbInstance.db.insert(settingsDoc);
+      await dbInstance.db.insert(settingsDoc);
     } else {
       settingsDoc.settings = body.settings;
-      dbInstance.db.update(settingsDoc._id, settingsDoc);
+      await dbInstance.db.update(settingsDoc._id, settingsDoc);
     }
     json(res, settingsDoc, 200, req);
   },
@@ -1989,13 +2116,24 @@ const routes = {
     const authResult = requireAuth(req, res);
     if (!authResult) return;
     const { user, dbInstance } = authResult;
-    
-    // DB is isolated, no need to filter by userId, but harmless
-    const sessions = dbInstance.db.find('_type', 'session')
-      .filter(s => Array.isArray(s.messages) ? s.userId === user.id : true) // Ensure structure safety
-      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-    
-    json(res, { data: sessions }, 200, req);
+    const url = new URL(req.url, 'http://localhost');
+    const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
+    const limitParam = url.searchParams.get('limit');
+    const limit = limitParam === null ? 1000 : Math.max(1, Math.min(10000, parseInt(limitParam, 10) || 0));
+
+    // Filtering, sorting and pagination run in Rust; the projection keeps the
+    // (large) message arrays out of the response.
+    const page = await dbInstance.db.query({
+      filter: { _type: 'session' },
+      sort: { field: 'updatedAt', dir: 'desc' },
+      offset,
+      limit
+    });
+    // Structure safety, as before: a legacy session doc that still carries an
+    // inline `messages` array must belong to this user.
+    const sessions = page.results.filter(s => Array.isArray(s.messages) ? s.userId === user.id : true);
+
+    json(res, { data: sessions, total: page.total, offset, limit }, 200, req);
   },
   
   // Get session with messages (from conversation doc)
@@ -2005,8 +2143,8 @@ const routes = {
     const { user, dbInstance } = authResult;
     const { db } = dbInstance;
 
-    const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session');
+    const docs = await db.findAll('id', params.id);
+    const session = docs.find(s => s._type === 'session');
     
     if (!session) {
       json(res, { error: 'Not found' }, 404, req);
@@ -2014,10 +2152,10 @@ const routes = {
     }
     
     // Try conversation doc first (post-migration)
-    const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
+    const convs = docs.filter(d => d._type === 'conversation');
     if (convs.length > 0) {
       const conv = convs[0];
-      const msgs = JSON.parse(JSON.stringify(conv.messages || [])); // clone to avoid mutating db memory
+      const msgs = JSON.parse(JSON.stringify(conv.messages || [])); // detached copy
       for (const m of msgs) {
         if (m.attachments) m.attachments = convStore.densifyAttachments(m.attachments);
       }
@@ -2026,7 +2164,7 @@ const routes = {
     }
     
     // Fallback: legacy per-message docs
-    const messages = db.find('sessionId', params.id)
+    const messages = (await db.findAll('sessionId', params.id))
       .filter(m => m._type === 'message')
       .sort((a, b) => a.turnIndex - b.turnIndex);
     
@@ -2060,8 +2198,8 @@ const routes = {
       isPublic: false
     };
     
-    db.insert(session);
-    L().info('Session created', { id, title: body.title || 'New Chat', mode: body.mode || 'direct', dbPath: user.dbPath }, 'Session');
+    await db.insert(session);
+    L().info('Session created', { id, title: body.title || 'New Chat', mode: body.mode || 'direct', userId: user.id }, 'Session');
     
     // Also create empty conversation document
     const conv = {
@@ -2077,7 +2215,7 @@ const routes = {
       messageCount: 0,
       messages: []
     };
-    db.insert(conv);
+    await db.insert(conv);
     
     emitListEvent(user.id, 'chat.created', session);
     json(res, session, 201, req);
@@ -2091,8 +2229,8 @@ const routes = {
     const { db } = dbInstance;
 
     const body = await readBody(req);
-    const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session');
+    const docs = await db.findAll('id', params.id);
+    const session = docs.find(s => s._type === 'session');
     if (!session) { json(res, { error: 'Not found' }, 404, req); return; }
     if (body.pinned !== undefined) session.pinned = !!body.pinned;
     if (body.title !== undefined) session.title = body.title;
@@ -2113,7 +2251,7 @@ const routes = {
     if (body.summary !== undefined) session.summary = body.summary;
     if (body.arenaConfig !== undefined) session.arenaConfig = body.arenaConfig;
     session.updatedAt = new Date().toISOString();
-    db.update(session._id, session);
+    await db.update(session._id, session);
     emitListEvent(user.id, 'chat.updated', session);
     // #27 — model changed out-of-band (settings save): sync a mounted runner's
     // session copy (nDB returns detached objects) and converge its views.
@@ -2142,8 +2280,8 @@ const routes = {
     const { db } = dbInstance;
 
     const body = await readBody(req);
-    const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session');
+    const docs = await db.findAll('id', params.id);
+    const session = docs.find(s => s._type === 'session');
     
     if (!session) {
       json(res, { error: 'Not found' }, 404, req);
@@ -2170,7 +2308,7 @@ const routes = {
       return;
     }
 
-    const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
+    const convs = (await db.findAll('id', params.id)).filter(d => d._type === 'conversation');
     if (convs.length === 0) {
       json(res, { error: 'Conversation not found' }, 404, req);
       return;
@@ -2192,7 +2330,7 @@ const routes = {
 
     const body = await readBody(req);
     try {
-      const r = runner.getRunner(user, dbInstance, params.id);
+      const r = await runner.getRunner(user, dbInstance, params.id);
       const { message } = await r.send(body);
       json(res, { message }, 201, req);
     } catch (e) {
@@ -2211,7 +2349,7 @@ const routes = {
 
     const body = await readBody(req);
     try {
-      const result = runner.getRunner(user, dbInstance, params.id).recordAppEvent(body);
+      const result = await (await runner.getRunner(user, dbInstance, params.id)).recordAppEvent(body);
       json(res, result, result.duplicate ? 200 : 201, req);
     } catch (e) {
       json(res, { error: e.message }, e.statusCode || 400, req);
@@ -2225,11 +2363,11 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      const session = dbInstance.db.find('id', params.id).find(s => s._type === 'session');
+      const session = (await dbInstance.db.findAll('id', params.id)).find(s => s._type === 'session');
       if (session?.mode === 'arena') {
-        arenaRunner.getArenaRunner(user, dbInstance, params.id).attach(req, res);
+        await (await arenaRunner.getArenaRunner(user, dbInstance, params.id)).attach(req, res);
       } else {
-        runner.getRunner(user, dbInstance, params.id).attach(req, res); // do NOT json()/end — SSE stays open
+        (await runner.getRunner(user, dbInstance, params.id)).attach(req, res); // do NOT json()/end — SSE stays open
       }
     } catch (e) {
       json(res, { error: e.message }, 404, req);
@@ -2245,7 +2383,7 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      json(res, await runner.getRunner(user, dbInstance, params.id).buildSnapshot(), 200, req);
+      json(res, await (await runner.getRunner(user, dbInstance, params.id)).buildSnapshot(), 200, req);
     } catch (e) {
       json(res, { error: e.message }, 404, req);
     }
@@ -2258,7 +2396,7 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      const r = runner.getRunner(user, dbInstance, params.id);
+      const r = await runner.getRunner(user, dbInstance, params.id);
       json(res, { aborted: r.abort() }, 200, req);
     } catch (e) {
       json(res, { error: e.message }, 404, req);
@@ -2273,7 +2411,7 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      const r = runner.getRunner(user, dbInstance, params.id);
+      const r = await runner.getRunner(user, dbInstance, params.id);
       if (r.running) {
         json(res, { error: 'A run is already in progress.' }, 409, req);
         return;
@@ -2294,7 +2432,7 @@ const routes = {
 
     const body = await readBody(req);
     try {
-      const r = arenaRunner.getArenaRunner(user, dbInstance, params.id);
+      const r = await arenaRunner.getArenaRunner(user, dbInstance, params.id);
       await r.start(body || {});
       json(res, { started: true }, 200, req);
     } catch (e) {
@@ -2309,7 +2447,7 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      const r = arenaRunner.getArenaRunner(user, dbInstance, params.id);
+      const r = await arenaRunner.getArenaRunner(user, dbInstance, params.id);
       r.stop();
       json(res, { stopped: true }, 200, req);
     } catch (e) {
@@ -2324,7 +2462,7 @@ const routes = {
     const { user, dbInstance } = authResult;
 
     try {
-      const r = runner.getRunner(user, dbInstance, params.id);
+      const r = await runner.getRunner(user, dbInstance, params.id);
       json(res, await r.deleteMessage(params.messageId), 200, req);
     } catch (e) {
       json(res, { error: e.message }, 404, req);
@@ -2339,7 +2477,7 @@ const routes = {
 
     const body = await readBody(req);
     try {
-      const r = runner.getRunner(user, dbInstance, params.id);
+      const r = await runner.getRunner(user, dbInstance, params.id);
       json(res, await r.editMessage(params.messageId, body.content), 200, req);
     } catch (e) {
       json(res, { error: e.message }, 404, req);
@@ -2353,8 +2491,8 @@ const routes = {
     const { user, dbInstance } = authResult;
     const { db } = dbInstance;
 
-    const sessions = db.find('id', params.id);
-    const session = sessions.find(s => s._type === 'session');
+    const docs = await db.findAll('id', params.id);
+    const session = docs.find(s => s._type === 'session');
     
     if (!session) {
       json(res, { error: 'Not found' }, 404, req);
@@ -2362,8 +2500,8 @@ const routes = {
     }
     
     // Soft delete session, conversation doc, and legacy messages
-    db.delete(session._id);
-    const convs = db.find('id', params.id).filter(d => d._type === 'conversation');
+    await db.delete(session._id);
+    const convs = docs.filter(d => d._type === 'conversation');
     
     // Extract file references for garbage collection + the nVDB chunk ids this
     // conversation owns (a shared collection, so nothing removes them implicitly).
@@ -2395,22 +2533,24 @@ const routes = {
             }
           }
         }
-        db.delete(c._id);
+        await db.delete(c._id);
       }
 
       if (idsToDelete.length > 0 && dbInstance.nvdbClient) {
         await dbInstance.nvdbClient.deleteIds(NVDB_COLLECTION, idsToDelete, { commit: true });
       }
       
-      const messages = db.find('sessionId', params.id);
+      const messages = await db.findAll('sessionId', params.id);
       for (const m of messages) {
-        if (m._type === 'message') db.delete(m._id);
+        if (m._type === 'message') await db.delete(m._id);
       }
       
-      // Trigger bucket clean up using the safe Rust method
+      // Trigger bucket clean up through the engine's reference-aware release
       for (const ref of fileRefsToRelease) {
         try {
-          db.releaseFile(ref);
+          const [bucket, file] = ref.split(':');
+          if (!bucket || !file) throw new Error(`malformed file reference '${ref}'`);
+          await db.releaseFile(bucket, file);
         } catch (e) {
           logger.error('Failed to release file', e.message, { ref }, 'Storage');
         }
@@ -2448,7 +2588,7 @@ const routes = {
     if (!authResult) return;
     const { user, dbInstance } = authResult;
     
-    const arenas = dbInstance.db.find('_type', 'session')
+    const arenas = (await dbInstance.db.findAll('_type', 'session'))
       .filter(s => Array.isArray(s.messages) ? s.userId === user.id : true)
       .filter(s => s.mode === 'arena')
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -2465,7 +2605,7 @@ const routes = {
     const body = await readBody(req);
     // Single implementation: shared with the runner's chat_archive_find_references (PB-b).
     try {
-      const data = internalTools.findReferences(dbInstance.db, body);
+      const data = await internalTools.findReferences(dbInstance.db, body);
       json(res, data, 200, req);
     } catch (e) {
       json(res, { error: e.message }, 400, req);
@@ -2548,6 +2688,22 @@ const server = http.createServer(async (req, res) => {
     });
     res.end();
     return;
+  }
+
+  // Auth lives behind `ndb serve` now, so it is resolved ONCE per request here
+  // rather than inside every handler (requireAuth reads req.auth). A failure to
+  // reach that backend is a 503 — never a 401 that blames the caller.
+  const authSurface = pathname.startsWith('/api/')
+    || pathname.startsWith('/files/')
+    || /^\/(chat)?\/storage\//.test(pathname);
+  if (authSurface) {
+    try {
+      req.auth = await resolveAuth(req);
+    } catch (err) {
+      L().error('Auth resolution failed', err, { url: pathname }, 'Auth');
+      json(res, { error: `Authentication backend unavailable: ${err.message}` }, 503);
+      return;
+    }
   }
 
   // Redirect root to /chat/ (needed for relative resource paths)
@@ -2761,7 +2917,8 @@ async function initNvdb() {
     L().info('nVDB v2 connected', { url: NVDB_URL, collection: NVDB_COLLECTION, rerankerLoaded: nvdbRerankerLoaded }, 'Server');
 }
 
-// Start HTTP server — only once users_db is open and nVDB v2 answered.
+// Start HTTP server — only once nDB v2 answered, users_db is mounted and nVDB v2
+// is ready. Both are hard dependencies; a failure here stops the process.
 startBackend()
   .then(() => initNvdb())
   .then(() => {
@@ -2775,7 +2932,7 @@ startBackend()
     });
   })
   .catch(err => {
-    logger?.error('FATAL: nVDB v2 startup failed', err, { url: NVDB_URL, collection: NVDB_COLLECTION }, 'Server');
+    logger?.error('FATAL: startup failed', err, { ndbUrl: NDB_URL, ndbUsersDb: NDB_USERS_DB, nvdbUrl: NVDB_URL, collection: NVDB_COLLECTION }, 'Server');
     console.error(err);
     process.exit(1);
   });

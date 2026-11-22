@@ -105,20 +105,23 @@ function normalizeStoredMessage(msg = {}) {
     return message;
 }
 
-function findSessionOrThrow(db, conversationId) {
-    const session = db.find('id', conversationId).find(s => s._type === 'session');
+async function findSessionOrThrow(db, conversationId) {
+    const docs = await db.findAll('id', conversationId);
+    const session = docs.find(s => s._type === 'session');
     if (!session) throw new Error(`session not found: ${conversationId}`);
     return session;
 }
 
-function findConversationOrThrow(db, conversationId) {
-    const conv = db.find('id', conversationId).find(d => d._type === 'conversation');
+async function findConversationOrThrow(db, conversationId) {
+    const docs = await db.findAll('id', conversationId);
+    const conv = docs.find(d => d._type === 'conversation');
     if (!conv) throw new Error(`conversation doc not found: ${conversationId}`);
     return conv;
 }
 
-function findOrCreateConversation(db, session, user) {
-    const convs = db.find('id', session.id).filter(d => d._type === 'conversation');
+async function findOrCreateConversation(db, session, user) {
+    const docs = await db.findAll('id', session.id);
+    const convs = docs.filter(d => d._type === 'conversation');
     if (convs.length > 0) return convs[0];
     const conv = {
         _type: 'conversation',
@@ -133,8 +136,8 @@ function findOrCreateConversation(db, session, user) {
         messageCount: 0,
         messages: []
     };
-    db.insert(conv);
-    return conv;
+    const { doc } = await db.insert(conv);
+    return doc;
 }
 
 function guardCtx(fnName, ctx) {
@@ -182,8 +185,8 @@ async function appendConversationMessage(ctx, msg) {
     const { db } = ctx.dbInstance;
     const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
 
-    const session = findSessionOrThrow(db, msg.conversationId);
-    const conv = findOrCreateConversation(db, session, ctx.user);
+    const session = await findSessionOrThrow(db, msg.conversationId);
+    const conv = await findOrCreateConversation(db, session, ctx.user);
 
     const idx = conv.messages.length;
     const msgId = msg.id || 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
@@ -192,19 +195,23 @@ async function appendConversationMessage(ctx, msg) {
     conv.messages.push(message);
     conv.messageCount = conv.messages.length;
     conv.updatedAt = new Date().toISOString();
-    db.arrayPush(conv._id, 'messages', message);
-    db.set(conv._id, 'messageCount', conv.messageCount);
-    db.set(conv._id, 'updatedAt', conv.updatedAt);
+    await db.patch(conv._id, [
+        { op: 'array_push', path: 'messages', value: message },
+        { op: 'set', path: 'messageCount', value: conv.messageCount },
+        { op: 'set', path: 'updatedAt', value: conv.updatedAt }
+    ]);
 
     session.messageCount = conv.messageCount;
     session.updatedAt = conv.updatedAt;
+    const sessionOps = [];
     if (message.role === 'user' && session.title === 'New Chat') {
         const excerpt = (message.content || '').split('\n')[0].substring(0, 40);
         session.title = excerpt || 'New Chat';
-        db.set(session._id, 'title', session.title);
+        sessionOps.push({ op: 'set', path: 'title', value: session.title });
     }
-    db.set(session._id, 'messageCount', session.messageCount);
-    db.set(session._id, 'updatedAt', session.updatedAt);
+    sessionOps.push({ op: 'set', path: 'messageCount', value: session.messageCount });
+    sessionOps.push({ op: 'set', path: 'updatedAt', value: session.updatedAt });
+    await db.patch(session._id, sessionOps);
 
     log.info('Message added', { sessionId: msg.conversationId, role: message.role, idx, contentLen: (message.content || '').length }, 'Message');
 
@@ -228,8 +235,8 @@ async function insertConversationMessageAt(ctx, { conversationId, message: msg, 
     const { db } = ctx.dbInstance;
     const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
 
-    const session = findSessionOrThrow(db, conversationId);
-    const conv = findConversationOrThrow(db, conversationId);
+    const session = await findSessionOrThrow(db, conversationId);
+    const conv = await findConversationOrThrow(db, conversationId);
     const pos = Math.max(0, Math.min(atIdx ?? conv.messages.length, conv.messages.length));
 
     const message = normalizeStoredMessage({ ...msg, id: msg.id || 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10), idx: pos, createdAt: new Date().toISOString() });
@@ -238,13 +245,17 @@ async function insertConversationMessageAt(ctx, { conversationId, message: msg, 
     for (let i = pos + 1; i < conv.messages.length; i++) conv.messages[i].idx = i;
     conv.messageCount = conv.messages.length;
     conv.updatedAt = new Date().toISOString();
-    db.set(conv._id, 'messages', conv.messages);
-    db.set(conv._id, 'messageCount', conv.messageCount);
-    db.set(conv._id, 'updatedAt', conv.updatedAt);
+    await db.patch(conv._id, [
+        { op: 'set', path: 'messages', value: conv.messages },
+        { op: 'set', path: 'messageCount', value: conv.messageCount },
+        { op: 'set', path: 'updatedAt', value: conv.updatedAt }
+    ]);
     session.messageCount = conv.messageCount;
     session.updatedAt = conv.updatedAt;
-    db.set(session._id, 'messageCount', session.messageCount);
-    db.set(session._id, 'updatedAt', session.updatedAt);
+    await db.patch(session._id, [
+        { op: 'set', path: 'messageCount', value: session.messageCount },
+        { op: 'set', path: 'updatedAt', value: session.updatedAt }
+    ]);
 
     log.info('Message inserted', { sessionId: conversationId, role: message.role, idx: pos }, 'Message');
     // The shifted tail is re-keyed before the embed fires: `conv.messages[pos]`
@@ -269,19 +280,26 @@ async function replaceConversationMessages(ctx, { conversationId, messages } = {
     const { db } = ctx.dbInstance;
     const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
 
-    const conv = findConversationOrThrow(db, conversationId);
+    const conv = await findConversationOrThrow(db, conversationId);
     const newMessages = messages.map((m, idx) => ({ ...m, idx, attachments: normalizeAttachments(m.attachments) }));
     conv.messages = newMessages;
     conv.messageCount = newMessages.length;
     conv.updatedAt = new Date().toISOString();
-    db.update(conv._id, conv);
+    await db.patch(conv._id, [
+        { op: 'set', path: 'messages', value: newMessages },
+        { op: 'set', path: 'messageCount', value: conv.messageCount },
+        { op: 'set', path: 'updatedAt', value: conv.updatedAt }
+    ]);
 
-    const session = db.find('id', conversationId).find(s => s._type === 'session');
+    const docs = await db.findAll('id', conversationId);
+    const session = docs.find(s => s._type === 'session');
     if (session) {
         session.messageCount = newMessages.length;
         session.updatedAt = conv.updatedAt;
-        db.set(session._id, 'messageCount', session.messageCount);
-        db.set(session._id, 'updatedAt', session.updatedAt);
+        await db.patch(session._id, [
+            { op: 'set', path: 'messageCount', value: session.messageCount },
+            { op: 'set', path: 'updatedAt', value: session.updatedAt }
+        ]);
     }
 
     log.info('Messages replaced', { sessionId: conversationId, count: newMessages.length }, 'Message');
@@ -300,8 +318,8 @@ async function deleteConversationMessage(ctx, { conversationId, messageId } = {}
     const { db } = ctx.dbInstance;
     const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
 
-    const session = findSessionOrThrow(db, conversationId);
-    const conv = findConversationOrThrow(db, conversationId);
+    const session = await findSessionOrThrow(db, conversationId);
+    const conv = await findConversationOrThrow(db, conversationId);
 
     const pos = conv.messages.findIndex(m => m.id === messageId);
     if (pos === -1) throw new Error(`deleteConversationMessage: message not found: ${messageId}`);
@@ -312,14 +330,18 @@ async function deleteConversationMessage(ctx, { conversationId, messageId } = {}
 
     conv.messageCount = conv.messages.length;
     conv.updatedAt = new Date().toISOString();
-    db.set(conv._id, 'messages', conv.messages);
-    db.set(conv._id, 'messageCount', conv.messageCount);
-    db.set(conv._id, 'updatedAt', conv.updatedAt);
+    await db.patch(conv._id, [
+        { op: 'set', path: 'messages', value: conv.messages },
+        { op: 'set', path: 'messageCount', value: conv.messageCount },
+        { op: 'set', path: 'updatedAt', value: conv.updatedAt }
+    ]);
 
     session.messageCount = conv.messageCount;
     session.updatedAt = conv.updatedAt;
-    db.set(session._id, 'messageCount', session.messageCount);
-    db.set(session._id, 'updatedAt', session.updatedAt);
+    await db.patch(session._id, [
+        { op: 'set', path: 'messageCount', value: session.messageCount },
+        { op: 'set', path: 'updatedAt', value: session.updatedAt }
+    ]);
 
     // Re-key the shifted tail (and drop the removed message's chunks) in nVDB.
     await syncShiftedTailToNvdb(ctx, session, conv, pos, prevMessages);
@@ -340,8 +362,8 @@ async function editUserMessageAndTruncate(ctx, { conversationId, messageId, cont
     const { db } = ctx.dbInstance;
     const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
 
-    const session = findSessionOrThrow(db, conversationId);
-    const conv = findConversationOrThrow(db, conversationId);
+    const session = await findSessionOrThrow(db, conversationId);
+    const conv = await findConversationOrThrow(db, conversationId);
 
     const pos = conv.messages.findIndex(m => m.id === messageId);
     if (pos === -1) throw new Error(`editUserMessageAndTruncate: message not found: ${messageId}`);
@@ -358,14 +380,18 @@ async function editUserMessageAndTruncate(ctx, { conversationId, messageId, cont
 
     conv.messageCount = conv.messages.length;
     conv.updatedAt = new Date().toISOString();
-    db.set(conv._id, 'messages', conv.messages);
-    db.set(conv._id, 'messageCount', conv.messageCount);
-    db.set(conv._id, 'updatedAt', conv.updatedAt);
+    await db.patch(conv._id, [
+        { op: 'set', path: 'messages', value: conv.messages },
+        { op: 'set', path: 'messageCount', value: conv.messageCount },
+        { op: 'set', path: 'updatedAt', value: conv.updatedAt }
+    ]);
 
     session.messageCount = conv.messageCount;
     session.updatedAt = conv.updatedAt;
-    db.set(session._id, 'messageCount', session.messageCount);
-    db.set(session._id, 'updatedAt', session.updatedAt);
+    await db.patch(session._id, [
+        { op: 'set', path: 'messageCount', value: session.messageCount },
+        { op: 'set', path: 'updatedAt', value: session.updatedAt }
+    ]);
 
     if (ctx.dbInstance.nvdbClient && removed.length > 0) {
         const chunkOpts = ctx.dbInstance.nvdbChunkOpts || {};
@@ -397,8 +423,8 @@ async function editAssistantMessageContent(ctx, { conversationId, messageId, con
     const { db } = ctx.dbInstance;
     const log = ctx.log || { info() {}, warn() {}, error() {}, debug() {} };
 
-    const session = findSessionOrThrow(db, conversationId);
-    const conv = findConversationOrThrow(db, conversationId);
+    const session = await findSessionOrThrow(db, conversationId);
+    const conv = await findConversationOrThrow(db, conversationId);
 
     const pos = conv.messages.findIndex(m => m.id === messageId);
     if (pos === -1) throw new Error(`editAssistantMessageContent: message not found: ${messageId}`);
@@ -408,10 +434,12 @@ async function editAssistantMessageContent(ctx, { conversationId, messageId, con
     target.content = content;
     target.updatedAt = new Date().toISOString();
     conv.updatedAt = new Date().toISOString();
-    db.set(conv._id, 'messages', conv.messages);
-    db.set(conv._id, 'updatedAt', conv.updatedAt);
+    await db.patch(conv._id, [
+        { op: 'set', path: 'messages', value: conv.messages },
+        { op: 'set', path: 'updatedAt', value: conv.updatedAt }
+    ]);
     session.updatedAt = conv.updatedAt;
-    db.set(session._id, 'updatedAt', session.updatedAt);
+    await db.set(session._id, 'updatedAt', session.updatedAt);
 
     ctx.embedMessageAsync(ctx.dbInstance, target, session, conv._id, pos).catch(err => {
         log.warn('Fire-and-forget embed rejected (already re-queued)', { sessionId: conversationId, idx: pos, kind: err?.kind, error: err?.message }, 'Embed');

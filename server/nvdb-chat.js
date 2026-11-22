@@ -254,23 +254,42 @@ function collectMessageChunkIds(userId, sessionId, msg, msgIdx, chunkOpts = {}) 
  * `expected` list feeds integrity_check, `byId` resolves a hit back to its
  * stored message. Messages live on conversation docs; session docs supply the
  * metadata (title, mode, summary, createdAt).
+ *
+ * Accepts either `docs` (an already-read array — the pinned-snapshot path) or
+ * an nDB `db` handle whose documents are fetched over HTTP.
  */
-function buildUserExpectedDocs({ userId, db, chunkOpts = {} }) {
+async function buildUserExpectedDocs({ userId, db, docs, chunkOpts = {} }) {
     if (typeof userId !== 'string' || !userId.trim()) {
         throw new Error('buildUserExpectedDocs: userId required');
     }
-    if (!db || typeof db.find !== 'function') {
-        throw new Error('buildUserExpectedDocs: db with find() required');
+    let all = docs;
+    if (all === undefined) {
+        if (!db || typeof db.queryAll !== 'function') {
+            throw new Error('buildUserExpectedDocs: docs array or an nDB handle with queryAll() required');
+        }
+        const sessions = await db.queryAll({ filter: { _type: 'session' } });
+        const conversations = await db.queryAll({ filter: { _type: 'conversation' } });
+        all = [...conversations, ...sessions];
     }
+    if (!Array.isArray(all)) throw new Error('buildUserExpectedDocs: docs must be an array');
+    return expectedDocsFromDocs({ userId, docs: all, chunkOpts });
+}
 
-    const sessions = db.find('_type', 'session');
-    const conversations = db.find('_type', 'conversation');
+/** Sync core: derive the expected v2 documents from an in-memory doc array. */
+function expectedDocsFromDocs({ userId, docs, chunkOpts = {} }) {
+    if (typeof userId !== 'string' || !userId.trim()) {
+        throw new Error('expectedDocsFromDocs: userId required');
+    }
+    if (!Array.isArray(docs)) throw new Error('expectedDocsFromDocs: docs array required');
+
+    const sessions = docs.filter(d => d && d._type === 'session');
+    const conversations = docs.filter(d => d && d._type === 'conversation');
     const sessionById = new Map();
     for (const session of sessions) {
         if (session?.id) sessionById.set(session.id, session);
     }
 
-    const docs = [];
+    const out = [];
     const byId = new Map();
     const expected = [];
     const seen = new Set();
@@ -284,14 +303,14 @@ function buildUserExpectedDocs({ userId, db, chunkOpts = {} }) {
             const messageDocs = buildMessageV2Docs({ userId, session, msg, msgIdx, chunkOpts });
             for (const doc of messageDocs) {
                 const { content_hash, envelope_hash } = documentHashes(doc);
-                docs.push(doc);
+                out.push(doc);
                 byId.set(doc.id, { doc, content_hash, envelope_hash, convNdbId, session, msg, msgIdx });
                 expected.push({ id: doc.id, content_hash, envelope_hash });
             }
         });
     }
 
-    return { docs, byId, expected };
+    return { docs: out, byId, expected };
 }
 
 module.exports = {
@@ -311,5 +330,6 @@ module.exports = {
     buildMessageV2Docs,
     buildChatVectorInput,
     collectMessageChunkIds,
-    buildUserExpectedDocs
+    buildUserExpectedDocs,
+    expectedDocsFromDocs
 };

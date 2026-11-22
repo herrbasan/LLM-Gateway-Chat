@@ -4,7 +4,10 @@
   "description": "Standalone LLM Gateway Chat client",
   "scripts": {
     "postinstall": "git submodule update --init --recursive",
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "test:units": "node server/archive-search.test.mjs && node --test server/hosted-apps.test.cjs && node --test server/preview-content.test.cjs",
+    "test:ndb": "node server/ndb-http-e2e.test.mjs",
+    "test:nvdb": "node server/nvdb-v2-e2e.test.mjs"
   },
   "keywords": [
     "llm",

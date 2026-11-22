@@ -97,7 +97,7 @@ test('formats pending app events as an authoritative next-turn system block', ()
     assert.equal(buildAppEventBlock([]), '');
 });
 
-test('runner persists and deduplicates issued app events, then consumes them only on settlement', (t) => {
+test('runner persists and deduplicates issued app events, then consumes them only on settlement', async (t) => {
     const docs = [
         { _id: 'session_1', _type: 'session', id: 'chat_1', title: 'Test', createdAt: new Date().toISOString() },
         {
@@ -108,10 +108,31 @@ test('runner persists and deduplicates issued app events, then consumes them onl
             }]
         }
     ];
+    // The runner speaks to an nDB handle whose calls are all async.
     const db = {
-        find(field, value) { return structuredClone(docs.filter(doc => doc[field] === value)); },
-        set(id, field, value) { docs.find(doc => doc._id === id)[field] = value; },
-        insert(doc) { docs.push(structuredClone(doc)); }
+        async findAll(field, value) { return structuredClone(docs.filter(doc => doc[field] === value)); },
+        async find(field, value) {
+            const results = await this.findAll(field, value);
+            return { count: results.length, results };
+        },
+        async patch(id, ops) {
+            const doc = docs.find(entry => entry._id === id);
+            for (const op of ops) {
+                if (op.op !== 'set') throw new Error(`fake db: unsupported op ${op.op}`);
+                const parts = op.path.split('.');
+                let cur = doc;
+                for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+                cur[parts[parts.length - 1]] = structuredClone(op.value);
+            }
+            return { applied: ops.length, doc: structuredClone(doc) };
+        },
+        async set(id, field, value) { return this.patch(id, [{ op: 'set', path: field, value }]); },
+        async update(id, doc) { Object.assign(docs.find(entry => entry._id === id), structuredClone(doc)); },
+        async insert(doc) {
+            const stored = { _id: `gen_${docs.length + 1}`, ...structuredClone(doc) };
+            docs.push(stored);
+            return { id: stored._id, doc: stored };
+        }
     };
     const emitted = [];
     runner.init({
@@ -121,22 +142,25 @@ test('runner persists and deduplicates issued app events, then consumes them onl
         getInstructions: async () => '',
         embedMessageAsync: async () => {}
     });
-    const instance = runner.getRunner({ id: 'test' }, { db }, 'chat_1');
+    const instance = await runner.getRunner({ id: 'test' }, { db }, 'chat_1');
     t.after(() => clearTimeout(instance.idleTimer));
 
-    const first = instance.recordAppEvent(savedEvent);
+    const first = await instance.recordAppEvent(savedEvent);
     assert.equal(first.duplicate, false);
     assert.equal(instance.conv.appEvents.length, 1);
     assert.equal(instance._pendingAppEvents().length, 1);
     assert.equal(emitted.at(-1).type, 'app.event');
 
-    const duplicate = instance.recordAppEvent(savedEvent);
+    const duplicate = await instance.recordAppEvent(savedEvent);
     assert.equal(duplicate.duplicate, true);
     assert.equal(instance.conv.appEvents.length, 1);
-    assert.throws(() => instance.recordAppEvent({ ...savedEvent, instance: 'app_00000000-0000-0000-0000-000000000000' }), /was not issued/);
+    await assert.rejects(
+        () => instance.recordAppEvent({ ...savedEvent, instance: 'app_00000000-0000-0000-0000-000000000000' }),
+        /was not issued/
+    );
 
     instance._appEventIdsInRun = new Set([first.event.id]);
-    instance._consumeAppEventsInRun();
+    await instance._consumeAppEventsInRun();
     assert.ok(instance.conv.appEvents[0].consumedAt);
     assert.equal(instance._pendingAppEvents().length, 0);
 });

@@ -1,11 +1,12 @@
-// Real nVDB v2 end-to-end: a throwaway `nvdb serve` process, a throwaway nDB.
+// Real nVDB v2 + nDB v2 end-to-end: two throwaway `serve` processes, no NAPI.
 //   node server/nvdb-v2-e2e.test.mjs
 //
-// Nothing here touches live data: the server binds an ephemeral loopback port
-// and writes into a fresh `mkdtemp` directory that is removed afterwards. The
-// only shared resource is the binary, which is read and executed.
+// Nothing here touches live data: both servers bind ephemeral loopback ports and
+// write into a fresh `mkdtemp` directory that is removed afterwards. The only
+// shared resources are the binaries, which are read and executed.
 //
-// What it proves, against the real Tantivy + vector engine:
+// What it proves, against the real Tantivy + vector engine and the real nDB
+// HTTP surface:
 //   - the collection contract the chat writer produces is accepted as-is
 //   - pending embeddings / attach / integrity round-trip is clean
 //   - ACL principals keep one user's hits out of another user's results
@@ -20,7 +21,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
-const { Database: nDB } = require('../lib/ndb/napi');
+const { createNdbClient } = require('./ndb-client');
 const { createV2Client, NvdbHttpError } = require('./nvdb-v2-client');
 const {
     chatCollectionConfig,
@@ -33,6 +34,7 @@ const { searchArchive } = require('./internal-tools');
 const store = require('./conversation-store');
 
 const NVDB_EXE = process.env.NVDB_EXE || 'D:\\DEV\\nVDB\\target\\release\\nvdb.exe';
+const NDB_EXE = process.env.NDB_EXE || 'D:\\DEV\\nDB\\target\\release\\ndb.exe';
 const COLLECTION = 'chat';
 const DIMS = 8;
 const MODEL_VERSION = 'test-v1';
@@ -85,15 +87,15 @@ async function freePort() {
     });
 }
 
-async function waitForHealth(client, child, stderrTail) {
+async function waitForHealth(check, child, stderrTail, label) {
     const deadline = Date.now() + HEALTH_TIMEOUT_MS;
     let lastError = null;
     while (Date.now() < deadline) {
         if (child.exitCode !== null) {
-            throw new Error(`nvdb serve exited early (code ${child.exitCode}): ${stderrTail()}`);
+            throw new Error(`${label} serve exited early (code ${child.exitCode}): ${stderrTail()}`);
         }
         try {
-            const health = await client.health();
+            const health = await check();
             if (health?.ok === true) return health;
             lastError = new Error(`health not ok: ${JSON.stringify(health)}`);
         } catch (err) {
@@ -101,7 +103,7 @@ async function waitForHealth(client, child, stderrTail) {
         }
         await sleep(SLEEP_MS);
     }
-    throw new Error(`nvdb serve did not become healthy within ${HEALTH_TIMEOUT_MS}ms: ${lastError?.message}\n${stderrTail()}`);
+    throw new Error(`${label} serve did not become healthy within ${HEALTH_TIMEOUT_MS}ms: ${lastError?.message}\n${stderrTail()}`);
 }
 
 async function stopChild(child) {
@@ -191,8 +193,9 @@ function sortedIds(data) {
 
 function instance(userId, db) {
     return {
-        dbPath: db.path,
         userId,
+        username: userId,
+        dbName: userId,
         db,
         nvdbClient: ctx.client,
         nvdbCollection: COLLECTION,
@@ -232,7 +235,11 @@ async function setup() {
     if (!fs.existsSync(NVDB_EXE)) {
         throw new Error(`nVDB binary not found: ${NVDB_EXE} (build it with cargo build --release in D:\\DEV\\nVDB)`);
     }
+    if (!fs.existsSync(NDB_EXE)) {
+        throw new Error(`nDB binary not found: ${NDB_EXE} (build it with cargo build --release in D:\\DEV\\nDB)`);
+    }
     ctx.port = await freePort();
+    ctx.ndbPort = await freePort();
     ctx.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-nvdb-v2-e2e-'));
     ctx.nvdbDir = path.join(ctx.dir, 'nvdb-data');
     ctx.ndbDir = path.join(ctx.dir, 'ndb-data');
@@ -249,32 +256,48 @@ async function setup() {
     ctx.child.stderr.on('data', (chunk) => { ctx.stderr += chunk.toString(); });
 
     ctx.client = createV2Client(`http://127.0.0.1:${ctx.port}`);
-    await waitForHealth(ctx.client, ctx.child, () => ctx.stderr.slice(-2000));
+    await waitForHealth(() => ctx.client.health(), ctx.child, () => ctx.stderr.slice(-2000), 'nvdb');
 
-    ctx.aliceDb = nDB.open(path.join(ctx.ndbDir, 'alice.jsonl'));
-    ctx.aliceDb.path = path.join(ctx.ndbDir, 'alice.jsonl');
-    ctx.bobDb = nDB.open(path.join(ctx.ndbDir, 'bob.jsonl'));
-    ctx.bobDb.path = path.join(ctx.ndbDir, 'bob.jsonl');
+    // nDB v2: one service. A mounted `chat_users` (created on first mount) plus
+    // a root directory that allows creating the per-user databases.
+    ctx.ndbStderr = '';
+    ctx.ndbRoot = path.join(ctx.ndbDir, 'dbs');
+    fs.mkdirSync(ctx.ndbRoot, { recursive: true });
+    ctx.ndbChild = spawn(
+        NDB_EXE,
+        [
+            'serve',
+            '--dir', ctx.ndbRoot,
+            '--db', `chat_users=${path.join(ctx.ndbDir, 'chat_users')}`,
+            '--bind', '127.0.0.1',
+            '--port', String(ctx.ndbPort)
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+    );
+    ctx.ndbChild.stdout.on('data', () => {});
+    ctx.ndbChild.stderr.on('data', (chunk) => { ctx.ndbStderr += chunk.toString(); });
 
-    ctx.aliceDb.insert(aliceDirect);
-    ctx.aliceDb.insert(conversationDoc(aliceDirect, ALICE, aliceDirectMessages));
-    ctx.aliceDb.insert(aliceArena);
-    ctx.aliceDb.insert(conversationDoc(aliceArena, ALICE, aliceArenaMessages));
-    ctx.bobDb.insert(bobDirect);
-    ctx.bobDb.insert(conversationDoc(bobDirect, BOB, bobMessages));
+    ctx.ndb = createNdbClient(`http://127.0.0.1:${ctx.ndbPort}`);
+    await waitForHealth(() => ctx.ndb.health(), ctx.ndbChild, () => ctx.ndbStderr.slice(-2000), 'ndb');
+
+    await ctx.ndb.createDb('alice', { format: 'v2' });
+    await ctx.ndb.createDb('bob', { format: 'v2' });
+    ctx.aliceDb = ctx.ndb.db('alice');
+    ctx.bobDb = ctx.ndb.db('bob');
+
+    await ctx.aliceDb.insert(aliceDirect);
+    await ctx.aliceDb.insert(conversationDoc(aliceDirect, ALICE, aliceDirectMessages));
+    await ctx.aliceDb.insert(aliceArena);
+    await ctx.aliceDb.insert(conversationDoc(aliceArena, ALICE, aliceArenaMessages));
+    await ctx.bobDb.insert(bobDirect);
+    await ctx.bobDb.insert(conversationDoc(bobDirect, BOB, bobMessages));
 
     ctx.aliceInstance = instance(ALICE, ctx.aliceDb);
 }
 
 async function teardown() {
     await stopChild(ctx.child);
-    for (const db of [ctx.aliceDb, ctx.bobDb]) {
-        try {
-            db?.close();
-        } catch (err) {
-            console.error(`nDB close failed: ${err.message}`);
-        }
-    }
+    await stopChild(ctx.ndbChild);
     if (ctx.dir) {
         try {
             fs.rmSync(ctx.dir, { recursive: true, force: true });
@@ -284,9 +307,9 @@ async function teardown() {
     }
 }
 
-function expectedBoth() {
-    const alice = buildUserExpectedDocs({ userId: ALICE, db: ctx.aliceDb, chunkOpts: CHUNK_OPTS });
-    const bob = buildUserExpectedDocs({ userId: BOB, db: ctx.bobDb, chunkOpts: CHUNK_OPTS });
+async function expectedBoth() {
+    const alice = await buildUserExpectedDocs({ userId: ALICE, db: ctx.aliceDb, chunkOpts: CHUNK_OPTS });
+    const bob = await buildUserExpectedDocs({ userId: BOB, db: ctx.bobDb, chunkOpts: CHUNK_OPTS });
     return { alice, bob, all: [...alice.expected, ...bob.expected] };
 }
 
@@ -306,8 +329,8 @@ async function main() {
         assert.deepEqual(names, [COLLECTION]);
     });
 
-    ctx.aliceExpected = buildUserExpectedDocs({ userId: ALICE, db: ctx.aliceDb, chunkOpts: CHUNK_OPTS });
-    ctx.bobExpected = buildUserExpectedDocs({ userId: BOB, db: ctx.bobDb, chunkOpts: CHUNK_OPTS });
+    ctx.aliceExpected = await buildUserExpectedDocs({ userId: ALICE, db: ctx.aliceDb, chunkOpts: CHUNK_OPTS });
+    ctx.bobExpected = await buildUserExpectedDocs({ userId: BOB, db: ctx.bobDb, chunkOpts: CHUNK_OPTS });
 
     await test('buildUserExpectedDocs covers both users with per-chunk ids', async () => {
         const aliceIds = ctx.aliceExpected.docs.map(d => d.id);
@@ -354,7 +377,7 @@ async function main() {
     });
 
     await test('integrityCheck(check_vectors) is clean for every user', async () => {
-        const diff = await ctx.client.integrityCheck(COLLECTION, expectedBoth().all, { checkVectors: true });
+        const diff = await ctx.client.integrityCheck(COLLECTION, (await expectedBoth()).all, { checkVectors: true });
         assert.equal(diff.clean, true, JSON.stringify(diff));
         assert.deepEqual(diff.missing, []);
         assert.deepEqual(diff.extra, []);
@@ -579,7 +602,7 @@ async function main() {
     });
 
     await test('integrityCheck is still clean after every mutation', async () => {
-        const diff = await ctx.client.integrityCheck(COLLECTION, expectedBoth().all, { checkVectors: true });
+        const diff = await ctx.client.integrityCheck(COLLECTION, (await expectedBoth()).all, { checkVectors: true });
         assert.equal(diff.clean, true, JSON.stringify(diff));
         const pending = await ctx.client.pendingEmbeddings(COLLECTION, 256);
         assert.equal(pending.count, 0);

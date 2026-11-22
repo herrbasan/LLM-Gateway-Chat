@@ -245,7 +245,7 @@ async function searchArchive(dbInstance, body, deps = {}) {
 
         let cached = convCache.get(parsed.sessionId);
         if (!cached) {
-            const docs = db.find('id', parsed.sessionId) || [];
+            const docs = await db.findAll('id', parsed.sessionId);
             cached = {
                 conv: docs.find(d => d._type === 'conversation') || null,
                 session: docs.find(d => d._type === 'session') || null
@@ -335,19 +335,19 @@ function shapeSearchToolResult(data) {
 // Reference tracing — extracted from the /api/references route (byte-faithful port).
 // ============================================
 
-function findReferences(db, body) {
+async function findReferences(db, body) {
     const sid = (body.session_id || '').trim();
     const dir = body.direction || 'both';
     if (!sid) throw new Error('Missing session_id');
 
-    const arenaSessions = db.find('_type', 'session')
+    const arenaSessions = (await db.findAll('_type', 'session'))
         .filter(s => s.mode === 'arena' || s.mode === 'direct');
 
     const refPattern = /arena-\d+[-\w]*/g;
 
     const outbound = [];
     if (dir === 'outbound' || dir === 'both') {
-        const msgs = db.find('_type', 'message').filter(m => m.sessionId === sid);
+        const msgs = (await db.findAll('_type', 'message')).filter(m => m.sessionId === sid);
         for (const m of msgs) {
             const matches = (m.content || '').match(refPattern) || [];
             for (const match of matches) {
@@ -368,7 +368,7 @@ function findReferences(db, body) {
 
     const inbound = [];
     if (dir === 'inbound' || dir === 'both') {
-        const allMessages = db.find('_type', 'message');
+        const allMessages = await db.findAll('_type', 'message');
         const referencing = new Map(); // sessionId -> matchedRole
         for (const m of allMessages) {
             if (m.sessionId === sid) continue;
@@ -754,7 +754,14 @@ async function executeInternalTool(name, args, ctx) {
             return executeBrowserFetch(args, dbInstance);
 
         case 'attachment_save':
-            return executeAttachmentSave(args, { mcpOrigin, publicOrigin, readBucketBytes: (b, i, e) => dbInstance.db.getFile(b, i, e) });
+            return executeAttachmentSave(args, {
+                mcpOrigin,
+                publicOrigin,
+                readBucketBytes: async (b, i, e) => {
+                    const file = await dbInstance.db.getFile(b, `${i}.${e}`);
+                    return file ? file.buffer : null;
+                }
+            });
 
         case 'chat_preview_show':
             return executePreviewShow(args, { mcpOrigin });
@@ -763,10 +770,10 @@ async function executeInternalTool(name, args, ctx) {
             return openHostedApp(args, { mcpOrigin, conversationId });
 
         case 'chat_preview_state':
-            return executePreviewState(args, { dbInstance, conversationId });
+            return await executePreviewState(args, { dbInstance, conversationId });
 
         case 'chat_archive_update_metadata':
-            return executeUpdateMetadata(args, { db, conversationId, user });
+            return await executeUpdateMetadata(args, { db, conversationId, user });
 
         case 'chat_archive_search': {
             const data = await searchArchive(dbInstance, {
@@ -786,7 +793,7 @@ async function executeInternalTool(name, args, ctx) {
         }
 
         case 'chat_archive_get_session': {
-            const data = getSessionWithMessages(db, args.session_id);
+            const data = await getSessionWithMessages(db, args.session_id);
             const offset = args.offset || 0;
             const limit = args.limit || 100;
 
@@ -838,7 +845,7 @@ async function executeInternalTool(name, args, ctx) {
             // 400, run dead, 2026-08-25). Same auto-chunk pattern as
             // browser_fetch: bucket the payload, page it in 16 KB chunks.
             if (Buffer.byteLength(text, 'utf8') > CHUNK_THRESHOLD_BYTES) {
-                return chunkLargeText(Buffer.from(text, 'utf8'), 'application/json', dbInstance, 'archive_session');
+                return await chunkLargeText(Buffer.from(text, 'utf8'), 'application/json', dbInstance, 'archive_session');
             }
             return {
                 content: [{
@@ -849,7 +856,7 @@ async function executeInternalTool(name, args, ctx) {
         }
 
         case 'chat_archive_list_chats': {
-            const allDirect = db.find('_type', 'session')
+            const allDirect = (await db.findAll('_type', 'session'))
                 .filter(s => Array.isArray(s.messages) ? s.userId === user.id : true)
                 .filter(s => s.mode !== 'arena')
                 .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
@@ -857,7 +864,7 @@ async function executeInternalTool(name, args, ctx) {
         }
 
         case 'chat_archive_list_arena': {
-            const allArena = db.find('_type', 'session')
+            const allArena = (await db.findAll('_type', 'session'))
                 .filter(s => Array.isArray(s.messages) ? s.userId === user.id : true)
                 .filter(s => s.mode === 'arena')
                 .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -865,7 +872,7 @@ async function executeInternalTool(name, args, ctx) {
         }
 
         case 'chat_archive_find_similar': {
-            const srcData = getSessionWithMessages(db, args.session_id);
+            const srcData = await getSessionWithMessages(db, args.session_id);
             const srcTitle = srcData.session?.title || args.session_id;
             const srcMessages = srcData.messages || [];
 
@@ -904,7 +911,7 @@ async function executeInternalTool(name, args, ctx) {
         }
 
         case 'chat_archive_find_references': {
-            const data = findReferences(db, args);
+            const data = await findReferences(db, args);
             return {
                 content: [{ type: 'text', text: JSON.stringify(data, null, 2) }]
             };
@@ -912,7 +919,7 @@ async function executeInternalTool(name, args, ctx) {
 
         case 'context_retire':
         case 'context_unretire': {
-            const msgs = ctx.getStoredMessages ? ctx.getStoredMessages() : null;
+            const msgs = ctx.getStoredMessages ? await ctx.getStoredMessages() : null;
             if (!msgs) throw new Error(`${name}: conversation not loaded — nothing can be retired.`);
             const selector = parseSelector(args.messages, msgs.length - 1);
             if (selector.idxs.length === 0 && !selector.all) {
@@ -925,7 +932,7 @@ async function executeInternalTool(name, args, ctx) {
                 throw new Error('context_retire: distill is too short to be useful working memory (<20 chars). Write the key facts, decisions, and open items your future self needs.');
             }
             const liveFrom = lastUserIdx(msgs);
-            const retirements = { ...(ctx.getRetirements ? ctx.getRetirements() : {}) };
+            const retirements = { ...(ctx.getRetirements ? await ctx.getRetirements() : {}) };
             const applied = [];   // { msg, kinds: [...], bytes }
             const skipped = [];   // { msg, reason }
             if (selector.all) {
@@ -969,9 +976,9 @@ async function executeInternalTool(name, args, ctx) {
         }
 
         case 'context_units': {
-            const msgs = ctx.getStoredMessages ? ctx.getStoredMessages() : null;
+            const msgs = ctx.getStoredMessages ? await ctx.getStoredMessages() : null;
             if (!msgs) throw new Error('context_units: conversation not loaded.');
-            const retirements = ctx.getRetirements ? ctx.getRetirements() : {};
+            const retirements = ctx.getRetirements ? await ctx.getRetirements() : {};
             const retiredHashes = new Set(Object.keys(retirements));
             const liveFrom = lastUserIdx(msgs);
             const lines = [];
@@ -1041,12 +1048,12 @@ function splitChunks(text, chunkBytes) {
     return chunks;
 }
 
-function chunkLargeText(buffer, contentType, dbInstance, prefix = 'browser_fetch') {
+async function chunkLargeText(buffer, contentType, dbInstance, prefix = 'browser_fetch') {
     const text = buffer.toString('utf8');
     const chunkCount = Math.max(1, Math.ceil(text.length / CHUNK_BYTES));
     const filename = `${prefix}_${Date.now()}.txt`;
-    const meta = dbInstance.db.storeFile('images', filename, buffer, contentType || 'text/plain');
-    const bucketFile = `images:${meta._file.id}.${meta._file.ext}`;
+    const meta = await dbInstance.db.storeFile('images', buffer, filename);
+    const bucketFile = meta.ref;
     return {
         content: [{
             type: 'text',
@@ -1063,12 +1070,12 @@ function chunkLargeText(buffer, contentType, dbInstance, prefix = 'browser_fetch
     };
 }
 
-function readBucketChunk(bucketFile, chunk, dbInstance) {
+async function readBucketChunk(bucketFile, chunk, dbInstance) {
     const ref = parseFileRef(bucketFile);
     if (!ref) throw new Error(`browser_fetch: invalid bucket_file "${bucketFile}" (expected bucket:id.ext)`);
-    const buffer = dbInstance.db.getFile(ref.bucket, ref.id, ref.ext);
-    if (!buffer || buffer.length === 0) throw new Error(`browser_fetch: bucket file not found: ${bucketFile}`);
-    const chunks = splitChunks(buffer.toString('utf8'), CHUNK_BYTES);
+    const file = await dbInstance.db.getFile(ref.bucket, `${ref.id}.${ref.ext}`);
+    if (!file || file.buffer.length === 0) throw new Error(`browser_fetch: bucket file not found: ${bucketFile}`);
+    const chunks = splitChunks(file.buffer.toString('utf8'), CHUNK_BYTES);
     if (!Number.isInteger(chunk) || chunk < 0 || chunk >= chunks.length) {
         throw new Error(`browser_fetch: chunk ${chunk} out of range (0..${chunks.length - 1})`);
     }
@@ -1081,7 +1088,7 @@ async function executeBrowserFetch(args, dbInstance) {
     // Chunk read mode: browser_fetch(bucket_file, chunk) reads one chunk of a
     // previously chunked large response (see chunkLargeText).
     if (typeof args.bucket_file === 'string' && typeof args.chunk === 'number') {
-        return readBucketChunk(args.bucket_file, args.chunk, dbInstance);
+        return await readBucketChunk(args.bucket_file, args.chunk, dbInstance);
     }
 
     if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('browser_fetch: url required');
@@ -1161,15 +1168,15 @@ async function executeBrowserFetch(args, dbInstance) {
     // Large text (within the inline budget) → chunk it instead of inlining, to
     // avoid bloating the model's context. max_inline_bytes is the escape hatch.
     if (isText && maxInlineBytes !== 0 && buffer.length > CHUNK_THRESHOLD_BYTES && buffer.length <= maxInlineBytes) {
-        return chunkLargeText(buffer, contentType, dbInstance);
+        return await chunkLargeText(buffer, contentType, dbInstance);
     }
 
     const tooLargeForInline = maxInlineBytes > 0 && buffer.length > maxInlineBytes;
     if (!isText || maxInlineBytes === 0 || tooLargeForInline) {
         const mime = contentType || 'application/octet-stream';
         const filename = `browser_fetch_${Date.now()}.${MIME_TO_EXT[mime] || 'bin'}`;
-        const meta = dbInstance.db.storeFile('images', filename, buffer, mime);
-        const url = `/api/buckets/images/${meta._file.id}.${meta._file.ext}`;
+        const meta = await dbInstance.db.storeFile('images', buffer, filename);
+        const url = `/api/buckets/images/${meta.hash}.${meta.ext}`;
         const summary = JSON.stringify({
             ok: res.ok,
             status: res.status,
@@ -1231,7 +1238,7 @@ async function executeAttachmentSave(args, { mcpOrigin, publicOrigin, readBucket
     const bucketRef = parseBucketUrl(args.url);
     if (bucketRef && typeof readBucketBytes === 'function') {
         try {
-            buffer = readBucketBytes(bucketRef.bucket, bucketRef.id, bucketRef.ext);
+            buffer = await readBucketBytes(bucketRef.bucket, bucketRef.id, bucketRef.ext);
             if (!buffer || buffer.length === 0) throw new Error('empty bucket file');
             mime = BUCKET_MIME[bucketRef.ext] || 'application/octet-stream';
         } catch (err) {
@@ -1291,8 +1298,8 @@ async function executeAttachmentSave(args, { mcpOrigin, publicOrigin, readBucket
 function executeUpdateMetadata(args, { db, conversationId, user }) {
     return (async () => {
         if (!args.session_id) throw new Error('chat_archive_update_metadata: session_id required');
-        const sessions = db.find('id', args.session_id);
-        const session = sessions.find(s => s._type === 'session');
+        const docs = await db.findAll('id', args.session_id);
+        const session = docs.find(s => s._type === 'session');
         if (!session) throw new Error(`chat_archive_update_metadata: session ${args.session_id} not found`);
 
         // Overwrite guard (issue #8): a CURATED summary is a load-bearing arena
@@ -1347,7 +1354,7 @@ function executeUpdateMetadata(args, { db, conversationId, user }) {
         if (updatedFields.length === 0) throw new Error('chat_archive_update_metadata: nothing to update — pass title, category, summary, teaser, or reflection.');
 
         session.updatedAt = new Date().toISOString();
-        db.update(session._id, session);
+        await db.update(session._id, session);
 
         // Issue #33: the mutation is invisible to attached views without this —
         // sidebars/headers only refresh on the list event (or a manual reload).
@@ -1364,18 +1371,18 @@ function executeUpdateMetadata(args, { db, conversationId, user }) {
 // helpers
 // ============================================
 
-function getSessionWithMessages(db, sessionId) {
-    const sessions = db.find('id', sessionId);
-    const session = sessions.find(s => s._type === 'session');
+async function getSessionWithMessages(db, sessionId) {
+    const docs = await db.findAll('id', sessionId);
+    const session = docs.find(s => s._type === 'session');
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
-    const convs = db.find('id', sessionId).filter(d => d._type === 'conversation');
+    const convs = docs.filter(d => d._type === 'conversation');
     if (convs.length > 0) {
         const conv = convs[0];
         const msgs = JSON.parse(JSON.stringify(conv.messages || []));
         return { session, messages: msgs };
     }
-    const messages = db.find('sessionId', sessionId)
+    const messages = (await db.findAll('sessionId', sessionId))
         .filter(m => m._type === 'message')
         .sort((a, b) => a.turnIndex - b.turnIndex);
     return { session, messages };
@@ -1450,10 +1457,11 @@ async function executePreviewShow(args, { mcpOrigin }) {
 // chat_preview_state: reconstruct the preview items shown so far from the
 // conversation's chat_preview_show tool calls (metadata only). Live view state
 // (selected item, pane open/closed) is client-side and not queryable.
-function executePreviewState(args, { dbInstance, conversationId }) {
+async function executePreviewState(args, { dbInstance, conversationId }) {
     let items = [];
     try {
-        const conv = dbInstance.db.find('id', conversationId).find(d => d._type === 'conversation');
+        const docs = await dbInstance.db.findAll('id', conversationId);
+        const conv = docs.find(d => d._type === 'conversation');
         if (conv && Array.isArray(conv.messages)) {
             items = conv.messages
                 .filter(m => m.role === 'tool' && m.toolName === 'chat_preview_show' && m.toolArgs)

@@ -99,7 +99,7 @@ function makeEnv({ conversations = [CONV_A, CONV_B], sessions = SESSIONS, hits =
 
     const dbInstance = {
         db: {
-            find(field, value) {
+            async findAll(field, value) {
                 if (field === '_type') {
                     throw new Error(`full nDB scan: find(${JSON.stringify(field)}) is forbidden`);
                 }

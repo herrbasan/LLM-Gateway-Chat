@@ -1,6 +1,6 @@
 # LLM Gateway Chat
 
-LLM Gateway Chat is a vanilla JavaScript SPA with its own Node.js backend, connecting to an LLM Gateway for chat streaming and embedding. Built with a focus on performance, reliability, and local execution, it leverages NUI Web Components for a consistent UI supporting both desktop and mobile layouts. Data is stored in Rust-based embedded databases (nDB + nVDB) with semantic search powered by Qwen3-Embedding-4B vectors.
+LLM Gateway Chat is a vanilla JavaScript SPA with its own Node.js backend, connecting to an LLM Gateway for chat streaming and embedding. Built with a focus on performance, reliability, and local execution, it leverages NUI Web Components for a consistent UI supporting both desktop and mobile layouts. Data lives in Rust daemons reached over HTTP — `ndb serve` (documents) and `nvdb serve` (vectors) — with semantic search powered by Qwen3-Embedding-4B vectors.
 
 Conversations run as **server-side sessions**: the backend owns generation and persistence, and the browser is a live attach/detach view. Close the tab mid-conversation and pick it up anywhere — nothing is lost.
 
@@ -60,7 +60,7 @@ Browser (view) ──► chat backend ──► LLM Gateway / MCP tools / nSpeec
 - **Send:** the view POSTs to `/api/chats/:id/send`; the runner appends, persists, and streams the response.
 - **Render:** the view attaches to `/api/chats/:id/events` (SSE) and renders `snapshot + events` - message deltas, tool progress, embed status.
 - **Tools** run server-side (MCP pool + internal tools); the view shows their progress and results.
-- **Storage:** nDB (documents) + nVDB (embeddings), per-user isolated.
+- **Storage:** `ndb serve` (documents, per-user `chat_<username>` databases) + `nvdb serve` (embeddings), separate services on localhost.
 
 ---
 
@@ -69,6 +69,9 @@ Browser (view) ──► chat backend ──► LLM Gateway / MCP tools / nSpeec
 ### 1. Prerequisites
 - A running LLM Gateway backend (default: `http://192.168.0.100:3400`)
 - Node.js v24+
+- A running **`ndb serve`** (default `http://127.0.0.1:8323`; built from `D:\DEV\nDB`), started with `--dir <root>` so per-user databases can be created, and mounting `chat_users`:
+  `ndb serve --dir <root> --db chat_users=<root>/chat_users --bind 127.0.0.1 --port 8323`
+- A running **`nvdb serve`** (default `http://127.0.0.1:3510`) **with a reranker** — startup refuses to listen without one
 - At least one user configured (via `server/config.json` `users[]` or `SUPERADMIN_USERNAME`/`SUPERADMIN_PASSWORD` env vars)
 
 ### 2. Configuration
@@ -121,10 +124,10 @@ Navigate to `http://localhost:8080/chat/`
 ## Key Features
 
 - **Direct Gateway Integration:** SSE streaming (Server-Sent Events over REST)
-- **Multi-User Auth:** Cookie-based login with per-user database isolation (nDB + nVDB)
+- **Multi-User Auth:** Cookie-based login with per-user database isolation (`chat_<username>` in nDB + a per-user slice of the shared nVDB collection)
 - **Semantic Search:** Chat archive searchable via nVDB + Qwen3-Embedding-4B vectors with real-time embed status monitoring (SSE)
 - **Embed Status Monitoring:** Per-message colored dots (pending → embedded → failed) pushed via SSE in real-time — no polling, no reloads
-- **Multiple Chat Sessions:** Multi-conversation management with nDB persistence and localStorage fallback
+- **Multiple Chat Sessions:** Multi-conversation management with nDB persistence
 - **MCP Archive Tools:** LLM can query conversation history via `chat_archive_search`, `chat_archive_find_similar`, etc.
 - **Arena Mode:** LLM-to-LLM autonomous conversations, recorded without human steering
 - **Vision Support:** Attach images — automatically analyzed via MCP Vision tools for non-vision models
@@ -137,9 +140,9 @@ Navigate to `http://localhost:8080/chat/`
 
 ## Storage
 
-- **nDB**: Sessions, conversation documents (inline messages array), user auth, user settings
+- **nDB** (`ndb serve`, HTTP): `chat_users` (accounts, auth sessions, nVDB sync watermarks) and one `chat_<username>` database per user holding sessions, conversation documents (inline messages array) and user settings
 - **nVDB**: 2560-dim embedding vectors with `(chatId, msgIdx)` back-references
-- **nDB Buckets**: Image attachments stored via `/api/buckets/images/{sessionId}/`, garbage-collected on chat delete
+- **nDB Buckets**: Attachments content-addressed by SHA-256 (legacy 8-hex refs still readable), served via `/api/buckets/images/<hash>.<ext>`, reference-aware garbage collection on chat delete
 - **localStorage**: Fallback for chat history and user preferences
 
 ## Updating Vendor Libraries
