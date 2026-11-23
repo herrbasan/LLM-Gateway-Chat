@@ -333,11 +333,23 @@ for (const userDef of usersToSeed) {
 }
 await usersDb.compact();
 
-// 3. Every registered user needs a mounted `chat_<username>` database. Creating
-//    it here (idempotent per name) means a missing database is a startup error,
-//    not a surprise at first message.
+// 3. Every seeded user needs a mounted `chat_<username>` database, and EVERY
+//    already-mounted `chat_*` user database (e.g. `chat_herrbasan`) must have
+//    its persisted indexes ensured so hot lookups never fall back to full scans.
+const ensuredUserDbs = new Set();
 for (const userDef of usersToSeed) {
-    await ensureUserDb(userDef.username);
+    const name = await ensureUserDb(userDef.username);
+    ensuredUserDbs.add(name);
+}
+for (const name of mountedDbNames) {
+    if (name === NDB_USERS_DB || !name.startsWith(NDB_USER_PREFIX) || ensuredUserDbs.has(name)) continue;
+    const handle = ndbClient.db(name);
+    const created = await ensureDbIndexes(handle, name, ['sessionId']);
+    if (created) {
+        await handle.compact();
+        logger.info('nDB compacted to persist new indexes', { db: name }, 'Server');
+    }
+    ensuredUserDbs.add(name);
 }
 
 // ============================================
