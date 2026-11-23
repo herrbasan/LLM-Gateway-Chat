@@ -178,11 +178,20 @@ let nvdbRerankerLoaded = false;
 let modelsProxyCache = null; // { at, data } — 60 s cache for GET /api/models
 
 // Idempotent indexes: every hot lookup filter gets a hash index; sorts use a
-// btree so Rust paginates without a full scan.
-async function ensureDbIndexes(handle, label) {
-    for (const field of ['_type', 'id']) await handle.createIndex(field, 'hash');
-    for (const field of ['updatedAt', 'createdAt']) await handle.createIndex(field, 'btree');
-    logger.info('nDB indexes ensured', { db: label }, 'Server');
+// btree so Rust paginates without a full scan. Returns true if any index was
+// newly created (caller can compact once to persist zero-copy mmap indexes).
+async function ensureDbIndexes(handle, label, extraHashFields = []) {
+    let anyCreated = false;
+    for (const field of ['_type', 'id', ...extraHashFields]) {
+        const res = await handle.createIndex(field, 'hash');
+        if (res?.created) anyCreated = true;
+    }
+    for (const field of ['updatedAt', 'createdAt']) {
+        const res = await handle.createIndex(field, 'btree');
+        if (res?.created) anyCreated = true;
+    }
+    logger.info('nDB indexes ensured', { db: label, created: anyCreated }, 'Server');
+    return anyCreated;
 }
 
 async function startBackend() {
@@ -335,9 +344,20 @@ for (const userDef of usersToSeed) {
 // Maintenance Loops (Global across mounted DBs)
 // ============================================
 
-// Maintenance timers must never overlap: an `ndb serve` compaction holds the
-// DB's writer lock, so stacking them only lengthens the stall. Each pass is
-// fully awaited before the next can start.
+// Maintenance timers must never overlap and must NOT rewrite multi-hundred-MB
+// bases when idle. Only compact a DB once its WAL has accumulated enough
+// mutations since the last base snapshot.
+const COMPACT_MIN_WAL_OPS = 200;
+async function compactIfDirty(handle, meta) {
+  const lineage = await handle.lineage();
+  const pendingOps = lineage.last_seq >= lineage.min_available_seq
+    ? (lineage.last_seq - lineage.min_available_seq + 1)
+    : 0;
+  if (pendingOps < COMPACT_MIN_WAL_OPS) return;
+  await handle.compact();
+  logger.info('nDB compacted', { ...meta, pendingOps }, 'Server');
+}
+
 let compactInFlight = false;
 setInterval(async () => {
   if (compactInFlight) {
@@ -347,13 +367,13 @@ setInterval(async () => {
   compactInFlight = true;
   try {
     try {
-      await usersDb.compact();
+      await compactIfDirty(usersDb, { db: NDB_USERS_DB });
     } catch (err) {
       logger.error('nDB compact failed', err, { db: NDB_USERS_DB }, 'Server');
     }
     for (const [userId, instance] of activeDbs.entries()) {
       try {
-        await instance.db.compact();
+        await compactIfDirty(instance.db, { userId, db: instance.dbName });
       } catch (err) {
         logger.error('nDB compact failed', err, { userId, db: instance.dbName }, 'Server');
       }
@@ -442,24 +462,28 @@ function userDbName(username) {
  */
 async function ensureUserDb(username) {
     const name = userDbName(username);
-    if (mountedDbNames.has(name)) return name;
-    let descriptor;
-    try {
-        descriptor = await ndbClient.createDb(name, { format: 'v2', persistence: 'immediate' });
-    } catch (err) {
-        if (err instanceof NdbError && err.code === 'create_disabled') {
-            throw new Error(
-                `ndb at ${NDB_URL} refuses to create '${name}' (create_disabled): ` +
-                `start ndb serve with --dir <root> so per-user databases can be created`
-            );
+    if (!mountedDbNames.has(name)) {
+        let descriptor;
+        try {
+            descriptor = await ndbClient.createDb(name, { format: 'v2', persistence: 'immediate' });
+        } catch (err) {
+            if (err instanceof NdbError && err.code === 'create_disabled') {
+                throw new Error(
+                    `ndb at ${NDB_URL} refuses to create '${name}' (create_disabled): ` +
+                    `start ndb serve with --dir <root> so per-user databases can be created`
+                );
+            }
+            throw new Error(`ndb at ${NDB_URL} could not create '${name}': ${err.code || err.name}: ${err.message}`);
         }
-        throw new Error(`ndb at ${NDB_URL} could not create '${name}': ${err.code || err.name}: ${err.message}`);
+        mountedDbNames.add(name);
+        logger.info('nDB user database created', { db: name, documents: descriptor?.documents ?? 0 }, 'Server');
     }
-    mountedDbNames.add(name);
-    logger.info('nDB user database created', { db: name, documents: descriptor?.documents ?? 0 }, 'Server');
     const handle = ndbClient.db(name);
-    await ensureDbIndexes(handle, name);
-    for (const field of ['sessionId']) await handle.createIndex(field, 'hash');
+    const created = await ensureDbIndexes(handle, name, ['sessionId']);
+    if (created) {
+        await handle.compact();
+        logger.info('nDB compacted to persist new indexes', { db: name }, 'Server');
+    }
     return name;
 }
 
@@ -2155,7 +2179,7 @@ const routes = {
     const convs = docs.filter(d => d._type === 'conversation');
     if (convs.length > 0) {
       const conv = convs[0];
-      const msgs = JSON.parse(JSON.stringify(conv.messages || [])); // detached copy
+      const msgs = conv.messages || [];
       for (const m of msgs) {
         if (m.attachments) m.attachments = convStore.densifyAttachments(m.attachments);
       }
