@@ -477,7 +477,7 @@ async function ensureUserDb(username) {
     if (!mountedDbNames.has(name)) {
         let descriptor;
         try {
-            descriptor = await ndbClient.createDb(name, { format: 'v2', persistence: 'immediate' });
+            descriptor = await ndbClient.createDb(name, { format: 'ram', persistence: 'immediate' });
         } catch (err) {
             if (err instanceof NdbError && err.code === 'create_disabled') {
                 throw new Error(
