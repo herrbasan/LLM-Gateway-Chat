@@ -247,14 +247,14 @@ async function main() {
     });
 
     await test('a brand-new user gets its own database through createDb', async () => {
-        const created = await ctx.ndb.createDb('chat_alice', { format: 'v2' });
+        const created = await ctx.ndb.createDb('chat_alice', { format: 'ram' });
         assert.equal(created.name, 'chat_alice');
-        assert.equal(created.format, 'v2');
+        assert.equal(created.format, 'ram');
         const names = (await ctx.ndb.listDbs()).map(d => d.name).sort();
         assert.deepEqual(names, ['chat_alice', 'chat_users']);
 
         await assert.rejects(
-            () => ctx.ndb.createDb('chat_alice', { format: 'v2' }),
+            () => ctx.ndb.createDb('chat_alice', { format: 'ram' }),
             (err) => {
                 assert.equal(err instanceof NdbError, true);
                 assert.equal(err.status, 409);

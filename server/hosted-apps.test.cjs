@@ -111,6 +111,10 @@ test('runner persists and deduplicates issued app events, then consumes them onl
     // The runner speaks to an nDB handle whose calls are all async.
     const db = {
         async findAll(field, value) { return structuredClone(docs.filter(doc => doc[field] === value)); },
+        async query({ filter = {}, limit = 1000 } = {}) {
+            const results = structuredClone(docs.filter(doc => Object.entries(filter).every(([field, value]) => doc[field] === value)));
+            return { total: results.length, count: Math.min(results.length, limit), results: results.slice(0, limit), took_ms: 0 };
+        },
         async find(field, value) {
             const results = await this.findAll(field, value);
             return { count: results.length, results };

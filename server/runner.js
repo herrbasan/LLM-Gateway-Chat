@@ -118,6 +118,23 @@ const MAX_TOOL_HOPS_UNATTENDED = 100;  // headless — no view (the BFF case tha
 const GATEWAY_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = 1500;
 
+// Attaching a conversation must not pay js-tiktoken (≈1.9 MB/s) over the whole
+// history just to paint the context pill — 300–1190 ms of synchronous CPU on a
+// 5.9 MB chat. A fresh `_countCache` answers instantly; otherwise the count the
+// last assistant turn persisted is reused, and a real count only runs when the
+// stored payload is small enough that its cost is invisible. 400k chars is
+// ≈100k tokens, ≈200 ms worst case.
+const SNAPSHOT_COUNT_CHAR_BUDGET = 400000;
+function approximatePayloadChars(messages) {
+    let chars = 0;
+    for (const m of messages) {
+        chars += typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content ?? null).length;
+        if (typeof m.reasoning_content === 'string') chars += m.reasoning_content.length;
+        if (m.tool_calls) chars += JSON.stringify(m.tool_calls).length;
+    }
+    return chars;
+}
+
 // The HTTP statuses worth another attempt. Other 4xx are deterministic
 // rejections the next attempt would repeat verbatim.
 function isTransientStatus(status) {
@@ -238,6 +255,8 @@ class Runner {
         this._lastMsgHashes = null;
         // Context-pill count cache (see buildSnapshot) — invalidated by key change.
         this._countCache = null;
+        // init() hydrated this runner; the first buildSnapshot reuses that state.
+        this._hydratedFresh = false;
         this._storageOriginCache = undefined;
     }
 
@@ -256,6 +275,9 @@ class Runner {
                 .catch(err => DEPS.log().error('Orphan-run note failed', null, { chatId: this.conversationId, error: err?.message }, 'Runner'));
             await this._clearActiveRunStamp();
         }
+        // Nothing can have written since the read above: the runner is not in
+        // the registry until init() resolves, so the first snapshot may reuse it.
+        this._hydratedFresh = true;
         this.scheduleIdle();
     }
 
@@ -266,9 +288,9 @@ class Runner {
     // here go stale when appendConversationMessage (or the old client) writes.
     // Re-read at every state-consuming point. (First acceptance bug, 2026-08-24.)
     async refresh() {
-        const { db } = this.dbInstance;
-        this.session = await convStore.findSessionOrThrow(db, this.conversationId);
-        this.conv = await convStore.findOrCreateConversation(db, this.session, this.user);
+        const { session, conv } = await convStore.loadSessionAndConversation(this.dbInstance.db, this.conversationId, this.user);
+        this.session = session;
+        this.conv = conv;
     }
     scheduleIdle() {
         clearTimeout(this.idleTimer);
@@ -445,8 +467,13 @@ class Runner {
     }
 
     // View form (contract #1): densified attachments + {content, timestamp} split.
+    // Shallow copy: every field this projection rewrites (`attachments`,
+    // `content`, `timestamp`) is replaced, never mutated in place, and
+    // densifyAttachments returns new attachment objects — so no caller can
+    // reach back into the stored message, and a 5 MB history is not
+    // re-serialized through JSON per snapshot.
     viewMessage(m) {
-        const cloned = JSON.parse(JSON.stringify(m));
+        const cloned = { ...m };
         if (cloned.attachments) cloned.attachments = convStore.densifyAttachments(cloned.attachments);
         const match = typeof cloned.content === 'string'
             ? cloned.content.match(/^\[(\d{4}-\d{2}-\d{2})@(\d{2}:\d{2})\]\s*/)
@@ -474,21 +501,24 @@ class Runner {
     }
 
     async buildSnapshot() {
-        await this.refresh();
-        const lastAssistant = [...this.conv.messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
+        // init() just hydrated this runner (one session read + one conversation
+        // read). Re-reading here turned a cold mount into four full conversation
+        // transfers; the flag is consumed once, so every later warm snapshot
+        // still refreshes and sees writes made by other routes.
+        if (this._hydratedFresh) this._hydratedFresh = false;
+        else await this.refresh();
+        const messages = this.conv.messages;
+        const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
         // The pill means "how close am I to the limit" — the on-the-wire payload
         // (post retirement transform), NOT the raw stored history. Run
         // the same assembly a turn would, and count that, so load and live agree.
-        let realUsed = null;
-        let rawUsed = null;
-        let windowSize = lastAssistant?.context?.window_size ?? null;
+        let realContext = null;
         try {
             const models = await getModels();
             const entry = models.find(m => m.id === this.session.model);
-            if (windowSize == null) {
-                windowSize = entry?.capabilities?.contextWindow ?? null;
-            }
-            const tools = await this._assembleTools(entry?.capabilities?.vision === true);
+            const vision = entry?.capabilities?.vision === true;
+            const windowSize = lastAssistant?.context?.window_size ?? entry?.capabilities?.contextWindow ?? null;
+            const tools = await this._assembleTools(vision);
             // Counting 786k tokens costs ~1.5s per pass (js-tiktoken ~1.9 MB/s) and
             // every attach paid it TWICE — even with no retirements, where raw IS
             // the wire array (same reference). Cache by everything the count
@@ -497,28 +527,48 @@ class Runner {
             // key means the count is still current.
             const cacheKey = JSON.stringify([
                 this.conversationId, this.conv.updatedAt, this.session.updatedAt,
-                this.session.model, entry?.capabilities?.vision === true, tools.length
+                this.session.model, vision, tools.length
             ]);
+            let used = null;
+            let raw = null;
             if (this._countCache && this._countCache.key === cacheKey) {
-                realUsed = this._countCache.realUsed;
-                rawUsed = this._countCache.rawUsed;
-            } else {
+                used = this._countCache.realUsed;
+                raw = this._countCache.rawUsed;
+            } else if (lastAssistant?.context?.used_tokens != null && messages.lastIndexOf(lastAssistant) === messages.length - 1) {
+                // Zero-tiktoken attach: the last assistant turn persisted the
+                // exact context shape the view renders, counted from the payload
+                // that turn sent. With nothing appended since, it IS the freshest
+                // reading available — painting it costs no CPU at all.
+                realContext = lastAssistant.context;
+            } else if (approximatePayloadChars(messages) <= SNAPSHOT_COUNT_CHAR_BUDGET) {
                 const { apiMessages, rawMessages } = await this._assemblePayload();
-                realUsed = countApiMessages(apiMessages, this.session.model, tools);
-                rawUsed = rawMessages === apiMessages ? realUsed : countApiMessages(rawMessages, this.session.model, tools);
-                this._countCache = { key: cacheKey, realUsed, rawUsed };
+                used = countApiMessages(apiMessages, this.session.model, tools);
+                raw = rawMessages === apiMessages ? used : countApiMessages(rawMessages, this.session.model, tools);
+                this._countCache = { key: cacheKey, realUsed: used, rawUsed: raw };
+            } else {
+                // Large history, no cached count, nothing persisted to reuse:
+                // skip the tiktoken pass and leave the pill without a fresh
+                // reading rather than stall the snapshot. Said out loud so a
+                // missing number is traceable, never a mystery.
+                DEPS.log().debug('Snapshot context count skipped (large history)', { chatId: this.conversationId, messages: messages.length }, 'Runner');
+            }
+            // A large unpainted history falls through to the persisted context
+            // below — an undercount bounded by the turns since that reading,
+            // never a silent 1.2s stall inside GET /snapshot.
+            if (used != null) {
+                realContext = {
+                    window_size: windowSize,
+                    used_tokens: used,
+                    raw_tokens: raw,
+                    available_tokens: windowSize != null ? Math.max(0, windowSize - used) : null,
+                    strategy_applied: false,
+                    counted: 'runner'
+                };
             }
         } catch (e) {
             DEPS.log().warn('Snapshot context count failed', { chatId: this.conversationId, error: e.message }, 'Runner');
         }
-        const realContext = realUsed == null ? (lastAssistant?.context ?? null) : {
-            window_size: windowSize,
-            used_tokens: realUsed,
-            raw_tokens: rawUsed,
-            available_tokens: windowSize != null ? Math.max(0, windowSize - realUsed) : null,
-            strategy_applied: false,
-            counted: 'runner'
-        };
+        if (realContext == null && lastAssistant?.context) realContext = lastAssistant.context;
         return {
             meta: {
                 id: this.session.id,

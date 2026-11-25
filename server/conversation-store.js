@@ -105,24 +105,52 @@ function normalizeStoredMessage(msg = {}) {
     return message;
 }
 
+// A session and its conversation share `id` (the conversation id), so a legacy
+// `find('id', x)` answered with BOTH documents — a 5–6 MB conversation copied
+// twice per lookup, once for each half of the pair. Every read here is now a
+// query narrowed by `_type` (both fields are hash-indexed, so the planner
+// intersects to the same one or two docs): the session read stays tiny and the
+// conversation is fetched exactly once.
+async function querySession(db, conversationId) {
+    const { results } = await db.query({ filter: { id: conversationId, _type: 'session' }, limit: 2 });
+    return results.find(s => s._type === 'session') || null;
+}
+
+async function queryConversation(db, conversationId) {
+    const { results } = await db.query({ filter: { id: conversationId, _type: 'conversation' }, limit: 2 });
+    return results.find(d => d._type === 'conversation') || null;
+}
+
 async function findSessionOrThrow(db, conversationId) {
-    const docs = await db.findAll('id', conversationId);
-    const session = docs.find(s => s._type === 'session');
+    const session = await querySession(db, conversationId);
     if (!session) throw new Error(`session not found: ${conversationId}`);
     return session;
 }
 
 async function findConversationOrThrow(db, conversationId) {
-    const docs = await db.findAll('id', conversationId);
-    const conv = docs.find(d => d._type === 'conversation');
+    const conv = await queryConversation(db, conversationId);
     if (!conv) throw new Error(`conversation doc not found: ${conversationId}`);
     return conv;
 }
 
 async function findOrCreateConversation(db, session, user) {
-    const docs = await db.findAll('id', session.id);
-    const convs = docs.filter(d => d._type === 'conversation');
-    if (convs.length > 0) return convs[0];
+    const existing = await queryConversation(db, session.id);
+    if (existing) return existing;
+    return insertConversationDoc(db, session, user);
+}
+
+// Both halves of a runner hydration, fetched concurrently: one tiny session
+// read plus exactly one conversation read.
+async function loadSessionAndConversation(db, conversationId, user) {
+    const [session, conv] = await Promise.all([
+        querySession(db, conversationId),
+        queryConversation(db, conversationId)
+    ]);
+    if (!session) throw new Error(`session not found: ${conversationId}`);
+    return { session, conv: conv || (await insertConversationDoc(db, session, user)) };
+}
+
+async function insertConversationDoc(db, session, user) {
     const conv = {
         _type: 'conversation',
         id: session.id,
@@ -291,8 +319,7 @@ async function replaceConversationMessages(ctx, { conversationId, messages } = {
         { op: 'set', path: 'updatedAt', value: conv.updatedAt }
     ]);
 
-    const docs = await db.findAll('id', conversationId);
-    const session = docs.find(s => s._type === 'session');
+    const session = await querySession(db, conversationId);
     if (session) {
         session.messageCount = newMessages.length;
         session.updatedAt = conv.updatedAt;
@@ -458,6 +485,7 @@ module.exports = {
     findSessionOrThrow,
     findConversationOrThrow,
     findOrCreateConversation,
+    loadSessionAndConversation,
     appendConversationMessage,
     insertConversationMessageAt,
     replaceConversationMessages,

@@ -218,6 +218,20 @@ async function embedMessageAsync(dbInstance, msg, session, convNdbId, msgIdx) {
     await ctx.client.attachVectors(COLLECTION, attachments);
 }
 
+// The store fires embeds and does not await them — that is the production
+// contract. A test asserting "the index reflects the write" must therefore wait
+// for the jobs it started; leaving it to wall-clock luck made this suite
+// flip-flop with unrelated changes to the store's read path.
+const embedJobs = [];
+function trackedEmbedMessageAsync(...args) {
+    const job = embedMessageAsync(...args);
+    embedJobs.push(job.catch(() => {}));
+    return job;
+}
+async function settleEmbeds() {
+    while (embedJobs.length) await Promise.all(embedJobs.splice(0));
+}
+
 async function searchAs(userId, db, body) {
     return searchArchive(instance(userId, db), body, {
         userId,
@@ -280,8 +294,8 @@ async function setup() {
     ctx.ndb = createNdbClient(`http://127.0.0.1:${ctx.ndbPort}`);
     await waitForHealth(() => ctx.ndb.health(), ctx.ndbChild, () => ctx.ndbStderr.slice(-2000), 'ndb');
 
-    await ctx.ndb.createDb('alice', { format: 'v2' });
-    await ctx.ndb.createDb('bob', { format: 'v2' });
+    await ctx.ndb.createDb('alice', { format: 'ram' });
+    await ctx.ndb.createDb('bob', { format: 'ram' });
     ctx.aliceDb = ctx.ndb.db('alice');
     ctx.bobDb = ctx.ndb.db('bob');
 
@@ -514,7 +528,7 @@ async function main() {
     const ctxStore = () => ({
         user: { id: ALICE },
         dbInstance: ctx.aliceInstance,
-        embedMessageAsync,
+        embedMessageAsync: trackedEmbedMessageAsync,
         log: {
             info() {},
             debug() {},
@@ -530,6 +544,7 @@ async function main() {
             content: 'append marker grenadine first turn'
         });
         ctx.grenadineId = appended.message.id;
+        await settleEmbeds();
         const data = await searchAs(ALICE, ctx.aliceDb, { query: 'grenadine', search_type: 'keyword', limit: 20 });
         assert.deepEqual(sortedIds(data), [appended.message.id]);
     });
@@ -541,6 +556,7 @@ async function main() {
             content: 'assistant marjoram prior answer'
         });
         ctx.marjoramId = appended.message.id;
+        await settleEmbeds();
         const before = await searchAs(ALICE, ctx.aliceDb, { query: 'marjoram', search_type: 'keyword', limit: 20 });
         assert.deepEqual(sortedIds(before), [appended.message.id]);
 
@@ -549,6 +565,7 @@ async function main() {
             messageId: appended.message.id,
             content: 'assistant saffron revised answer'
         });
+        await settleEmbeds();
 
         const stale = await searchAs(ALICE, ctx.aliceDb, { query: 'marjoram', search_type: 'keyword', limit: 20 });
         assert.deepEqual(stale.results, []);
@@ -574,6 +591,7 @@ async function main() {
         });
         ctx.insertedId = inserted.message.id;
         assert.equal(inserted.message.idx, 1);
+        await settleEmbeds();
 
         const insertedHit = await searchAs(ALICE, ctx.aliceDb, { query: 'cardamom', search_type: 'keyword', limit: 20 });
         assert.deepEqual(sortedIds(insertedHit), [inserted.message.id]);
@@ -590,6 +608,7 @@ async function main() {
             content: 'rewritten cumin opening turn'
         });
         assert.equal(trimmed.removedCount > 0, true, 'the tail was truncated');
+        await settleEmbeds();
 
         const cumin = await searchAs(ALICE, ctx.aliceDb, { query: 'cumin', search_type: 'keyword', limit: 20 });
         assert.equal(cumin.results.length, 1);
