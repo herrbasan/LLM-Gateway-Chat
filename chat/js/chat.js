@@ -344,25 +344,27 @@ function attachRunnerEvents(chatId) {
             view.scrollToBottomOnRender = false;
             // Tail-loading state (Track 2a): the snapshot carries a window of the
             // conversation, not the whole history. Every generation invalidates
-            // an in-flight "load earlier" page.
+            // an in-flight hydration.
             conv._snapshotGen = (conv._snapshotGen || 0) + 1;
+            const gen = conv._snapshotGen;
             conv._baseIdx = snap.baseIdx || 0;
             conv._totalMessages = snap.totalMessages ?? (snap.messages?.length || 0);
             conv._hasMore = !!snap.hasMore;
-            conv._loadingOlder = false;
+            const beforeIdx = conv._baseIdx;
+            const needsHydration = conv._hasMore && beforeIdx > 0;
             conv.exchanges = messagesToExchanges(snap.messages || []);
             conv.exchanges.push(..._restorePendingSends(chatId, snap.messages || []));
             // Full re-render (initial attach OR post-mutation refresh/edit).
             _vsDeactivate(container);
-            container._loadOlderArmed = false;
             container.replaceChildren();
             buildHistoricalDomForChat(conv, container).then(() => {
-                _renderLoadEarlierBar(conv, container);
                 if (scrollAfterRender) scrollToBottom(container);
                 _vsActivateWhenReady(container, scrollAfterRender ? () => scrollToBottom(container) : null);
-                // Auto-paging must not fire while the initial scroll settles —
-                // activation replaces the children, which zeroes scrollTop.
-                setTimeout(() => { container._loadOlderArmed = true; }, 800);
+                // The tail is on screen — pull the entire remaining prefix in
+                // one background request on the next frame, invisible to the user.
+                if (needsHydration) {
+                    requestAnimationFrame(() => _hydrateFullHistory(chatId, gen, beforeIdx));
+                }
             });
             if (snap.lastRun?.context) updateOverallContext(snap.lastRun.context);
             _stashContextReport(chatId, { history: snap.contextHistory || [], retirements: snap.meta?.retirements || {} });
@@ -973,58 +975,19 @@ function trackBottomPin(container) {
     bottomPin.set(container, state);
     container.addEventListener('scroll', () => {
         state.stick = isNearBottom(BOTTOM_PIN_PX, container);
-        // Reaching the top of the loaded window pulls the next older page.
-        // `_loadOlderArmed` keeps the render/activation scroll reset from
-        // firing it before the user has actually scrolled.
-        if (!container._loadOlderArmed || container.scrollTop > LOAD_EARLIER_TRIGGER_PX) return;
-        loadOlderMessagesForChat(container.dataset.chatId);
     }, { passive: true });
     new ResizeObserver(() => repinIfStuck(container)).observe(container);
 }
 
 // ============================================
-// Tail loading — older pages of a long conversation
+// Tail loading — instant tail, background full history
 // ============================================
 //
 // The snapshot carries only the tail window (`baseIdx`/`totalMessages`/
-// `hasMore`), so the top of the container offers the rest. The bar is a
-// sibling BEFORE `.vs-stage` — never a `.chat-message` slot — and the paging
-// path rebuilds normal flow when virtual scroll is active, because the
-// scroller detaches off-screen nodes.
-
-const LOAD_EARLIER_TRIGGER_PX = 150;
-
-function _renderLoadEarlierBar(conv, container) {
-    let bar = container.querySelector('.load-earlier-bar');
-    if (!conv._hasMore || conv._baseIdx <= 0) {
-        if (bar) bar.remove();
-        return;
-    }
-    if (!bar) {
-        bar = document.createElement('div');
-        bar.className = 'load-earlier-bar';
-        const btn = document.createElement('nui-button');
-        btn.setAttribute('variant', 'outline');
-        btn.setAttribute('size', 'small');
-        btn.className = 'load-earlier-btn';
-        const inner = document.createElement('button');
-        inner.type = 'button';
-        inner.addEventListener('click', (event) => {
-            event.stopPropagation();
-            loadOlderMessagesForChat(container.dataset.chatId);
-        });
-        btn.appendChild(inner);
-        bar.appendChild(btn);
-        container.insertBefore(bar, container.firstChild);
-    }
-    const inner = bar.querySelector('button');
-    if (inner) {
-        inner.disabled = !!conv._loadingOlder;
-        inner.textContent = conv._loadingOlder
-            ? 'Loading earlier messages…'
-            : `Load earlier messages (${conv._baseIdx} older)`;
-    }
-}
+// `hasMore`). It paints immediately; the whole remaining prefix `[0 .. baseIdx)`
+// then arrives in ONE request and is prepended invisibly — no pagination UI, no
+// scroll-triggered paging. Prepending rebuilds normal flow when virtual scroll
+// is active, because the scroller detaches off-screen nodes.
 
 // The node the reader's viewport starts on. Under virtual scroll only attached
 // nodes are in the DOM, so this is the first mounted one — and keeping the NODE
@@ -1040,47 +1003,39 @@ function _firstVisibleChatMessage(container) {
     return nodes[0] || null;
 }
 
-async function loadOlderMessagesForChat(chatId) {
+// Fetch the entire prefix started by the snapshot and splice it in above the
+// tail. Runs after the first painted frame, so it can never delay or flash the
+// initial view. Every DOM step (prepend → activate → scroll restore → visibility
+// pass) happens in one synchronous tick, so the reader sees no jump.
+async function _hydrateFullHistory(chatId, gen, beforeIdx) {
     const conv = activeConversations.get(chatId);
     const container = chatContainers.get(chatId);
-    if (!conv || !container || !conv._hasMore || conv._loadingOlder || conv._baseIdx <= 0) return;
-
-    const gen = conv._snapshotGen;
-    const beforeIdx = conv._baseIdx;
-    conv._loadingOlder = true;
-    _renderLoadEarlierBar(conv, container);
+    if (!conv || !container) return;
 
     let res = null;
     try {
-        res = await runnerClient.loadOlderMessages(chatId, beforeIdx, 50);
+        res = await runnerClient.loadAllEarlierMessages(chatId, beforeIdx);
     } catch (err) {
-        console.warn('[chat] load earlier failed:', err?.message || err);
+        console.warn('[chat] full-history hydration failed:', err?.message || err);
+        return;
     }
-    // A snapshot that landed while paging supersedes this page entirely.
+    // A newer snapshot (or a torn-down view) supersedes this hydration whole.
+    if (!activeConversations.has(chatId)) return;
     if (conv._snapshotGen !== gen || conv._baseIdx !== beforeIdx) return;
-    if (!res || !res.ok || !res.data) {
-        conv._loadingOlder = false;
-        _renderLoadEarlierBar(conv, container);
-        return;
-    }
+    if (!res || !res.ok || !res.data) return;
 
-    const page = res.data;
-    const olderExchanges = messagesToExchanges(page.messages || []);
-    conv._loadingOlder = false;
-    conv._baseIdx = page.baseIdx;
-    conv._hasMore = !!page.hasMore;
-    conv._totalMessages = page.totalMessages;
-    if (olderExchanges.length === 0) {
-        _renderLoadEarlierBar(conv, container);
-        return;
-    }
+    const olderExchanges = messagesToExchanges(res.data.messages || []);
+    conv._baseIdx = 0;
+    conv._hasMore = false;
+    conv._totalMessages = res.data.totalMessages ?? conv._totalMessages;
+    if (olderExchanges.length === 0) return;
 
     // Captured BEFORE any DOM mutation. anchorEl is the exact node the reader is
-    // looking at — under virtual scroll it is also the live node the restore
-    // below relies on, so it is never rebuilt (a rebuild would kill a streaming
-    // bubble and any active tool element mid-turn).
+    // looking at — under virtual scroll it is also a live node, so it is never
+    // rebuilt (a rebuild would kill a streaming bubble mid-turn).
+    const stickBottom = !!bottomPin.get(container)?.stick;
     const wasVS = _vsState.has(container);
-    const anchorEl = _firstVisibleChatMessage(container);
+    const anchorEl = stickBottom ? null : _firstVisibleChatMessage(container);
     const anchorOffset = anchorEl
         ? anchorEl.getBoundingClientRect().top - container.getBoundingClientRect().top
         : 0;
@@ -1096,31 +1051,31 @@ async function loadOlderMessagesForChat(chatId) {
         const el = buildExchangeElement(exchange);
         if (el) fragment.appendChild(el);
     }
-    if (firstExistingMsg) {
-        container.insertBefore(fragment, firstExistingMsg);
-    } else {
-        const bar = container.querySelector('.load-earlier-bar');
-        if (bar) container.insertBefore(fragment, bar.nextSibling);
-        else container.appendChild(fragment);
-    }
+    if (firstExistingMsg) container.insertBefore(fragment, firstExistingMsg);
+    else container.appendChild(fragment);
 
     conv.exchanges = olderExchanges.concat(conv.exchanges);
-    _renderLoadEarlierBar(conv, container);
 
-    if (anchorEl && anchorEl.isConnected) {
-        container.scrollTop += (anchorEl.getBoundingClientRect().top - container.getBoundingClientRect().top) - anchorOffset;
-    }
+    const restoreScroll = () => {
+        if (stickBottom) {
+            scrollToBottom(container);
+        } else if (anchorEl && anchorEl.isConnected) {
+            container.scrollTop += (anchorEl.getBoundingClientRect().top - container.getBoundingClientRect().top) - anchorOffset;
+        }
+    };
 
-    // Re-arm virtual scroll past the threshold. savedTop is captured after the
-    // anchor restore and re-applied after activation, so the natural-flow →
-    // stage conversion cannot move the viewport.
     if (wasVS || container.querySelectorAll('.chat-message').length >= VS_MIN_ITEMS) {
+        // Restore the reading position in natural flow first, then convert to the
+        // stage and re-apply it — activation re-lays-out every slot.
+        restoreScroll();
         const savedTop = container.scrollTop;
         _vsActivate(container);
-        container.scrollTop = savedTop;
+        if (stickBottom) scrollToBottom(container);
+        else container.scrollTop = savedTop;
         _vsUpdateVisible(container);
+    } else {
+        restoreScroll();
     }
-    updateOverallContext();
 }
 
 // The virtual scroller re-measures every slot ~300ms after the last resize and
@@ -1163,8 +1118,6 @@ async function buildHistoricalDomForChat(conv, container) {
         );
     }
     if (conv.length === 0) {
-        _vsShowBusy();
-        _vsHideBusy();
         if (container.dataset.chatId === DRAFT_CHAT_ID) {
             renderSetupCard(container);
             return;
@@ -1179,10 +1132,9 @@ async function buildHistoricalDomForChat(conv, container) {
         container.replaceChildren(welcome);
         return;
     }
-    // Show busy while we render the historical DOM. _vsActivate hides it
-    // after the post-activation visibility pass (called from switchChat).
-    // WI-5: skip the overlay for small chats — _vsActivate will no-op anyway.
-    if (conversation.getAll().length * 2 >= VS_MIN_ITEMS) _vsShowBusy();
+    // No busy overlay: a tail page is ~25 messages and renders in a handful of
+    // milliseconds — hiding the screen behind a spinner would be slower than the
+    // paint it covers. _vsHideBusy() still runs from _vsActivate as cleanup.
     for (const exchange of conv.getAll()) {
         const el = buildExchangeElement(exchange);
         if (el) container.appendChild(el);
@@ -3621,18 +3573,17 @@ function renderConversation() {
     _vsActivateWhenReady(container);
 }
 
-// Wait for nui-markdown/nui-code to finish rendering, then activate
-// `onDone` runs after the stage conversion — callers that must land at a
-// specific scroll position need the post-activation hook, because activation
-// re-lays-out the container (normal flow → absolutely positioned stage) and a
-// scroll applied before it does not survive.
+// After the web components settle, activate virtual scroll. `onDone` runs after
+// the stage conversion — callers that must land at a specific scroll position
+// need the post-activation hook, because activation re-lays-out the container
+// (normal flow → absolutely positioned stage) and a scroll applied before it
+// does not survive. One frame is enough: nui-markdown renders synchronously, so
+// `offsetHeight` is already settled. No artificial delay, no busy overlay.
 function _vsActivateWhenReady(container, onDone = null) {
-    setTimeout(() => {
-        requestAnimationFrame(() => {
-            _vsActivate(container);
-            if (onDone) onDone();
-        });
-    }, 300);
+    requestAnimationFrame(() => {
+        _vsActivate(container);
+        if (onDone) onDone();
+    });
 }
 
 function _vsActivate(container) {
@@ -3718,12 +3669,8 @@ function _vsActivate(container) {
 
     // replaceChildren is one atomic DOM call; innerHTML='' + appendChild is two.
     // At this point the container still holds the pre-activation render, which
-    // we're clearing as we install the stage. A `.load-earlier-bar` is a
-    // preserved sibling BEFORE the stage (it is not a slot — paging more of the
-    // conversation must stay reachable while virtual scroll is active).
-    const bar = container.querySelector('.load-earlier-bar');
-    if (bar) container.replaceChildren(bar, stage);
-    else container.replaceChildren(stage);
+    // we're clearing as we install the stage.
+    container.replaceChildren(stage);
 
     const state = {
         slots,
@@ -3879,10 +3826,10 @@ function _vsUpdateVisible(container) {
     const state = _vsState.get(container);
     if (!state) return;
 
-    // Slot offsets are stage-relative; the container may hold a
-    // `.load-earlier-bar` above the stage, so both viewport edges must be
-    // translated into stage coordinates or the whole window shifts by the bar's
-    // height (content detached while on screen).
+    // Slot offsets are stage-relative; the stage is not always at the
+    // container's top edge, so both viewport edges must be translated into
+    // stage coordinates or the whole window shifts by its offset (content
+    // detached while on screen).
     const stageTop = state.stage.offsetTop;
     const scrollTop = container.scrollTop - stageTop;
     const viewportBottom = scrollTop + container.clientHeight;
@@ -4073,7 +4020,7 @@ function _vsAppendMessage(container, el) {
     if (!state) {
         container.appendChild(el);
         // WI-5: crossing the threshold upward — activate virtual scroll.
-        // The settle delay lets web components render before measuring.
+        // One frame lets the new component render before it is measured.
         if (container.querySelectorAll('.chat-message').length >= VS_MIN_ITEMS) {
             _vsActivateWhenReady(container);
         }

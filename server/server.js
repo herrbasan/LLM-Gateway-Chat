@@ -2144,6 +2144,10 @@ const routes = {
     }
     const limitRaw = url.searchParams.get('limit');
     const limit = limitRaw === null || limitRaw.trim() === '' ? convStore.TAIL_PAGE_SIZE : Number(limitRaw);
+    // `all=1` returns the whole prefix `[0 .. before)` in one peek — the view's
+    // background hydration after the instant tail paint.
+    const allRaw = url.searchParams.get('all');
+    const all = allRaw === '1' || allRaw === 'true';
 
     try {
       const convId = await convStore.findConversationId(db, params.id);
@@ -2151,7 +2155,7 @@ const routes = {
         json(res, { error: 'Conversation not found' }, 404, req);
         return;
       }
-      const page = await convStore.loadConversationPage(db, convId, { before, limit });
+      const page = await convStore.loadConversationPage(db, convId, all ? { before, all: true } : { before, limit });
       json(res, {
         messages: page.messages.map((m, i) => convStore.viewMessage(m, page.baseIdx + i)),
         baseIdx: page.baseIdx,

@@ -8,6 +8,8 @@
 //     `peek`;
 //   - the tail window snaps back across a 30-message tool chain to a turn
 //     boundary, and keeps absolute indexes;
+//   - `all: true` returns the entire prefix `[0 .. baseIdx)` in ONE peek, and
+//     concatenated with the tail reconstructs the exact stored history;
 //   - backward paging reconstructs the exact stored history with no gap and no
 //     duplicate;
 //   - ensureFull() loads everything for a run, while a warm snapshot STILL
@@ -279,6 +281,24 @@ test('a 500-message conversation attaches as a tail window, pages back losslessl
         const reconstructed = pages.flatMap(page => page.messages).concat(tail);
         assert.equal(reconstructed.length, TOTAL, 'pages + tail cover the whole history');
         reconstructed.forEach((msg, i) => assert.equal(msg.id, `m${i}`, `index ${i} holds the stored message`));
+
+        // ---- background hydration: the ENTIRE prefix [0 .. baseIdx) in one peek
+        assert.equal(store.TAIL_PAGE_SIZE, 25, 'the first paint is one small tail page');
+        assert.ok(tail.length >= store.TAIL_PAGE_SIZE, `the tail carries at least one page (${tail.length})`);
+        const allPage = await store.loadConversationPage(raw, instance.conv._id, { before: snap.baseIdx, all: true });
+        assert.equal(allPage.baseIdx, 0, 'the whole-prefix read starts at index 0');
+        assert.equal(allPage.endIdx, snap.baseIdx);
+        assert.equal(allPage.totalMessages, TOTAL);
+        assert.equal(allPage.hasMore, false);
+        const hydrated = allPage.messages.concat(tail);
+        assert.equal(hydrated.length, TOTAL, 'one-shot prefix + tail cover the whole history');
+        hydrated.forEach((msg, i) => assert.equal(msg.id, `m${i}`, `index ${i} holds the stored message`));
+
+        // ---- viewMessage projects without `rawContent` (it duplicated `content`)
+        const projected = store.viewMessage(tail[0], 0);
+        assert.equal(projected.rawContent, undefined, 'rawContent is not projected');
+        assert.equal(projected.content, tail[0].content, 'content survives projection');
+        assert.equal(snap.messages[0].rawContent, undefined, 'snapshot messages carry no rawContent');
 
         // ---- ensureFull: the run path gets everything
         await instance.ensureFull();

@@ -524,7 +524,7 @@ async function editAssistantMessageContent(ctx, { conversationId, messageId, con
 // returns the entire document — one 5.9 MB JSON body per attach — which is
 // exactly what this path exists to avoid.
 
-const TAIL_PAGE_SIZE = 50;
+const TAIL_PAGE_SIZE = 25;
 
 // nDB's `peek_item` returns ONLY the fields named in `fields` when the request
 // also carries `array_slices` (ram_engine.rs — it does NOT fall back to "all
@@ -559,6 +559,10 @@ function canonicalizeStorageUrls(content, mcpOrigin) {
 // two can never format a message differently.
 function viewMessage(m, absIdx, { storageOrigin = null } = {}) {
     const cloned = { ...m };
+    // `rawContent` duplicated `content` byte for byte on every projected message
+    // (2x wire bloat) and has no reader in chat/ or chat-arena/. Stored docs keep
+    // it; the view never needs it.
+    delete cloned.rawContent;
     if (cloned.attachments) cloned.attachments = densifyAttachments(cloned.attachments);
     // Legacy data may carry a stored prefix (pre-2026-08-31 form, or a model
     // echo the old @-only strip missed). Accept the same separators api-view does.
@@ -668,16 +672,33 @@ async function loadConversationTail(db, convId, { tailSize = TAIL_PAGE_SIZE, tot
 }
 
 /**
- * One backward page of a long conversation, snapped to a turn boundary.
+ * A backward page of a long conversation, snapped to a turn boundary, or the
+ * ENTIRE prefix `[0 .. before)` in one peek when `all` is set.
  * `before` is the absolute index the page ends at (exclusive) — the view's
  * current `baseIdx`.
  */
-async function loadConversationPage(db, convId, { before, limit = TAIL_PAGE_SIZE } = {}) {
+async function loadConversationPage(db, convId, { before, limit = TAIL_PAGE_SIZE, all = false } = {}) {
     if (!Number.isInteger(before) || before < 0) {
         throw new Error(`loadConversationPage: before must be a non-negative integer (got ${before})`);
     }
-    const size = Number.isInteger(limit) ? Math.max(1, Math.min(200, limit)) : TAIL_PAGE_SIZE;
     if (before === 0) return { messages: [], baseIdx: 0, endIdx: 0, totalMessages: 0, hasMore: false, seq: null };
+
+    // Whole-prefix mode: one peek from offset 0 — nothing to snap back to,
+    // because index 0 starts the conversation.
+    if (all) {
+        const segment = await peekMessageSlice(db, convId, 0, before, false);
+        const totalMessages = segment.range?.total ?? (before + segment.messages.length);
+        return {
+            messages: segment.messages,
+            baseIdx: 0,
+            endIdx: Math.min(before, totalMessages),
+            totalMessages,
+            hasMore: false,
+            seq: segment.seq
+        };
+    }
+
+    const size = Number.isInteger(limit) ? Math.max(1, Math.min(200, limit)) : TAIL_PAGE_SIZE;
 
     let offset = Math.max(0, before - size);
     let segment = await peekMessageSlice(db, convId, offset, before - offset, false);

@@ -182,11 +182,11 @@ function editMessage(chatId, messageId, content) {
     return _api('PATCH', `/api/chats/${chatId}/messages/${encodeURIComponent(messageId)}`, { content });
 }
 
-// One backward page of older messages (the snapshot carries only the tail of a
-// long conversation). `beforeIdx` is the absolute index the page ends at.
-// → { status, ok, data: { messages, baseIdx, endIdx, totalMessages, hasMore, seq } }
-function loadOlderMessages(chatId, beforeIdx, limit = 50) {
-    return _api('GET', `/api/chats/${encodeURIComponent(chatId)}/messages?before=${beforeIdx}&limit=${limit}`);
+// The whole earlier prefix `[0 .. beforeIdx)` in ONE request — the view's
+// background hydration after the instant tail paint.
+// → { status, ok, data: { messages, baseIdx: 0, endIdx, totalMessages, hasMore: false, seq } }
+function loadAllEarlierMessages(chatId, beforeIdx) {
+    return _api('GET', `/api/chats/${encodeURIComponent(chatId)}/messages?before=${beforeIdx}&all=1`);
 }
 
 // Attach to the user-level list stream. handlers maps event name → callback(data).
@@ -198,4 +198,4 @@ function attachListEvents(handlers = {}) {
     return { close: () => { listHandlers.delete(handlers); } };
 }
 
-export const runnerClient = { attach, send, abort, retry, deleteMessage, editMessage, loadOlderMessages, attachListEvents, onAuthError, onOfflineChange };
+export const runnerClient = { attach, send, abort, retry, deleteMessage, editMessage, loadAllEarlierMessages, attachListEvents, onAuthError, onOfflineChange };
