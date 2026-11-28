@@ -18,6 +18,13 @@ import {
     deriveIdFromUrl,
     deriveTitleFromUrl
 } from './preview-url.js';
+import {
+    kindFromName,
+    kindFromMime,
+    languageFromName,
+    KIND_MEDIA
+} from './preview-file-types.js';
+import { docxModel, docxModelText, renderDocxModel } from './preview-docx.js';
 import { resolveContentHref, noteUrlFromHref, splitNoteSource } from './research-note.js';
 import {
     MAX_MARKS,
@@ -115,6 +122,7 @@ const BROWSER_MAX_WIDTH_PX = 520;
 const BROWSER_CONTENT_MIN_PX = 220; // #preview-content must never collapse
 const VIEW_KEY = 'preview-view';        // last chosen view — 'document' | 'deck'
 const MAX_CONTENT_BYTES = 256 * 1024;  // 256KB hard cap
+const DOCX_MAX_BYTES = 25 * 1024 * 1024; // 25MB — a conversion input, not a reading surface
 const FETCH_TIMEOUT_MS = 15000;        // url-mode fetch cap — never block forever
 
 // Internal storage trees that are not content: hidden from the browser.
@@ -392,12 +400,17 @@ function toggleView() {
  *   url mode:     fetch an existing file and display it (url only required;
  *                 id/title/language/source derived from the url when omitted)
  *
+ * The renderer is chosen from ONE type table (preview-file-types.js): markdown,
+ * code, image, svg, audio, video, html, docx, pdf (deferred to Milestone 4) and
+ * the trusted hosted-UI surface. Unknown types fail readably — never decoded.
+ *
  * @param {Object} args - Tool arguments
  * @param {string} args.id - Stable identifier (reuse to update in place)
  * @param {string} args.title - Human-readable label for dropdown
  * @param {string} [args.content] - Content mode: the text to render
  * @param {string} [args.url] - Url mode: /storage/... path or absolute http(s) url to fetch
  * @param {string} [args.language='text'] - 'markdown' for rendered MD, else code language
+ * @param {string} [args.kind] - Explicit type override (needed only without a usable extension)
  * @param {string} [args.source] - Optional provenance label
  * @param {Object} [opts]
  * @param {string} [opts.sessionId] - Conversation that owns the item. Defaults
@@ -416,15 +429,20 @@ async function show(args, opts = {}) {
     const targetId = opts.sessionId ?? currentSessionId ?? DEFAULT_SESSION_ID;
     const s = _getSession(targetId);
 
+    const explicitKind = typeof args.kind === 'string' && args.kind.length > 0 ? args.kind : null;
     let id = args.id;
     let title = args.title;
     let language = typeof args.language === 'string' && args.language.length > 0 ? args.language : 'text';
     let source = typeof args.source === 'string' && args.source.length > 0 ? args.source : null;
-    let content;
+    let kind;
+    let content = null;
     let docBase = null;
+    let itemUrl = null;
+    let mime = null;
+    let docx = null;
 
     if (hasContent) {
-        // MODE A — generated content (existing behavior)
+        // MODE A — generated content (text only: bytes belong in url mode)
         content = args.content;
         if (typeof id !== 'string' || id.length === 0) throw new Error('preview.show: id required when using content');
         // title is display-only dropdown metadata — a missing one must not
@@ -433,45 +451,134 @@ async function show(args, opts = {}) {
             console.warn('[preview] content mode missing title — deriving from id:', id);
             title = id;
         }
+        kind = classifyContentKind({ explicitKind, language, title, source });
+        if (kind === 'html') language = 'html';
+        // No explicit language hint and clearly-markdown content → render as MD.
+        // Otherwise the LLM's read/generated markdown shows as raw code.
+        if (kind === 'code' && language === 'text' && looksLikeMarkdown(content)) {
+            kind = 'markdown';
+            language = 'markdown';
+        }
     } else {
         // MODE B — fetched file: the model hands just the url, the preview
-        // fetches and displays it. No regeneration of content.
+        // classifies it by extension, fetches only what a renderer needs, and
+        // never decodes binary bytes as text.
         const resolvedUrl = resolvePreviewUrl(args.url, _mcpOriginResolver);
         docBase = resolvedUrl;
-        try {
-            content = await _fetchUrlText(resolvedUrl);
-        } catch (err) {
-            // The error paints the shared surface only when this session owns it.
-            if (targetId === currentSessionId) renderFetchError(resolvedUrl, err);
-            throw err;
-        }
+        // A root-relative path is served by THIS origin — the /storage/* proxy is
+        // cookie-auth'd and Range-capable — so media renders straight from it and
+        // stays reachable from a remote browser. Absolute urls are passive
+        // content the browser fetches itself.
+        itemUrl = args.url.startsWith('/') ? args.url : resolvedUrl;
         if (typeof id !== 'string' || id.length === 0) id = deriveIdFromUrl(resolvedUrl);
         if (typeof title !== 'string' || title.length === 0) title = deriveTitleFromUrl(resolvedUrl);
-        if (typeof args.language !== 'string' || args.language.length === 0) language = inferLanguageFromUrl(resolvedUrl);
         if (!source) source = resolvedUrl;
+
+        let loaded;
+        try {
+            loaded = await loadUrlSource({ explicitKind, resolvedUrl, displayUrl: itemUrl });
+        } catch (err) {
+            // The error paints the shared surface only when this session owns it.
+            if (targetId === currentSessionId) renderFetchError(itemUrl, err);
+            throw err;
+        }
+        // No await follows: the session check after recordItem below covers the
+        // whole fetch + conversion window.
+        kind = loaded.kind;
+        content = loaded.text ?? null;
+        mime = loaded.mime ?? null;
+        docx = loaded.model ?? null;
+        if (kind === 'docx') content = docxModelText(docx);
+        if (loaded.language) language = loaded.language;
+        else if (kind === 'code') language = inferLanguageFromUrl(resolvedUrl);
+        else language = kind;
+        if (kind === 'code' && language === 'text' && looksLikeMarkdown(content)) {
+            kind = 'markdown';
+            language = 'markdown';
+        }
     }
 
-    // No explicit language hint and clearly-markdown content → render as MD.
-    // Otherwise the LLM's read/generated markdown shows as raw code.
-    if (language === 'text' && looksLikeMarkdown(content)) {
-        language = 'markdown';
-    }
-
-    if (content.length > MAX_CONTENT_BYTES) {
+    if (typeof content === 'string' && content.length > MAX_CONTENT_BYTES) {
         throw new Error(`preview.show: content exceeds ${MAX_CONTENT_BYTES} byte cap (${content.length} bytes). Excerpt it and pass content, or show a smaller file.`);
     }
 
-    // Upsert into the target session's items map
+    const contentChanged = recordItem(s, { id, title, language, kind, content, source, url: itemUrl, mime, docx, base: docBase });
+
+    // Select this item (brings to front)
+    s.activeId = id;
+    s.paneOpen = true;
+
+    // Re-checked AFTER every await above: the user may have switched chats while
+    // a fetch was in flight. A background session records the item and stops.
+    if (targetId !== currentSessionId) {
+        return showResult(s, id, hasContent, args.url);
+    }
+
+    // Open pane if hidden
+    openPane();
+
+    // Update dropdown + render
+    syncDropdown();
+    renderActive();
+
+    // If the rendered item changed, fire the callback so chat.js can stop stale
+    // TTS. The old audio no longer matches what's on screen — keeping it playing
+    // would be a silent lie (user sees new content, hears old content).
+    if (contentChanged && _onContentChange) _onContentChange();
+
+    return showResult(s, id, hasContent, args.url);
+}
+
+function showResult(s, id, hasContent, url) {
+    return {
+        content: [{
+            type: 'text',
+            text: JSON.stringify({
+                shown: true,
+                id,
+                selected: true,
+                itemCount: s.items.size,
+                mode: hasContent ? 'content' : 'url',
+                url: hasContent ? undefined : url
+            })
+        }]
+    };
+}
+
+function classifyContentKind({ explicitKind, language, title, source }) {
+    if (explicitKind === 'svg' || explicitKind === 'code') return 'code';
+    if (explicitKind === 'markdown' || explicitKind === 'html') return explicitKind;
+    if (explicitKind) {
+        throw new Error(`preview.show: content mode renders text only — "${explicitKind}" needs url mode`);
+    }
+    if (language === 'markdown') return 'markdown';
+    if (language === 'html') return 'html';
+    const named = kindFromName(title) || kindFromName(source);
+    if (named?.kind === 'markdown') return 'markdown';
+    if (named?.kind === 'html') return 'html';
+    return 'code';
+}
+
+// One render key for every kind: content for text, url for media/docx. The key
+// change is what stops stale TTS when the visible item is swapped.
+function itemRenderKey(item) {
+    if (!item) return '';
+    return `${item.kind || ''}|${item.url || ''}|${item.content ?? ''}`;
+}
+
+function recordItem(s, { id, title, language, kind, content, source, url, mime, docx, base }) {
     const isNew = !s.items.has(id);
     const prevItem = s.items.get(id);
-    const contentChanged = isNew || prevItem.content !== content;
-
-    s.items.set(id, {
+    const item = {
         id,
         title,
         language,
+        kind,
         content,
         source,
+        url,
+        mime,
+        docxModel: docx,
         // Per-item view, defaulting to whatever was used last. Only markdown
         // items with deck structure can actually render as a deck — renderActive
         // is the gate, so an item may carry 'deck' while its content has none.
@@ -486,56 +593,11 @@ async function show(args, opts = {}) {
         // resolve against it, like any viewer opening the file from disk.
         // Content mode has no location; base stays null and relative paths
         // render as authored.
-        base: docBase
-    });
-
-    // Select this item (brings to front)
-    s.activeId = id;
-    s.paneOpen = true;
-
-    // Re-checked AFTER the fetch: the user may have switched chats while it was
-    // in flight. A background session records the item and stops here.
-    if (targetId !== currentSessionId) {
-        return {
-            content: [{
-                type: 'text',
-                text: JSON.stringify({
-                    shown: true,
-                    id,
-                    selected: true,
-                    itemCount: s.items.size,
-                    mode: hasContent ? 'content' : 'url',
-                    url: hasUrl ? args.url : undefined
-                })
-            }]
-        };
-    }
-
-    // Open pane if hidden
-    openPane();
-
-    // Update dropdown + render
-    syncDropdown();
-    renderActive();
-
-    // If content changed, fire the callback so chat.js can stop stale TTS.
-    // The old audio no longer matches what's on screen — keeping it playing
-    // would be a silent lie (user sees new content, hears old content).
-    if (contentChanged && _onContentChange) _onContentChange();
-
-    return {
-        content: [{
-            type: 'text',
-            text: JSON.stringify({
-                shown: true,
-                id,
-                selected: true,
-                itemCount: s.items.size,
-                mode: hasContent ? 'content' : 'url',
-                url: hasUrl ? args.url : undefined
-            })
-        }]
+        base
     };
+    const changed = isNew || itemRenderKey(prevItem) !== itemRenderKey(item);
+    s.items.set(id, item);
+    return changed;
 }
 
 async function showUi(args, opts = {}) {
@@ -582,7 +644,7 @@ function renderFetchError(url, err) {
     syncDropdown();
     openPane();
     viewBtn.hidden = true;
-    content.classList.remove('deck-mode', 'ui-mode');
+    content.classList.remove('deck-mode', 'ui-mode', 'media-mode', 'html-mode');
     const error = document.createElement('div');
     error.className = 'preview-fetch-error';
     error.setAttribute('role', 'alert');
@@ -618,6 +680,100 @@ async function _fetchUrlText(url) {
             throw new Error(`preview: fetch failed (${res.status} ${res.statusText}) for ${url}${detail ? ` — ${detail}` : ''}`);
         }
         return await res.text();
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error(`preview: fetch timed out after ${FETCH_TIMEOUT_MS}ms for ${url}`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Classify a url and load only what its renderer needs — media is never
+ * prefetched, DOCX is read as bytes, text goes through the decode gate.
+ * An unknown extension is sniffed with a HEAD (same-origin only) so the
+ * Content-Type decides; cross-origin falls through to the text proxy, which
+ * reports a binary upstream as an unsupported-format error rather than text.
+ *
+ * @returns {Promise<{kind: string, text?: string, language?: string, mime?: string, model?: Array}>}
+ */
+async function loadUrlSource({ explicitKind, resolvedUrl, displayUrl }) {
+    const named = explicitKind ? { kind: explicitKind } : kindFromName(displayUrl);
+    if (named) return loadAsKind(named.kind, named.language, { resolvedUrl, displayUrl });
+
+    const mime = await _sniffContentType(displayUrl);
+    const sniffed = mime ? kindFromMime(mime) : null;
+    if (sniffed) return loadAsKind(sniffed, null, { resolvedUrl, displayUrl, mime });
+    if (mime) throw unsupportedFormat(displayUrl, mime);
+
+    const text = await _fetchUrlText(resolvedUrl);
+    return { kind: 'code', text };
+}
+
+function loadAsKind(kind, language, { resolvedUrl, displayUrl, mime }) {
+    if (KIND_MEDIA.has(kind)) return { kind, mime: mime || null };
+    if (kind === 'pdf') return { kind, mime: mime || 'application/pdf' };
+    if (kind === 'docx') {
+        return _fetchUrlBytes(displayUrl)
+            .then(docxModel)
+            .then(model => ({ kind, model, mime: mime || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+    }
+    if (kind === 'markdown' || kind === 'code' || kind === 'html') {
+        const lang = language || languageFromName(displayUrl) || (kind === 'markdown' || kind === 'html' ? kind : null);
+        return _fetchUrlText(resolvedUrl).then(text => ({ kind, text, language: lang || undefined }));
+    }
+    throw unsupportedFormat(displayUrl, null, kind);
+}
+
+function unsupportedFormat(displayUrl, mime, kind) {
+    const name = deriveTitleFromUrl(displayUrl);
+    const detail = kind ? `format "${kind}"` : `type "${mime || 'unknown'}"`;
+    return new Error(`preview: cannot render "${name}" — unsupported ${detail}. Text, Markdown, code, HTML, images, audio, video and DOCX are supported; PDF arrives in the next milestone.`);
+}
+
+/**
+ * Content-Type of a same-origin resource, or null when it cannot be probed
+ * (a cross-origin HEAD is CORS-bound; the text proxy decides those).
+ */
+async function _sniffContentType(displayUrl) {
+    if (!displayUrl.startsWith('/')) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+        const res = await fetch(displayUrl, { method: 'HEAD', credentials: 'same-origin', signal: controller.signal });
+        if (!res.ok) throw new Error(`preview: fetch failed (${res.status} ${res.statusText}) for ${displayUrl}`);
+        return res.headers.get('content-type');
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error(`preview: fetch timed out after ${FETCH_TIMEOUT_MS}ms for ${displayUrl}`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Fetch bytes for a binary renderer (DOCX). Bounded by FETCH_TIMEOUT_MS and the
+ * DOCX size cap — the conversion input is not a reading surface.
+ */
+async function _fetchUrlBytes(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+        const res = await fetch(url, { credentials: 'same-origin', signal: controller.signal });
+        if (!res.ok) throw new Error(`preview: fetch failed (${res.status} ${res.statusText}) for ${url}`);
+        const declared = Number(res.headers.get('content-length'));
+        if (Number.isFinite(declared) && declared > DOCX_MAX_BYTES) {
+            throw new Error(`preview: "${url}" is ${declared} bytes — over the ${DOCX_MAX_BYTES} byte DOCX cap`);
+        }
+        const bytes = await res.arrayBuffer();
+        if (bytes.byteLength > DOCX_MAX_BYTES) {
+            throw new Error(`preview: "${url}" is ${bytes.byteLength} bytes — over the ${DOCX_MAX_BYTES} byte DOCX cap`);
+        }
+        return bytes;
     } catch (err) {
         if (err.name === 'AbortError') {
             throw new Error(`preview: fetch timed out after ${FETCH_TIMEOUT_MS}ms for ${url}`);
@@ -765,8 +921,8 @@ function getContext() {
     boundedContextString(ctx, 'id', item.id);
     boundedContextString(ctx, 'path', storagePathOf(item));
     boundedContextString(ctx, 'title', item.title);
-    ctx.kind = item.kind === 'ui' ? 'ui' : (item.language === 'markdown' ? 'markdown' : 'code');
-    if (item.language === 'markdown') ctx.view = item.view || 'document';
+    ctx.kind = item.kind || (item.language === 'markdown' ? 'markdown' : 'code');
+    if (ctx.kind === 'markdown') ctx.view = item.view || 'document';
     // Only the fields the server validates ride the wire: quote is required,
     // heading/note are optional and dropped when empty (validatePreviewContext
     // rejects unknown keys' payloads by size, so nothing extra is attached —
@@ -809,7 +965,7 @@ function reset() {
     _renderedContent = null;
     closeNoteDialog();
     if (content) content.replaceChildren();
-    if (content) content.classList.remove('deck-mode', 'ui-mode');
+    if (content) content.classList.remove('deck-mode', 'ui-mode', 'media-mode', 'html-mode');
     if (viewBtn) viewBtn.hidden = true;
     if (sourceEl) {
         sourceEl.textContent = '';
@@ -846,7 +1002,7 @@ function clearSession(sessionId) {
     _renderedContent = null;
     closeNoteDialog();
     if (content) content.replaceChildren();
-    if (content) content.classList.remove('deck-mode', 'ui-mode');
+    if (content) content.classList.remove('deck-mode', 'ui-mode', 'media-mode', 'html-mode');
     if (viewBtn) viewBtn.hidden = true;
     if (sourceEl) {
         sourceEl.textContent = '';
@@ -895,7 +1051,7 @@ function setSession(sessionId) {
 
     if (!s.paneOpen) {
         content.replaceChildren();
-        content.classList.remove('deck-mode', 'ui-mode');
+        content.classList.remove('deck-mode', 'ui-mode', 'media-mode', 'html-mode');
         viewBtn.hidden = true;
         sourceEl.textContent = '';
         sourceEl.title = '';
@@ -973,7 +1129,7 @@ function renderActive() {
     const s = _activeSession();
     if (!s.activeId || !s.items.has(s.activeId)) {
         content.replaceChildren();
-        content.classList.remove('deck-mode', 'ui-mode');
+        content.classList.remove('deck-mode', 'ui-mode', 'media-mode', 'html-mode');
         if (viewBtn) viewBtn.hidden = true;
         if (sourceEl) sourceEl.textContent = '';
         hideSelectionToolbar();
@@ -984,10 +1140,11 @@ function renderActive() {
     const item = s.items.get(s.activeId);
 
     // Detect content change from dropdown switch (show() handles its own detection).
-    // If the rendered content differs from what's on screen, fire the callback
+    // If the rendered item differs from what's on screen, fire the callback
     // so chat.js can stop stale TTS.
-    if (_renderedContent !== item.content) {
-        _renderedContent = item.content;
+    const renderKey = itemRenderKey(item);
+    if (_renderedContent !== renderKey) {
+        _renderedContent = renderKey;
         if (_onContentChange) _onContentChange();
     }
 
@@ -999,42 +1156,153 @@ function renderActive() {
     // The selection toolbar belongs to the document view of THIS render.
     hideSelectionToolbar();
 
-    if (item.kind === 'ui') {
-        if (viewBtn) viewBtn.hidden = true;
-        content.classList.remove('deck-mode');
-        content.classList.add('ui-mode');
-        renderUi(item);
+    content.classList.remove('ui-mode', 'deck-mode', 'media-mode', 'html-mode');
+    if (viewBtn) viewBtn.hidden = true;
+
+    switch (item.kind || (item.language === 'markdown' ? 'markdown' : 'code')) {
+        case 'ui':
+            content.classList.add('ui-mode');
+            renderUi(item);
+            renderMarksBar(item);
+            return;
+        case 'markdown':
+            renderMarkdownItem(item);
+            return;
+        case 'code':
+            renderCode(item.content, item.language);
+            renderMarksBar(item);
+            return;
+        case 'image':
+        case 'svg':
+            renderMediaImage(item);
+            return;
+        case 'audio':
+            renderMediaAudio(item);
+            return;
+        case 'video':
+            renderMediaVideo(item);
+            return;
+        case 'html':
+            renderHtmlDocument(item);
+            return;
+        case 'docx':
+            renderDocxItem(item);
+            return;
+        case 'pdf':
+            renderUnsupportedItem(item, 'PDF preview is not available yet', 'Rendered PDF pages arrive in the next milestone. Open the file in a new tab to read it now.');
+            return;
+        default:
+            renderUnsupportedItem(item, 'Unsupported file type', `"${item.title}" has no preview renderer.`);
+    }
+}
+
+function renderMarkdownItem(item) {
+    const deckCapable = hasDeckStructure(item.content);
+    const isDeck = deckCapable && item.view === 'deck';
+    // A markdown document with no section structure has exactly one slide and
+    // would overflow it — the toggle is not offered (spec §9: sections are the
+    // slide unit; a plain document is one surface).
+    if (viewBtn) viewBtn.hidden = !deckCapable;
+    setViewButton(isDeck);
+    content.classList.toggle('deck-mode', isDeck);
+    if (isDeck) {
+        renderDeck(item.content, item.base);
+        // Marks stay on the item while a deck is shown; they are re-applied
+        // the moment the document view comes back.
         renderMarksBar(item);
         return;
     }
-    content.classList.remove('ui-mode');
+    const md = renderMarkdown(item.content, item.base);
+    // nui-markdown renders synchronously on appendChild, so the text
+    // nodes the marks wrap already exist here.
+    applyItemMarks(item, md);
+}
 
-    if (item.language === 'markdown') {
-        const deckCapable = hasDeckStructure(item.content);
-        const isDeck = deckCapable && item.view === 'deck';
-        // A markdown document with no section structure has exactly one slide and
-        // would overflow it — the toggle is not offered (spec §9: sections are the
-        // slide unit; a plain document is one surface).
-        if (viewBtn) viewBtn.hidden = !deckCapable;
-        setViewButton(isDeck);
-        content.classList.toggle('deck-mode', isDeck);
-        if (isDeck) {
-            renderDeck(item.content, item.base);
-            // Marks stay on the item while a deck is shown; they are re-applied
-            // the moment the document view comes back.
-            renderMarksBar(item);
-        } else {
-            const md = renderMarkdown(item.content, item.base);
-            // nui-markdown renders synchronously on appendChild, so the text
-            // nodes the marks wrap already exist here.
-            applyItemMarks(item, md);
-        }
-    } else {
-        if (viewBtn) viewBtn.hidden = true;
-        content.classList.remove('deck-mode');
-        renderCode(item.content, item.language);
-        renderMarksBar(item);
+/**
+ * Media renders from its url — nothing is prefetched or decoded here. An SVG
+ * is an <img>, never inline markup: an image document cannot execute script,
+ * and the sandboxed HTML path is the only place scripts run.
+ */
+function renderMediaImage(item) {
+    content.classList.add('media-mode');
+    const img = document.createElement('img');
+    img.className = 'preview-media-image';
+    img.src = item.url;
+    img.alt = item.title || '';
+    img.title = item.title || '';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    content.replaceChildren(img);
+    renderMarksBar(item);
+}
+
+function renderMediaAudio(item) {
+    const audio = document.createElement('audio');
+    audio.className = 'preview-media-audio';
+    audio.controls = true;
+    audio.preload = 'metadata';
+    audio.src = item.url;
+    content.replaceChildren(audio);
+    renderMarksBar(item);
+}
+
+function renderMediaVideo(item) {
+    content.classList.add('media-mode');
+    const video = document.createElement('video');
+    video.className = 'preview-media-video';
+    video.controls = true;
+    video.preload = 'metadata';
+    video.playsInline = true;
+    video.src = item.url;
+    content.replaceChildren(video);
+    renderMarksBar(item);
+}
+
+/**
+ * HTML in an opaque-origin frame: scripts may run, but the document cannot
+ * reach this origin, forms, popups, modals or the top-level frame.
+ */
+function renderHtmlDocument(item) {
+    content.classList.add('html-mode');
+    const frame = document.createElement('iframe');
+    frame.className = 'preview-html-frame';
+    frame.title = item.title || 'HTML preview';
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.srcdoc = item.content;
+    content.replaceChildren(frame);
+    renderMarksBar(item);
+}
+
+function renderDocxItem(item) {
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-docx-document';
+    wrap.appendChild(renderDocxModel(item.docxModel));
+    content.replaceChildren(wrap);
+    renderMarksBar(item);
+}
+
+function renderUnsupportedItem(item, heading, detail) {
+    const box = document.createElement('div');
+    box.className = 'preview-unsupported';
+    const title = document.createElement('p');
+    title.className = 'preview-unsupported-title';
+    title.textContent = heading;
+    const body = document.createElement('p');
+    body.textContent = detail;
+    box.append(title, body);
+    const link = item.url || (item.source && /^https?:\/\//i.test(item.source) ? item.source : null);
+    if (link) {
+        const open = document.createElement('nui-button');
+        open.setAttribute('variant', 'ghost');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Open in new tab';
+        button.addEventListener('click', () => window.open(link, '_blank', 'noopener'));
+        open.appendChild(button);
+        box.appendChild(open);
     }
+    content.replaceChildren(box);
+    renderMarksBar(item);
 }
 
 /**
@@ -1114,7 +1382,10 @@ function getActivePlainText(plainTextFn) {
     const s = _activeSession();
     if (!s.activeId || !s.items.has(s.activeId)) return '';
     const item = s.items.get(s.activeId);
-    if (item.kind === 'ui') return '';
+    const kind = item.kind || (item.language === 'markdown' ? 'markdown' : 'code');
+    // Only text-backed kinds speak: an html source is not prose, and a media
+    // item has no text at all.
+    if (kind !== 'markdown' && kind !== 'code' && kind !== 'docx') return '';
     return plainTextFn(item.content);
 }
 
@@ -1134,6 +1405,7 @@ function getState() {
         items: [...s.items.values()].map(item => ({
             id: item.id,
             title: item.title,
+            kind: item.kind,
             language: item.language,
             source: item.source
         }))
@@ -1172,7 +1444,7 @@ function currentMarkdownRoot() {
     const s = _activeSession();
     const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
     if (!item) return null;
-    if (item.language !== 'markdown') return null;
+    if ((item.kind || (item.language === 'markdown' ? 'markdown' : 'code')) !== 'markdown') return null;
     if ((item.view || 'document') !== 'document') return null;
     return content.querySelector('nui-markdown');
 }
@@ -1432,7 +1704,7 @@ function onMarksBarNote(event) {
 function jumpToMark(item, markId) {
     const locate = () => content.querySelector(`mark.preview-passage-mark[data-mark-id="${markId}"]`);
     let target = locate();
-    if (!target && item.language === 'markdown' && hasDeckStructure(item.content) && (item.view || 'document') !== 'document') {
+    if (!target && (item.kind || 'markdown') === 'markdown' && hasDeckStructure(item.content) && (item.view || 'document') !== 'document') {
         // A slide is not the reading surface — jumping means returning to the
         // document flow, where the passages live.
         item.view = 'document';

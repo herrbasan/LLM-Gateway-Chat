@@ -747,7 +747,7 @@ const ARCHIVE_TOOL_DEFS = [
         type: 'function',
         function: {
             name: 'chat_preview_show',
-            description: `${SERVER_EXEC_NOTE}\n\nQueue content or a file/URL for rendering in the chat's preview pane (a second rendering surface). Pass EXACTLY ONE of content (text to render, markdown or code) or url (a /storage/... path or absolute http(s) URL to fetch). URL mode is for existing text/Markdown/code files only: binary documents such as PDFs, images, and archives are rejected with an error; for rendered documents use raster page previews (PNG) instead. The preview renders CLIENT-side: this tool returns a confirmation and the user clicks "Show in preview" on the tool bubble to render it. Use content mode for generated work product (edits, diffs, code). Preview a file with its url (not its content) whenever it carries relative links — a blog draft links research notes as ../references/<slug>.md, and only a document with a location resolves them; such note links render as an in-pane dialog, all other links open in a new tab.`,
+            description: `${SERVER_EXEC_NOTE}\n\nQueue content or a file/URL for rendering in the chat's preview pane (a second rendering surface). Pass EXACTLY ONE of content (text to render, markdown or code) or url (a /storage/... path or absolute http(s) URL). URL mode renders Markdown, code/text, HTML (sandboxed), images, SVG, audio, video and DOCX in place; PDF and unknown binaries are rejected with a readable error (PDF rendering arrives in the next milestone). The preview renders CLIENT-side: this tool returns a confirmation and the user clicks "Show in preview" on the tool bubble to render it. Use content mode for generated work product (edits, diffs, code). Preview a file with its url (not its content) whenever it carries relative links — a blog draft links research notes as ../references/<slug>.md, and only a document with a location resolves them; such note links render as an in-pane dialog, all other links open in a new tab.`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -756,6 +756,7 @@ const ARCHIVE_TOOL_DEFS = [
                     content: { type: 'string', description: 'Content mode: the text to render (markdown or code)' },
                     url: { type: 'string', description: 'URL mode: a /storage/... path or absolute http(s) URL to fetch and display' },
                     language: { type: 'string', description: "Language hint: 'markdown' for rendered markdown, else a code language name" },
+                    kind: { type: 'string', enum: ['markdown', 'code', 'html', 'image', 'svg', 'audio', 'video', 'docx', 'pdf'], description: 'Optional explicit type override — needed only when the url carries no usable extension' },
                     source: { type: 'string', description: 'Optional provenance label' }
                 }
             }

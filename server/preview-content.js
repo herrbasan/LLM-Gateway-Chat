@@ -1,6 +1,11 @@
 // Preview URL mode is a text surface. Validate the upstream declaration AND
 // the bytes: a mislabeled PDF must not become replacement-character soup merely
 // because a storage server called it text/plain (#57).
+//
+// The TOOL preflight is wider than the text decode gate: the preview pane
+// renders images, audio, video and DOCX natively (Milestone 3), so those
+// declarations pass. Everything else binary still fails here, before the model
+// queues a preview the view cannot render.
 
 const TEXT_MIME_TYPES = new Set([
     'application/json',
@@ -45,6 +50,19 @@ function isTextMediaType(contentType) {
         || mime.endsWith('+yaml');
 }
 
+const RENDERABLE_BINARY_MIME_TYPES = new Set([
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+]);
+
+function isRenderableBinaryMediaType(contentType) {
+    const mime = mediaType(contentType);
+    if (!mime) return false;
+    return mime.startsWith('image/')
+        || mime.startsWith('audio/')
+        || mime.startsWith('video/')
+        || RENDERABLE_BINARY_MIME_TYPES.has(mime);
+}
+
 function detectBinaryKind(value) {
     const bytes = Buffer.from(value);
     for (const [kind, signature] of BINARY_SIGNATURES) {
@@ -58,7 +76,7 @@ function detectBinaryKind(value) {
 }
 
 function unsupported(detail) {
-    const err = new Error(`preview URL mode supports text, Markdown, and code only; ${detail}. For rendered documents use raster page previews (PNG), or pass textual content in content mode`);
+    const err = new Error(`preview URL mode supports text, Markdown, code, images, audio, video, and DOCX; ${detail}. For unsupported rendered documents use raster page previews (PNG), or pass textual content in content mode`);
     err.statusCode = 415;
     return err;
 }
@@ -97,12 +115,13 @@ async function preflightPreviewUrl(raw, mcpOrigin) {
         if (upstream.body) await upstream.body.cancel();
         throw err;
     }
-    if (!isTextMediaType(upstream.headers.get('content-type'))) {
-        const err = unsupported(`received "${mediaType(upstream.headers.get('content-type'))}"`);
+    const contentType = upstream.headers.get('content-type');
+    if (!isTextMediaType(contentType) && !isRenderableBinaryMediaType(contentType)) {
+        const err = unsupported(`received "${mediaType(contentType)}"`);
         if (upstream.body) await upstream.body.cancel();
         throw err;
     }
     if (upstream.body) await upstream.body.cancel();
 }
 
-module.exports = { decodePreviewText, detectBinaryKind, isTextMediaType, preflightPreviewUrl };
+module.exports = { decodePreviewText, detectBinaryKind, isTextMediaType, isRenderableBinaryMediaType, preflightPreviewUrl };

@@ -2227,6 +2227,99 @@ nui-code pre {
     background: var(--color-base);
 }
 
+/* Multi-format renderers. Media and the HTML frame take the whole surface:
+   no reading padding, no document scroll — the content is the box. */
+.preview-content.media-mode {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--nui-space);
+    overflow: hidden;
+}
+
+.preview-content.html-mode {
+    padding: 0;
+    overflow: hidden;
+}
+
+.preview-media-image {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.preview-media-audio {
+    display: block;
+    width: 100%;
+}
+
+.preview-media-video {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    background: var(--color-shade2);
+}
+
+/* Sandboxed HTML document: opaque origin, so a white canvas is the honest
+   default — the document assumes a page, not this theme. */
+.preview-html-frame {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #ffffff;
+}
+
+.preview-docx-document {
+    line-height: 1.65;
+    color: var(--text-color);
+    overflow-wrap: anywhere;
+}
+
+.preview-docx-document h1,
+.preview-docx-document h2,
+.preview-docx-document h3,
+.preview-docx-document h4,
+.preview-docx-document h5,
+.preview-docx-document h6 {
+    margin: 1.4em 0 0.5em;
+    line-height: 1.25;
+}
+
+.preview-docx-document h1 { font-size: 1.75em; }
+.preview-docx-document h2 { font-size: 1.45em; }
+.preview-docx-document h3 { font-size: 1.2em; }
+
+.preview-docx-document p {
+    margin: 0 0 0.85em;
+}
+
+.preview-docx-document ul {
+    margin: 0 0 0.85em;
+    padding-left: 1.4em;
+}
+
+.preview-docx-document li {
+    margin-bottom: 0.3em;
+}
+
+.preview-unsupported {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-space);
+    align-items: flex-start;
+    padding: var(--nui-space) 0;
+    color: var(--text-color-dim);
+    overflow-wrap: anywhere;
+}
+
+.preview-unsupported-title {
+    margin: 0;
+    color: var(--text-color);
+    font-weight: 600;
+}
+
 
 /* Mobile Styles */
 @media (max-width: 48rem) {

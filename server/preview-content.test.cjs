@@ -51,6 +51,21 @@ test('preflight returns declared binary errors to the tool caller and accepts te
             res.end(PDF);
             return;
         }
+        if (req.url === '/photo.png') {
+            res.writeHead(200, { 'Content-Type': 'image/png' });
+            res.end(PNG);
+            return;
+        }
+        if (req.url === '/letter.docx') {
+            res.writeHead(200, { 'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+            res.end(Buffer.from('PK\x03\x04rest'));
+            return;
+        }
+        if (req.url === '/archive.zip') {
+            res.writeHead(200, { 'Content-Type': 'application/zip' });
+            res.end(Buffer.from('PK\x03\x04rest'));
+            return;
+        }
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
         res.end('# Preview');
     });
@@ -63,4 +78,9 @@ test('preflight returns declared binary errors to the tool caller and accepts te
         err => err.statusCode === 415 && err.message.includes('application/pdf') && err.message.includes('raster page previews')
     );
     await assert.doesNotReject(preflightPreviewUrl('/document.md', origin));
+    // Renderable binary kinds pass the tool gate (Milestone 3); anything else
+    // binary still fails before the model queues a preview the view cannot render.
+    await assert.doesNotReject(preflightPreviewUrl('/photo.png', origin));
+    await assert.doesNotReject(preflightPreviewUrl('/letter.docx', origin));
+    await assert.rejects(preflightPreviewUrl('/archive.zip', origin), err => err.statusCode === 415);
 });

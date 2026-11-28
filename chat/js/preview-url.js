@@ -4,6 +4,8 @@
 // Imported by preview.js; unit-testable in Node.
 // ============================================
 
+import { languageFromName } from './preview-file-types.js';
+
 /**
  * Resolve a preview url to an absolute fetchable url.
  * - http(s)://... → as-is (full URL)
@@ -27,26 +29,15 @@ export function resolvePreviewUrl(url, getMcpOrigin) {
     throw new Error(`preview: unsupported url "${url}" — must start with http(s):// or /`);
 }
 
-const EXT_LANGUAGE = {
-    md: 'markdown', markdown: 'markdown',
-    js: 'javascript', mjs: 'javascript', cjs: 'javascript',
-    ts: 'typescript', tsx: 'typescript',
-    json: 'json',
-    html: 'html', htm: 'html',
-    css: 'css',
-    py: 'python',
-    txt: 'text', log: 'text'
-};
-
 /**
  * Infer the preview language from a file url's extension. Falls back to 'text'.
+ * The extension table lives in preview-file-types.js — one table for every
+ * renderer decision, never a second copy here.
  * @param {string} url
  * @returns {string}
  */
 export function inferLanguageFromUrl(url) {
-    const path = url.split(/[?#]/)[0];
-    const ext = (path.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase();
-    return EXT_LANGUAGE[ext] || 'text';
+    return languageFromName(url) || 'text';
 }
 
 /**
