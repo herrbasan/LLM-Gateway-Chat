@@ -401,8 +401,8 @@ function toggleView() {
  *                 id/title/language/source derived from the url when omitted)
  *
  * The renderer is chosen from ONE type table (preview-file-types.js): markdown,
- * code, image, svg, audio, video, html, docx, pdf (deferred to Milestone 4) and
- * the trusted hosted-UI surface. Unknown types fail readably — never decoded.
+ * code, image, svg, audio, video, html, docx, pdf and the trusted hosted-UI
+ * surface. Unknown types fail readably — never decoded.
  *
  * @param {Object} args - Tool arguments
  * @param {string} args.id - Stable identifier (reuse to update in place)
@@ -730,7 +730,7 @@ function loadAsKind(kind, language, { resolvedUrl, displayUrl, mime }) {
 function unsupportedFormat(displayUrl, mime, kind) {
     const name = deriveTitleFromUrl(displayUrl);
     const detail = kind ? `format "${kind}"` : `type "${mime || 'unknown'}"`;
-    return new Error(`preview: cannot render "${name}" — unsupported ${detail}. Text, Markdown, code, HTML, images, audio, video and DOCX are supported; PDF arrives in the next milestone.`);
+    return new Error(`preview: cannot render "${name}" — unsupported ${detail}. Text, Markdown, code, HTML, images, audio, video, DOCX and PDF are supported.`);
 }
 
 /**
@@ -1189,7 +1189,7 @@ function renderActive() {
             renderDocxItem(item);
             return;
         case 'pdf':
-            renderUnsupportedItem(item, 'PDF preview is not available yet', 'Rendered PDF pages arrive in the next milestone. Open the file in a new tab to read it now.');
+            renderPdfDocument(item);
             return;
         default:
             renderUnsupportedItem(item, 'Unsupported file type', `"${item.title}" has no preview renderer.`);
@@ -1278,6 +1278,19 @@ function renderDocxItem(item) {
     wrap.className = 'preview-docx-document';
     wrap.appendChild(renderDocxModel(item.docxModel));
     content.replaceChildren(wrap);
+    renderMarksBar(item);
+}
+
+// Normal browsers already ship a PDF viewer; no document bytes enter JS and no
+// pdf.js worker/vendor surface is needed. If a device cannot display PDFs
+// inline, its native viewer offers the usual open/download fallback.
+function renderPdfDocument(item) {
+    content.classList.add('html-mode');
+    const frame = document.createElement('iframe');
+    frame.className = 'preview-html-frame preview-pdf-frame';
+    frame.title = item.title || 'PDF preview';
+    frame.src = item.url;
+    content.replaceChildren(frame);
     renderMarksBar(item);
 }
 

@@ -44,7 +44,7 @@ test('detects signatures without requiring a content-type declaration', () => {
     assert.equal(detectBinaryKind(Buffer.from('ordinary UTF-8 text')), null);
 });
 
-test('preflight returns declared binary errors to the tool caller and accepts text URLs', async (t) => {
+test('preflight accepts text and renderable binary URLs but rejects unknown binaries', async (t) => {
     const server = http.createServer((req, res) => {
         if (req.url === '/document.pdf') {
             res.writeHead(200, { 'Content-Type': 'application/pdf' });
@@ -73,10 +73,7 @@ test('preflight returns declared binary errors to the tool caller and accepts te
     t.after(() => new Promise(resolve => server.close(resolve)));
     const origin = `http://127.0.0.1:${server.address().port}`;
 
-    await assert.rejects(
-        preflightPreviewUrl('/document.pdf', origin),
-        err => err.statusCode === 415 && err.message.includes('application/pdf') && err.message.includes('raster page previews')
-    );
+    await assert.doesNotReject(preflightPreviewUrl('/document.pdf', origin));
     await assert.doesNotReject(preflightPreviewUrl('/document.md', origin));
     // Renderable binary kinds pass the tool gate (Milestone 3); anything else
     // binary still fails before the model queues a preview the view cannot render.

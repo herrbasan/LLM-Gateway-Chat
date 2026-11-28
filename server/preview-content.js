@@ -51,6 +51,7 @@ function isTextMediaType(contentType) {
 }
 
 const RENDERABLE_BINARY_MIME_TYPES = new Set([
+    'application/pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 ]);
 
@@ -76,7 +77,7 @@ function detectBinaryKind(value) {
 }
 
 function unsupported(detail) {
-    const err = new Error(`preview URL mode supports text, Markdown, code, images, audio, video, and DOCX; ${detail}. For unsupported rendered documents use raster page previews (PNG), or pass textual content in content mode`);
+    const err = new Error(`preview URL mode supports text, Markdown, code, images, audio, video, DOCX, and PDF; ${detail}. For unsupported rendered documents use raster page previews (PNG), or pass textual content in content mode`);
     err.statusCode = 415;
     return err;
 }
