@@ -12,22 +12,42 @@
 // ============================================
 const retireView = require('./retire-view');
 
+// One timestamp SHAPE, one definition (2026-11-27). The model does not
+// reproduce our separator: shown `[YYYY-MM-DD@HH:MM]` on every input turn, it
+// writes ISO-ish `[YYYY-MM-DDTHH:MM]` in its own replies. Measured on the live
+// corpus: 156 stored assistant echoes in the T form, invisible to the old
+// @-only strip — so they survived into history and became the next turn's
+// template, which is why a conversation keeps "printing the timestamp" long
+// after the injection was removed. Seconds and a space separator are accepted
+// for the same reason: an unrecognised shape is not "no echo", it is an echo
+// that gets persisted and taught back to the model.
+const TS_SHAPE_SRC = '\\[\\d{4}-\\d{2}-\\d{2}[@T ]\\d{2}:\\d{2}(?::\\d{2})?\\]\\s*';
+const LEADING_TS_REGEX = new RegExp(`^(?:${TS_SHAPE_SRC})+`);
+const ANY_TS_REGEX = new RegExp(TS_SHAPE_SRC, 'g');
+
 function stripExtraTimestamps(content) {
     // Keep the first timestamp, remove any subsequent ones
-    const TIMESTAMP_REGEX_GLOBAL = /\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g;
     let first = true;
-    return content.replace(TIMESTAMP_REGEX_GLOBAL, (match) => {
+    return content.replace(ANY_TS_REGEX, (match) => {
         if (first) { first = false; return match; }
         return '';
     });
 }
 
 // Canonical per-message time signal (2026-08-31): exactly one
-// [YYYY-MM-DD@HH:MM] prefix per message, derived from stored createdAt —
-// NEVER from content. Model-echoed prefixes are stripped at the leading edge,
-// so a mimicked timestamp can never double up. Server local time, minute
-// precision. Returns '' when the message has no text (attachment-only).
-const LEADING_TS_REGEX = /^(\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*)+/;
+// [YYYY-MM-DD@HH:MM] prefix per USER and TOOL message, derived from stored
+// createdAt — NEVER from content. Model-echoed prefixes are stripped at the
+// leading edge, so a mimicked timestamp can never double up. Server local
+// time, minute precision. Returns '' when the message has no text
+// (attachment-only).
+//
+// ASSISTANT turns carry no prefix (2026-11-27). They used to, and that was the
+// mimicry engine: the model read its own past replies opening with [ts] — a
+// perfect few-shot template for continuing the format — while the system
+// prompt told it not to. An instruction competing with the model's own
+// demonstrated output loses often enough to keep a cleanup path around. Time
+// now appears only on turns the SYSTEM authors, so the model reads it as a
+// label on input and has no example of itself emitting one.
 function formatMessageTs(createdAt) {
     const d = new Date(createdAt);
     if (Number.isNaN(d.getTime())) return '';
@@ -35,9 +55,13 @@ function formatMessageTs(createdAt) {
     return `[${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}@${p(d.getHours())}:${p(d.getMinutes())}] `;
 }
 function withTimestamp(content, createdAt) {
-    const clean = (content || '').replace(LEADING_TS_REGEX, '').trim();
+    const clean = stripLeadingTs(content);
     if (!clean) return '';
     return formatMessageTs(createdAt) + clean;
+}
+
+function stripLeadingTs(content) {
+    return (content || '').replace(LEADING_TS_REGEX, '').trim();
 }
 
 // Input-source tag (2026-09-20). Voice formatting is a per-MESSAGE property, not
@@ -51,7 +75,7 @@ function withTimestamp(content, createdAt) {
 // follows (`[ts] …`). Inserted by position rather than by call order so it cannot
 // end up leading the line if the two helpers are ever composed differently.
 const VOICE_TAG = '[voice] ';
-const TS_PREFIX = /^(\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*)/;
+const TS_PREFIX = new RegExp(`^(${TS_SHAPE_SRC})`);
 function withInputSource(content, msg) {
     if (!content || msg?.voice !== true) return content;
     const m = content.match(TS_PREFIX);
@@ -345,7 +369,7 @@ function buildApiMessages(messages, options = {}) {
                 const cleanAssistantContent = msg.content
                     ? ('content' in tx
                         ? tx.content
-                        : mark(withTimestamp(msg.content, msg.createdAt)))
+                        : mark(stripLeadingTs(msg.content)))
                     : '';
                 if (cleanAssistantContent || msg.reasoning_content || msg.tool_calls) {
                     const out = { role: 'assistant', content: cleanAssistantContent || null };
@@ -470,4 +494,4 @@ function buildApiMessages(messages, options = {}) {
     return { messages: merged, retireStats, rawMessages: merged };
 }
 
-module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, withInputSource, formatMessageTs, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef, parseBucketPath };
+module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, stripLeadingTs, withInputSource, formatMessageTs, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef, parseBucketPath };

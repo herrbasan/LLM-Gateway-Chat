@@ -475,8 +475,11 @@ class Runner {
     viewMessage(m) {
         const cloned = { ...m };
         if (cloned.attachments) cloned.attachments = convStore.densifyAttachments(cloned.attachments);
+        // Legacy data may still carry a stored prefix (pre-2026-08-31 form, or a
+        // model echo the old @-only strip missed). Accept the same separators
+        // api-view does, or the view renders the stale prefix above the text.
         const match = typeof cloned.content === 'string'
-            ? cloned.content.match(/^\[(\d{4}-\d{2}-\d{2})@(\d{2}:\d{2})\]\s*/)
+            ? cloned.content.match(/^\[(\d{4}-\d{2}-\d{2})[@T ](\d{2}:\d{2})(?::\d{2})?\]\s*/)
             : null;
         if (match) {
             cloned.timestamp = new Date(`${match[1]}T${match[2]}:00`).getTime();

@@ -6741,8 +6741,8 @@ window.openLightbox = openLightbox;
 // Timestamp Parsing
 // ============================================
 
-const TIMESTAMP_REGEX = /^\[(\d{4})-(\d{2})-(\d{2})@(\d{2}):(\d{2})\]\s*/;
-const TIMESTAMP_REGEX_GLOBAL = /\[\d{4}-\d{2}-\d{2}@\d{2}:\d{2}\]\s*/g;
+const TIMESTAMP_REGEX = /^\[(\d{4})-(\d{2})-(\d{2})[@T ](\d{2}):(\d{2})(?::\d{2})?\]\s*/;
+const TIMESTAMP_REGEX_GLOBAL = /\[\d{4}-\d{2}-\d{2}[@T ]\d{2}:\d{2}(?::\d{2})?\]\s*/g;
 
 function parseTimestamp(content) {
     if (!content) return { timestamp: null, cleanContent: content };

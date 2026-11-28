@@ -69,7 +69,13 @@ function buildMetadataPrefix(user = {}, substrate = null) {
     const p = n => String(n).padStart(2, '0');
     parts.push(`Date: "${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}"`);
     const header = parts.join(' | ');
-    const instruction = 'Do not include timestamps in your responses - they are added automatically by the chat system.';
+    // Time convention stated as a described fact, not a prohibition
+    // (2026-11-27): "do not include timestamps" named a format the model had
+    // no example of, while its own stamped replies demonstrated exactly that
+    // format. Now the prefix appears only on user/tool turns, and this line
+    // tells the model what the label means instead of banning a string it
+    // never sees itself produce.
+    const instruction = 'Message time: each user and tool message starts with [YYYY-MM-DD@HH:MM] (server local time, minute precision) — the newest one is "now". Your replies carry no timestamp prefix; write none.';
     return `${header}\n${instruction}`;
 }
 
