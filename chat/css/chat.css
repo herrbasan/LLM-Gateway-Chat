@@ -486,54 +486,66 @@ nui-code pre {
     overflow-wrap: anywhere;
 }
 
-/* Marked-passages bar: one compact row per marked passage (heading + quote,
-   optional note, remove). Scrollable so twenty marks never eat the document. */
+/* Marked passages stay an inline, wrapping strip: no nested scrollbar and no
+   permanent second row. Each chip carries the quote, an optional compact note,
+   and remove; long passages ellipsize instead of widening the preview. */
 .preview-marks-bar {
     flex: 0 0 auto;
-    max-height: 10rem;
-    overflow-y: auto;
-    padding: var(--nui-space-half) var(--nui-space);
+    padding: var(--nui-space-quarter) var(--nui-space-half);
     border-bottom: thin solid var(--border-shade1);
     background: color-mix(in srgb, var(--color-highlight) 8%, var(--color-shade1));
     display: flex;
-    flex-direction: column;
-    gap: var(--nui-space-quarter);
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--nui-space-quarter) var(--nui-space-half);
+    min-width: 0;
 }
 .preview-marks-bar[hidden] { display: none; }
 
 .preview-marks-head {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: var(--nui-space-half);
+    gap: var(--nui-space-quarter);
+    white-space: nowrap;
 }
 
 .preview-marks-title {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     font-weight: 600;
     color: var(--text-color);
 }
 
 .preview-marks-notice {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     color: var(--color-danger, #f44336);
 }
 
 .preview-marks-list {
+    flex: 1 1 18rem;
+    min-width: 0;
     list-style: none;
     margin: 0;
     padding: 0;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    flex-wrap: wrap;
     gap: var(--nui-space-quarter);
 }
 
 .preview-mark-item {
+    flex: 1 1 18rem;
     display: flex;
     align-items: center;
-    gap: var(--nui-space-quarter);
+    gap: 2px;
     min-width: 0;
+    max-width: 100%;
+    padding: 0 2px;
+    border: thin solid var(--border-shade1);
+    border-radius: 4px;
+    background: var(--color-base);
 }
 
 .preview-mark-item nui-button {
@@ -541,35 +553,29 @@ nui-code pre {
 }
 
 .preview-mark-jump {
-    flex: 1 1 auto;
-    min-width: 0;
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    overflow: hidden;
 }
 
 .preview-mark-jump > button {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: var(--nui-space-quarter);
     width: 100%;
     min-width: 0;
+    overflow: hidden;
     text-align: left;
 }
 
 .preview-mark-heading {
-    flex: 0 0 auto;
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-highlight);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 8rem;
+    display: none;
 }
 
 .preview-mark-quote {
     flex: 1 1 auto;
     min-width: 0;
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     color: var(--text-color-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -577,8 +583,15 @@ nui-code pre {
 }
 
 .preview-mark-note {
-    flex: 0 0 8rem;
-    min-width: 6rem;
+    flex: 0 1 7rem;
+    width: 7rem;
+    min-width: 0;
+    max-width: 7rem;
+}
+
+.preview-mark-note input {
+    width: 100%;
+    min-width: 0;
 }
 
 /* The passage highlight itself: a tint, never a text-color change — marked

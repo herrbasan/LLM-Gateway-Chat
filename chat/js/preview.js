@@ -1616,9 +1616,10 @@ function renderMarksBar(item) {
     head.className = 'preview-marks-head';
     const title = document.createElement('span');
     title.className = 'preview-marks-title';
-    title.textContent = `Marked for revision (${marks.length})`;
+    title.textContent = `Marks (${marks.length})`;
     const clearAll = document.createElement('nui-button');
     clearAll.setAttribute('variant', 'ghost');
+    clearAll.setAttribute('size', 'small');
     clearAll.innerHTML = '<button type="button" data-marks-action="clear-all">Clear all</button>';
     head.append(title, clearAll);
 
@@ -1637,11 +1638,12 @@ function createMarkRow(mark) {
 
     const jump = document.createElement('nui-button');
     jump.setAttribute('variant', 'ghost');
+    jump.setAttribute('size', 'small');
     jump.className = 'preview-mark-jump';
     const jumpButton = document.createElement('button');
     jumpButton.type = 'button';
     jumpButton.setAttribute('data-marks-action', 'jump');
-    jumpButton.title = 'Scroll to the marked passage';
+    jumpButton.title = mark.heading ? `${mark.heading}\n${mark.quote}` : mark.quote;
     if (mark.heading) {
         const heading = document.createElement('span');
         heading.className = 'preview-mark-heading';
@@ -1656,6 +1658,7 @@ function createMarkRow(mark) {
 
     const note = document.createElement('nui-input');
     note.className = 'preview-mark-note';
+    note.setAttribute('size', 'small');
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = 'Optional note...';
@@ -1667,6 +1670,7 @@ function createMarkRow(mark) {
 
     const remove = document.createElement('nui-button');
     remove.setAttribute('variant', 'icon');
+    remove.setAttribute('size', 'small');
     remove.innerHTML = '<button type="button" data-marks-action="remove" aria-label="Remove mark" title="Remove mark"><nui-icon name="close"></nui-icon></button>';
 
     row.append(jump, note, remove);
@@ -1675,7 +1679,7 @@ function createMarkRow(mark) {
 
 function truncateQuote(quote) {
     const text = typeof quote === 'string' ? quote : '';
-    return text.length > 90 ? text.slice(0, 90).trimEnd() + '…' : text;
+    return text.length > 60 ? text.slice(0, 60).trimEnd() + '…' : text;
 }
 
 function onMarksBarClick(event) {
