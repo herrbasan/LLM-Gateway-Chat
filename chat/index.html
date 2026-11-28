@@ -485,7 +485,25 @@
                                     <nav aria-label="Storage files"></nav>
                                 </nui-file-tree>
                             </aside>
-                            <div class="preview-content" id="preview-content"></div>
+                            <div id="preview-browser-resizer" class="preview-browser-resizer" hidden></div>
+                            <div class="preview-main-col">
+                                <div id="preview-marks-bar" class="preview-marks-bar" hidden></div>
+                                <div class="preview-content" id="preview-content"></div>
+                            </div>
+                        </div>
+                        <!-- Floating over the document: appears on a text selection
+                             (document view, markdown only). mousedown is cancelled so
+                             a click never collapses the selection it acts on. -->
+                        <div id="preview-selection-toolbar" class="preview-selection-toolbar" hidden>
+                            <nui-button data-action="speak-selection" variant="ghost" title="Speak the selected passage">
+                                <button type="button"><nui-icon name="headphones"></nui-icon> Speak</button>
+                            </nui-button>
+                            <nui-button data-action="speak-from-here" variant="ghost" title="Speak from here to the end of the document">
+                                <button type="button"><nui-icon name="play"></nui-icon> From here</button>
+                            </nui-button>
+                            <nui-button data-action="mark-passage" variant="ghost" title="Mark this passage for revision">
+                                <button type="button"><nui-icon name="edit_note"></nui-icon> Mark</button>
+                            </nui-button>
                         </div>
                     </div>
                 </div>

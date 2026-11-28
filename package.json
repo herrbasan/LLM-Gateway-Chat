@@ -5,7 +5,7 @@
   "scripts": {
     "postinstall": "git submodule update --init --recursive",
     "start": "node server/server.js",
-    "test:units": "node server/archive-search.test.mjs && node --test server/hosted-apps.test.cjs && node --test server/preview-content.test.cjs && node --test server/runner-snapshot.test.mjs",
+    "test:units": "node server/archive-search.test.mjs && node server/preview-marks.test.mjs && node server/preview-sessions.test.mjs && node --test server/hosted-apps.test.cjs && node --test server/preview-content.test.cjs && node --test server/runner-snapshot.test.mjs",
     "test:ndb": "node server/ndb-http-e2e.test.mjs",
     "test:nvdb": "node server/nvdb-v2-e2e.test.mjs"
   },

@@ -774,7 +774,9 @@ function _runnerToolStart(chatId, d) {
     // open the preview as the tool runs — no click needed. The reopen button
     // on the bubble remains for history reloads.
     if (d.name === 'chat_preview_show' && d.args) {
-        preview.show(d.args).catch(err => console.error('[preview] auto-open failed:', err));
+        // sessionId, not "whatever is on screen": a run in a background chat
+        // records its preview in that chat's own session.
+        preview.show(d.args, { sessionId: chatId }).catch(err => console.error('[preview] auto-open failed:', err));
     }
 
     s.toolBubbles.set(d.toolCallId, { el, exchange });
@@ -1694,6 +1696,9 @@ async function init() {
 
     // Initialize preview pane (needs DOM ready + NUI loaded for enableDrag)
     preview.init();
+    // The initially opened chat owns the preview from the start — otherwise
+    // currentSessionId stays null until the first switch.
+    preview.setSession(currentChatId);
     hostedApps.init();
 
     // Track the composer (bottom container) height so the mobile preview and
@@ -1758,6 +1763,21 @@ async function init() {
             }
         });
     }
+
+    // Passage playback from the preview's selection toolbar ("Speak" / "From
+    // here") goes through the SAME controller and the same header target as the
+    // speak button, so pause/resume/stop stay one global playback: the
+    // controller's _applyButtonState looks for .speaker inside the target.
+    const previewSpeechTarget = document.querySelector('.preview-header');
+    preview.onSpeakText = (text) => {
+        if (!tts || !text || !text.trim()) return;
+        // Preview playback is not a message exchange — clear the bubble's
+        // exchange tracking so a later bubble click re-speaks its own text.
+        currentTtsExchangeId = null;
+        ttsPlayer?.reveal();
+        tts.stop();
+        tts.speak(text, previewSpeechTarget);
+    };
 
     // Wait for NUI to be ready, then load models
     await waitForNUI();
@@ -3454,9 +3474,18 @@ async function sendMessage() {
     // turn's wire content (never the system prompt — KV-cache prefix stays put).
     const previewContext = preview.getContext();
     if (previewContext) sendBody.previewContext = previewContext;
+    // Mark IDs that ride THIS send. They leave the marked-passages bar only once
+    // the send is acknowledged — a failed send (outbox retry) keeps them, and a
+    // mark added while the request is in flight is not in this list, so it
+    // survives too.
+    const sentMarkIds = previewContext ? preview.getActiveMarkIds() : [];
 
     const res = await _sendWithOutbox(sendChatId, sendBody);
-    if (!res.ok) {
+    if (res.ok) {
+        // Target the session that sent: the user may have switched chats while
+        // the request was in flight.
+        if (sentMarkIds.length) preview.consumeMarks(sentMarkIds, { sessionId: sendChatId });
+    } else {
         // The outbox bubble remains visible with its own Retry action.
         console.warn('Send failed:', res.data?.error || `send failed (${res.status})`);
     }
@@ -5492,8 +5521,9 @@ async function startNewChat() {
     const draftContainer = getOrCreateContainer(DRAFT_CHAT_ID);
     renderSetupCard(draftContainer);
 
-    // Shared surfaces belong to the conversation that owns them.
-    preview.reset();
+    // Shared surfaces belong to the conversation that owns them. The draft gets
+    // its own preview session, so Start carries the state into the real chat.
+    preview.setSession(DRAFT_CHAT_ID);
     hostedApps.reset();
     hostedApps.setConversation(DRAFT_CHAT_ID);
 
@@ -5705,6 +5735,10 @@ async function _materializeDraftSession({ model, title, systemPrompt }) {
     currentChatId = newChatId;
     currentModel = model;
 
+    // The draft becomes the real conversation: its preview session moves with it.
+    preview.clearSession(DRAFT_CHAT_ID);
+    preview.setSession(newChatId);
+
     storage.setActiveChatId(newChatId).catch(() => {});
     if (elements.modelSelect?.setValue) elements.modelSelect.setValue(model);
     restoreSystemPromptUI({ systemPrompt });
@@ -5725,6 +5759,7 @@ function _discardDraft() {
     chatContainers.delete(DRAFT_CHAT_ID);
     activeConversations.delete(DRAFT_CHAT_ID);
     if (container) container.remove();
+    preview.clearSession(DRAFT_CHAT_ID);
 }
 
 /**
@@ -5765,9 +5800,10 @@ async function switchChat(targetChatId) {
     currentChatId = targetChatId;
     storage.setActiveChatId(currentChatId).catch(() => {});
 
-    // Reset preview pane — it's a shared surface across per-chat containers.
-    // Without this, chat B would see chat A's preview. Idempotent: safe on init.
-    preview.reset();
+    // Each conversation owns its preview state (items, marks, open flags); this
+    // swaps the shared pane over to the incoming chat's record instead of
+    // wiping it. Idempotent: safe on init.
+    preview.setSession(targetChatId);
     hostedApps.reset();
     hostedApps.setConversation(currentChatId);
 
@@ -5909,6 +5945,10 @@ async function deleteChat(chatId, e) {
     // the visible chat, so drop explicitly first — a leaked EventSource per
     // deleted chat exhausts the browser's per-origin connection pool.
     _dropView(chatId);
+
+    // Drop this chat's preview session — a deleted conversation must not keep
+    // items, marks or notes alive in the sessions map.
+    preview.clearSession(chatId);
 
     // Clean up multi-conversation state
     activeConversations.delete(chatId);

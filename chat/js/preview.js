@@ -6,9 +6,11 @@
 // writes to via the chat_preview_show local tool. It can show files, proposed
 // edits, diffs, or any work product. The LLM decides what to render.
 //
-// State is in-memory and per-conversation. switchChat() calls reset().
-// The pane is a shared surface across per-chat containers — reset is a
-// correctness requirement, not just hygiene.
+// State is in-memory and keyed by conversation session. The pane is ONE shared
+// DOM surface across per-chat containers, so switchChat() calls setSession(id):
+// swapping the record in restores that chat's items, marks and open flags
+// instead of wiping them, and a background chat's chat_preview_show lands in
+// its own record — it never hijacks the preview of the chat on screen.
 
 import {
     resolvePreviewUrl,
@@ -17,18 +19,60 @@ import {
     deriveTitleFromUrl
 } from './preview-url.js';
 import { resolveContentHref, noteUrlFromHref, splitNoteSource } from './research-note.js';
+import {
+    MAX_MARKS,
+    MAX_NOTE_CHARS,
+    normalizeWhitespace,
+    extractBlockText,
+    captureMarkFromRange,
+    applyMarksToDom
+} from './preview-marks.js';
 
 // ============================================
-// State (module-level, per-conversation)
+// State — one record per conversation session
 // ============================================
 
-const items = new Map();   // id → { id, title, language, content, source }
-let activeId = null;       // currently displayed item id
+const DEFAULT_SESSION_ID = '__default';
+
+const sessions = new Map();   // sessionId → { items, activeId, paneOpen, browserOpen, notes }
+let currentSessionId = null;
+
+function _newSession() {
+    return {
+        items: new Map(),       // id → { id, title, language, content, source }
+        activeId: null,         // currently displayed item id
+        paneOpen: false,
+        browserOpen: false,
+        notes: new Map()        // note url → source text
+    };
+}
+
+function _getSession(sessionId) {
+    const key = sessionId ?? currentSessionId ?? DEFAULT_SESSION_ID;
+    let s = sessions.get(key);
+    if (!s) {
+        s = _newSession();
+        sessions.set(key, s);
+    }
+    return s;
+}
+
+function _activeSession() {
+    return _getSession(currentSessionId);
+}
+
+function _activeId() {
+    return _activeSession().activeId;
+}
+
+function _setActiveId(id) {
+    _activeSession().activeId = id;
+}
+
 let _renderedContent = null;  // tracks what's currently on screen (for TTS invalidation)
 
 // Knowledge-base notes: one dialog at a time, its source fetched from the
 // document's own base and reused for the rest of the conversation.
-const notes = new Map();   // note url → source text
 let noteDialog = null;     // lazily built <nui-dialog> holding the panel
 let noteUrl = null;        // url of the note currently in the panel
 let noteSeq = 0;           // invalidates a slow fetch that a newer note overtook
@@ -38,13 +82,24 @@ let linkObserver = null;   // follows the rendered DOM so no render path re-wire
 // Callback fired when the active content changes (chat.js registers a TTS stop here)
 let _onContentChange = null;
 
+// TTS entry point for passage playback. chat.js registers it — preview never
+// imports the speech controller (that would close an import cycle through chat.js).
+let _onSpeakText = null;
+
+// Live selection under the floating toolbar; a clone, because a toolbar click
+// can collapse the browser selection before the action runs.
+let _activeSelectionRange = null;
+let _marksNoticeTimer = null;
+
 // ============================================
 // DOM references (populated in init())
 // ============================================
 
 let pane, resizer, content, selectEl, sourceEl, closeBtn, viewBtn, chatMain;
 let browserPanel, browserBtn, treeEl, treeFilter, treeRefresh, treeCollapse;
+let marksBar, selToolbar, previewBody, browserResizer;
 let dragCleanup = null;
+let browserDragCleanup = null;
 
 // ============================================
 // Constants
@@ -54,6 +109,10 @@ const MIN_WIDTH_PX = 320;          // 20rem at 16px base
 const MAX_WIDTH_RATIO = 0.8;       // 80% of chat-main width
 const DEFAULT_WIDTH_RATIO = 0.4;   // 40% of chat-main width on first open
 const STORAGE_KEY = 'preview-width';
+const BROWSER_WIDTH_KEY = 'preview-browser-width';
+const BROWSER_MIN_WIDTH_PX = 160;
+const BROWSER_MAX_WIDTH_PX = 520;
+const BROWSER_CONTENT_MIN_PX = 220; // #preview-content must never collapse
 const VIEW_KEY = 'preview-view';        // last chosen view — 'document' | 'deck'
 const MAX_CONTENT_BYTES = 256 * 1024;  // 256KB hard cap
 const FETCH_TIMEOUT_MS = 15000;        // url-mode fetch cap — never block forever
@@ -79,6 +138,16 @@ function setMcpOriginResolver(resolverFn) {
     _mcpOriginResolver = resolverFn;
 }
 
+/**
+ * Inject the TTS entry point. chat.js owns the speech controller; passing a
+ * function keeps preview free of an import cycle through chat.js.
+ * @param {(text: string) => void} fn
+ */
+function setSpeechHandler(fn) {
+    if (typeof fn !== 'function') throw new Error('preview.setSpeechHandler: function required');
+    _onSpeakText = fn;
+}
+
 // ============================================
 // Initialization
 // ============================================
@@ -98,12 +167,19 @@ function init() {
     treeFilter = document.getElementById('preview-tree-filter');
     treeRefresh = document.getElementById('preview-tree-refresh');
     treeCollapse = document.getElementById('preview-tree-collapse');
+    previewBody = document.querySelector('.preview-body');
+    browserResizer = document.getElementById('preview-browser-resizer');
+    marksBar = document.getElementById('preview-marks-bar');
+    selToolbar = document.getElementById('preview-selection-toolbar');
 
     if (!pane || !resizer || !content || !selectEl || !sourceEl || !closeBtn || !viewBtn || !chatMain) {
         throw new Error('preview.init: required DOM elements not found');
     }
     if (!browserPanel || !browserBtn || !treeEl || !treeFilter || !treeRefresh || !treeCollapse) {
         throw new Error('preview.init: storage browser DOM elements not found');
+    }
+    if (!previewBody || !browserResizer || !marksBar || !selToolbar) {
+        throw new Error('preview.init: preview layout elements not found');
     }
 
     // Storage browser: the tree is provider-driven and lazily rooted on first
@@ -127,7 +203,11 @@ function init() {
             });
         // A docked (mobile) pane has no room for both columns — browsing ends
         // when a file is chosen, so the content gets the full width back.
-        if (window.matchMedia('(max-width: 60rem)').matches) browserPanel.hidden = true;
+        if (window.matchMedia('(max-width: 60rem)').matches) {
+            _activeSession().browserOpen = false;
+            browserPanel.hidden = true;
+            syncBrowserResizer();
+        }
     });
     treeFilter.addEventListener('nui-input', (e) => {
         treeEl.filter = e.detail.value.trim() || null;
@@ -159,8 +239,8 @@ function init() {
     // Dropdown switch — listen for nui-change (NUI's custom event, not native change)
     selectEl.addEventListener('nui-change', (e) => {
         const values = e.detail?.values;
-        if (values && values.length > 0 && values[0] !== activeId) {
-            activeId = values[0];
+        if (values && values.length > 0 && values[0] !== _activeId()) {
+            _setActiveId(values[0]);
             renderActive();
         }
     });
@@ -190,6 +270,50 @@ function init() {
             }
         }
     }, { subtarget: chatMain });
+
+    // Storage browser width: same drag idiom, horizontal. `x` is relative to
+    // .preview-body, whose left edge is the browser column's left edge.
+    applySavedBrowserWidth();
+    browserDragCleanup = nui.util.enableDrag(browserResizer, (data) => {
+        if (data.type === 'move' || data.type === 'start') {
+            const maxWidth = Math.min(BROWSER_MAX_WIDTH_PX, previewBody.clientWidth - BROWSER_CONTENT_MIN_PX);
+            const clamped = Math.max(BROWSER_MIN_WIDTH_PX, Math.min(data.x, maxWidth));
+            previewBody.style.setProperty('--preview-browser-width', clamped + 'px');
+        }
+        if (data.type === 'start') {
+            browserResizer.classList.add('dragging');
+        }
+        if (data.type === 'end') {
+            browserResizer.classList.remove('dragging');
+            const width = previewBody.style.getPropertyValue('--preview-browser-width');
+            if (width) localStorage.setItem(BROWSER_WIDTH_KEY, width);
+        }
+    }, { subtarget: previewBody });
+
+    // Passage marks: floating selection toolbar (speak / speak from here / mark)
+    // and the marked-passages bar. Both act on the ACTIVE markdown document in
+    // document view — a deck slide or a code file has no selectable prose here.
+    selToolbar.addEventListener('mousedown', (e) => e.preventDefault());
+    selToolbar.addEventListener('click', onSelectionToolbarClick);
+    content.addEventListener('mouseup', () => syncSelectionToolbar());
+    content.addEventListener('keyup', () => syncSelectionToolbar());
+    content.addEventListener('scroll', hideSelectionToolbar, { passive: true });
+    document.addEventListener('selectionchange', () => {
+        if (selToolbar.hidden) return;
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) hideSelectionToolbar();
+    });
+    document.addEventListener('mousedown', (e) => {
+        if (selToolbar.hidden) return;
+        if (selToolbar.contains(e.target) || content.contains(e.target)) return;
+        hideSelectionToolbar();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideSelectionToolbar();
+    });
+    marksBar.addEventListener('click', onMarksBarClick);
+    marksBar.addEventListener('nui-input', onMarksBarNote);
+    syncBrowserResizer();
 }
 
 // ============================================
@@ -252,7 +376,7 @@ function setViewButton(isDeck) {
 }
 
 function toggleView() {
-    const item = activeId && items.get(activeId);
+    const item = _activeId() && _activeSession().items.get(_activeId());
     if (!item || !hasDeckStructure(item.content)) return;
     item.view = item.view === 'deck' ? 'document' : 'deck';
     localStorage.setItem(VIEW_KEY, item.view);
@@ -275,15 +399,22 @@ function toggleView() {
  * @param {string} [args.url] - Url mode: /storage/... path or absolute http(s) url to fetch
  * @param {string} [args.language='text'] - 'markdown' for rendered MD, else code language
  * @param {string} [args.source] - Optional provenance label
+ * @param {Object} [opts]
+ * @param {string} [opts.sessionId] - Conversation that owns the item. Defaults
+ *        to the visible session; a background chat passes its own id so the
+ *        pane on screen is never touched.
  * @returns {Promise<Object>} MCP-style result { content: [{ type: 'text', text }] }
  */
-async function show(args) {
+async function show(args, opts = {}) {
     // Success conditions — fail fast on invalid input
     if (!args || typeof args !== 'object') throw new Error('preview.show: args object required');
     const hasContent = typeof args.content === 'string' && args.content.length > 0;
     const hasUrl = typeof args.url === 'string' && args.url.length > 0;
     if (hasContent && hasUrl) throw new Error('preview.show: provide EITHER content OR url — never both');
     if (!hasContent && !hasUrl) throw new Error('preview.show: content or url required');
+
+    const targetId = opts.sessionId ?? currentSessionId ?? DEFAULT_SESSION_ID;
+    const s = _getSession(targetId);
 
     let id = args.id;
     let title = args.title;
@@ -310,7 +441,8 @@ async function show(args) {
         try {
             content = await _fetchUrlText(resolvedUrl);
         } catch (err) {
-            renderFetchError(resolvedUrl, err);
+            // The error paints the shared surface only when this session owns it.
+            if (targetId === currentSessionId) renderFetchError(resolvedUrl, err);
             throw err;
         }
         if (typeof id !== 'string' || id.length === 0) id = deriveIdFromUrl(resolvedUrl);
@@ -329,12 +461,12 @@ async function show(args) {
         throw new Error(`preview.show: content exceeds ${MAX_CONTENT_BYTES} byte cap (${content.length} bytes). Excerpt it and pass content, or show a smaller file.`);
     }
 
-    // Upsert into items map
-    const isNew = !items.has(id);
-    const prevItem = items.get(id);
+    // Upsert into the target session's items map
+    const isNew = !s.items.has(id);
+    const prevItem = s.items.get(id);
     const contentChanged = isNew || prevItem.content !== content;
 
-    items.set(id, {
+    s.items.set(id, {
         id,
         title,
         language,
@@ -344,6 +476,11 @@ async function show(args) {
         // items with deck structure can actually render as a deck — renderActive
         // is the gate, so an item may carry 'deck' while its content has none.
         view: isNew ? defaultView() : prevItem.view,
+        // Passage marks survive an in-place content update: they are identified
+        // by text, so a still-present passage re-highlights and a revised-away
+        // one is dropped at apply time (applyItemMarks).
+        marks: isNew ? [] : (prevItem.marks || []),
+        marksContent: isNew ? undefined : prevItem.marksContent,
         // Document base (issue #38): in url mode the fetched document HAS a
         // location — its resolved URL — and relative media destinations must
         // resolve against it, like any viewer opening the file from disk.
@@ -353,7 +490,26 @@ async function show(args) {
     });
 
     // Select this item (brings to front)
-    activeId = id;
+    s.activeId = id;
+    s.paneOpen = true;
+
+    // Re-checked AFTER the fetch: the user may have switched chats while it was
+    // in flight. A background session records the item and stops here.
+    if (targetId !== currentSessionId) {
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    shown: true,
+                    id,
+                    selected: true,
+                    itemCount: s.items.size,
+                    mode: hasContent ? 'content' : 'url',
+                    url: hasUrl ? args.url : undefined
+                })
+            }]
+        };
+    }
 
     // Open pane if hidden
     openPane();
@@ -374,7 +530,7 @@ async function show(args) {
                 shown: true,
                 id,
                 selected: true,
-                itemCount: items.size,
+                itemCount: s.items.size,
                 mode: hasContent ? 'content' : 'url',
                 url: hasUrl ? args.url : undefined
             })
@@ -382,7 +538,7 @@ async function show(args) {
     };
 }
 
-async function showUi(args) {
+async function showUi(args, opts = {}) {
     if (!args || typeof args !== 'object') throw new Error('preview.showUi: args object required');
     if (typeof args.url !== 'string' || !args.url.trim()) throw new Error('preview.showUi: url required');
     const url = new URL(args.url, window.location.origin);
@@ -392,19 +548,28 @@ async function showUi(args) {
     if (url.origin !== window.location.origin && url.origin !== mcpOrigin) {
         throw new Error(`preview.showUi: untrusted UI origin ${url.origin}`);
     }
+    const targetId = opts.sessionId ?? currentSessionId ?? DEFAULT_SESSION_ID;
+    const s = _getSession(targetId);
     const id = typeof args.id === 'string' && args.id ? args.id : `tool-ui-${url.toString()}`;
     const title = typeof args.title === 'string' && args.title ? args.title : 'Tool UI';
-    const previous = items.get(id);
-    items.set(id, {
+    const previous = s.items.get(id);
+    s.items.set(id, {
         id, title, language: 'ui', kind: 'ui', content: url.toString(), url: url.toString(),
-        source: url.origin, view: 'document', base: null
+        source: url.origin, view: 'document', base: null, marks: []
     });
-    activeId = id;
+    s.activeId = id;
+    s.paneOpen = true;
+
+    const changed = !previous || previous.content !== url.toString();
+    if (targetId !== currentSessionId) {
+        return { content: [{ type: 'text', text: JSON.stringify({ shown: true, id, selected: true, itemCount: s.items.size, mode: 'ui', url: url.toString() }) }] };
+    }
+
     openPane();
     syncDropdown();
     renderActive();
-    if ((!previous || previous.content !== url.toString()) && _onContentChange) _onContentChange();
-    return { content: [{ type: 'text', text: JSON.stringify({ shown: true, id, selected: true, itemCount: items.size, mode: 'ui', url: url.toString() }) }] };
+    if (changed && _onContentChange) _onContentChange();
+    return { content: [{ type: 'text', text: JSON.stringify({ shown: true, id, selected: true, itemCount: s.items.size, mode: 'ui', url: url.toString() }) }] };
 }
 
 // ============================================
@@ -412,7 +577,7 @@ async function showUi(args) {
 // ============================================
 
 function renderFetchError(url, err) {
-    activeId = null;
+    _setActiveId(null);
     _renderedContent = null;
     syncDropdown();
     openPane();
@@ -425,6 +590,8 @@ function renderFetchError(url, err) {
     content.replaceChildren(error);
     sourceEl.textContent = url;
     sourceEl.title = url;
+    hideSelectionToolbar();
+    renderMarksBar(null);
     if (_onContentChange) _onContentChange();
 }
 
@@ -462,11 +629,13 @@ async function _fetchUrlText(url) {
 }
 
 /**
- * Close the preview pane. Items are preserved — reopening shows the dropdown
- * still populated.
+ * Close the preview pane. Items and marks are preserved on the session —
+ * reopening (or returning to the chat) brings them back.
  */
 function close() {
     if (!pane) return;
+    _activeSession().paneOpen = false;
+    hideSelectionToolbar();
     pane.hidden = true;
     resizer.hidden = true;
 }
@@ -534,13 +703,32 @@ function clearBrowserError() {
 
 function openBrowser() {
     openPane();
+    _activeSession().browserOpen = true;
     browserPanel.hidden = false;
+    syncBrowserResizer();
     if (!browserReady) ensureBrowserTree().catch(reportBrowserError);
 }
 
 function toggleBrowser() {
-    if (browserPanel.hidden) openBrowser();
-    else browserPanel.hidden = true;
+    if (browserPanel.hidden) {
+        openBrowser();
+    } else {
+        _activeSession().browserOpen = false;
+        browserPanel.hidden = true;
+    }
+    syncBrowserResizer();
+}
+
+// The splitter exists only while the browser column does.
+function syncBrowserResizer() {
+    if (!browserResizer || !browserPanel) return;
+    browserResizer.hidden = browserPanel.hidden;
+}
+
+// Browser column width is a layout preference, not conversation state.
+function applySavedBrowserWidth() {
+    const saved = localStorage.getItem(BROWSER_WIDTH_KEY);
+    if (saved) previewBody.style.setProperty('--preview-browser-width', saved);
 }
 
 /**
@@ -552,7 +740,10 @@ function togglePane() {
     if (!pane) return;
     if (pane.hidden) {
         openPane();
-        if (!activeId) openBrowser();
+        const s = _activeSession();
+        syncDropdown();
+        if (s.activeId) renderActive();
+        else openBrowser();
     } else {
         close();
     }
@@ -567,7 +758,8 @@ function togglePane() {
  */
 function getContext() {
     if (!pane || pane.hidden) return null;
-    const item = activeId && items.has(activeId) ? items.get(activeId) : null;
+    const s = _activeSession();
+    const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
     if (!item) return { paneOpen: true };
     const ctx = { paneOpen: true };
     boundedContextString(ctx, 'id', item.id);
@@ -575,8 +767,17 @@ function getContext() {
     boundedContextString(ctx, 'title', item.title);
     ctx.kind = item.kind === 'ui' ? 'ui' : (item.language === 'markdown' ? 'markdown' : 'code');
     if (item.language === 'markdown') ctx.view = item.view || 'document';
-    // Passage marks are a later milestone; the field is contractual.
-    ctx.marks = [];
+    // Only the fields the server validates ride the wire: quote is required,
+    // heading/note are optional and dropped when empty (validatePreviewContext
+    // rejects unknown keys' payloads by size, so nothing extra is attached —
+    // mark IDs travel separately via getActiveMarkIds()).
+    ctx.marks = (Array.isArray(item.marks) ? item.marks : []).map(mark => {
+        const entry = { quote: mark.quote };
+        if (mark.heading) entry.heading = mark.heading;
+        const note = typeof mark.note === 'string' ? mark.note.trim() : '';
+        if (note) entry.note = note.slice(0, MAX_NOTE_CHARS);
+        return entry;
+    });
     return ctx;
 }
 
@@ -599,38 +800,121 @@ function storagePathOf(item) {
 }
 
 /**
- * Reset all state. Called on conversation switch (switchChat).
- * Must be idempotent — runs on initial load and new-chat creation
- * before any show() has happened.
+ * Full reset — every session record is dropped. Logout / hard reload path.
+ * Must be idempotent: it also runs before any session was ever set.
  */
 function reset() {
-    items.clear();
-    activeId = null;
+    sessions.clear();
+    currentSessionId = null;
     _renderedContent = null;
-    noteSeq++;                        // a fetch in flight must not land in the next conversation
-    noteUrl = null;
-    notes.clear();
-    if (noteDialog && noteDialog.isOpen()) noteDialog.close('reset');
-    if (noteParts) noteParts.body.replaceChildren();
+    closeNoteDialog();
     if (content) content.replaceChildren();
     if (content) content.classList.remove('deck-mode', 'ui-mode');
     if (viewBtn) viewBtn.hidden = true;
-    if (sourceEl) sourceEl.textContent = '';
-    // The browser is global navigation, not conversation state — but its open
-    // state belongs to the conversation that opened it, so the next chat starts
-    // with the pane collapsed to content only.
+    if (sourceEl) {
+        sourceEl.textContent = '';
+        sourceEl.title = '';
+    }
+    // The browser is global navigation, but its open state belongs to the
+    // session that opened it — drop both.
     if (browserPanel) {
         browserPanel.hidden = true;
+        syncBrowserResizer();
         const filterInput = treeFilter?.querySelector('input');
         if (filterInput) filterInput.value = '';
         // Only touch the tree when a filter is actually set: assigning `filter`
         // triggers a refresh (a listing request) in the component.
         if (browserReady && treeEl.filter) treeEl.filter = null;
     }
-    close();
+    hideSelectionToolbar();
+    renderMarksBar(null);
+    if (pane) pane.hidden = true;
+    if (resizer) resizer.hidden = true;
     if (selectEl?.setItems) {
         selectEl.setItems([]);
     }
+}
+
+/**
+ * Drop one session's record (chat deleted). The shared DOM is cleared only when
+ * that session is the one on screen; every other chat keeps its own state.
+ */
+function clearSession(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) throw new Error('preview.clearSession: session id required');
+    sessions.delete(sessionId);
+    if (sessionId !== currentSessionId) return;
+    _renderedContent = null;
+    closeNoteDialog();
+    if (content) content.replaceChildren();
+    if (content) content.classList.remove('deck-mode', 'ui-mode');
+    if (viewBtn) viewBtn.hidden = true;
+    if (sourceEl) {
+        sourceEl.textContent = '';
+        sourceEl.title = '';
+    }
+    if (browserPanel) {
+        browserPanel.hidden = true;
+        syncBrowserResizer();
+    }
+    hideSelectionToolbar();
+    renderMarksBar(null);
+    if (pane) pane.hidden = true;
+    if (resizer) resizer.hidden = true;
+    if (selectEl?.setItems) selectEl.setItems([]);
+}
+
+/**
+ * Switch the visible session. Called by switchChat before the new chat renders:
+ * the outgoing chat's record keeps its items/marks/open flags, and the incoming
+ * chat's record is loaded onto the shared pane. Idempotent.
+ */
+function setSession(sessionId) {
+    if (sessionId === currentSessionId) return;
+
+    // Leaving: nothing of the outgoing chat may stay on the shared surface.
+    hideSelectionToolbar();
+    closeNoteDialog();
+    noteSeq++;                       // a note fetch in flight must not land in the next conversation
+
+    currentSessionId = sessionId;
+    const s = _getSession(sessionId);
+    _renderedContent = null;
+
+    if (!pane) return;
+
+    if (s.browserOpen) {
+        browserPanel.hidden = false;
+        syncBrowserResizer();
+        if (!browserReady) ensureBrowserTree().catch(reportBrowserError);
+    } else {
+        browserPanel.hidden = true;
+        syncBrowserResizer();
+    }
+
+    syncDropdown();
+
+    if (!s.paneOpen) {
+        content.replaceChildren();
+        content.classList.remove('deck-mode', 'ui-mode');
+        viewBtn.hidden = true;
+        sourceEl.textContent = '';
+        sourceEl.title = '';
+        hideSelectionToolbar();
+        renderMarksBar(null);
+        pane.hidden = true;
+        resizer.hidden = true;
+        return;
+    }
+
+    openPane();
+    renderActive();
+}
+
+function closeNoteDialog() {
+    noteSeq++;
+    noteUrl = null;
+    if (noteDialog && noteDialog.isOpen()) noteDialog.close('session');
+    if (noteParts) noteParts.body.replaceChildren();
 }
 
 // ============================================
@@ -638,6 +922,8 @@ function reset() {
 // ============================================
 
 function openPane() {
+    _activeSession().paneOpen = true;
+
     // Measure initial width on first open — don't rely on CSS 42rem default
     // which doesn't go through the clamp and can overflow on narrow windows
     if (!chatMain.style.getPropertyValue('--preview-width')) {
@@ -662,7 +948,8 @@ function openPane() {
 function syncDropdown() {
     if (!selectEl?.setItems) return;
 
-    const itemList = [...items.values()].map(item => ({
+    const s = _activeSession();
+    const itemList = [...s.items.values()].map(item => ({
         value: item.id,
         label: item.title
     }));
@@ -674,7 +961,7 @@ function syncDropdown() {
     // nativeSelect.value directly left the label stale — it showed the first
     // option (setItems rebuilds options with no selected), so the user picked
     // a wrong item first and had to "switch back and forth" to reach real one.
-    if (selectEl.setValue) selectEl.setValue(activeId || '');
+    if (selectEl.setValue) selectEl.setValue(s.activeId || '');
 }
 
 // ============================================
@@ -683,15 +970,18 @@ function syncDropdown() {
 
 function renderActive() {
     if (!content) return;
-    if (!activeId || !items.has(activeId)) {
+    const s = _activeSession();
+    if (!s.activeId || !s.items.has(s.activeId)) {
         content.replaceChildren();
         content.classList.remove('deck-mode', 'ui-mode');
         if (viewBtn) viewBtn.hidden = true;
         if (sourceEl) sourceEl.textContent = '';
+        hideSelectionToolbar();
+        renderMarksBar(null);
         return;
     }
 
-    const item = items.get(activeId);
+    const item = s.items.get(s.activeId);
 
     // Detect content change from dropdown switch (show() handles its own detection).
     // If the rendered content differs from what's on screen, fire the callback
@@ -706,12 +996,15 @@ function renderActive() {
         sourceEl.textContent = item.source || '';
         sourceEl.title = item.source || '';
     }
+    // The selection toolbar belongs to the document view of THIS render.
+    hideSelectionToolbar();
 
     if (item.kind === 'ui') {
         if (viewBtn) viewBtn.hidden = true;
         content.classList.remove('deck-mode');
         content.classList.add('ui-mode');
         renderUi(item);
+        renderMarksBar(item);
         return;
     }
     content.classList.remove('ui-mode');
@@ -727,13 +1020,20 @@ function renderActive() {
         content.classList.toggle('deck-mode', isDeck);
         if (isDeck) {
             renderDeck(item.content, item.base);
+            // Marks stay on the item while a deck is shown; they are re-applied
+            // the moment the document view comes back.
+            renderMarksBar(item);
         } else {
-            renderMarkdown(item.content, item.base);
+            const md = renderMarkdown(item.content, item.base);
+            // nui-markdown renders synchronously on appendChild, so the text
+            // nodes the marks wrap already exist here.
+            applyItemMarks(item, md);
         }
     } else {
         if (viewBtn) viewBtn.hidden = true;
         content.classList.remove('deck-mode');
         renderCode(item.content, item.language);
+        renderMarksBar(item);
     }
 }
 
@@ -760,6 +1060,7 @@ function renderMarkdown(mdContent, base) {
     script.textContent = mdContent;
     md.appendChild(script);
     content.replaceChildren(md);
+    return md;
 }
 
 /**
@@ -810,8 +1111,9 @@ function renderCode(codeContent, language) {
  * @returns {string}
  */
 function getActivePlainText(plainTextFn) {
-    if (!activeId || !items.has(activeId)) return '';
-    const item = items.get(activeId);
+    const s = _activeSession();
+    if (!s.activeId || !s.items.has(s.activeId)) return '';
+    const item = s.items.get(s.activeId);
     if (item.kind === 'ui') return '';
     return plainTextFn(item.content);
 }
@@ -824,11 +1126,12 @@ function getActivePlainText(plainTextFn) {
  * @returns {Object} MCP-style result { content: [{ type: 'text', text }] }
  */
 function getState() {
+    const s = _activeSession();
     const state = {
         paneOpen: pane ? !pane.hidden : false,
-        activeId,
-        activeTitle: activeId && items.has(activeId) ? items.get(activeId).title : null,
-        items: [...items.values()].map(item => ({
+        activeId: s.activeId,
+        activeTitle: s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId).title : null,
+        items: [...s.items.values()].map(item => ({
             id: item.id,
             title: item.title,
             language: item.language,
@@ -857,6 +1160,341 @@ function renderUi(item) {
 }
 
 // ============================================
+// Passage marks — floating selection toolbar + marked-passages bar
+// ============================================
+//
+// Marks are conversation state on the preview item: they ride the next user turn
+// through getContext() and leave the bar only when a send is ACKNOWLEDGED
+// (chat.js calls consumeMarks after res.ok), so a failed send or an outbox
+// retry never loses them.
+
+function currentMarkdownRoot() {
+    const s = _activeSession();
+    const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+    if (!item) return null;
+    if (item.language !== 'markdown') return null;
+    if ((item.view || 'document') !== 'document') return null;
+    return content.querySelector('nui-markdown');
+}
+
+function syncSelectionToolbar() {
+    if (!selToolbar) return;
+    const mdRoot = currentMarkdownRoot();
+    if (!mdRoot) {
+        hideSelectionToolbar();
+        return;
+    }
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+        hideSelectionToolbar();
+        return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!mdRoot.contains(range.startContainer) || !mdRoot.contains(range.endContainer)) {
+        hideSelectionToolbar();
+        return;
+    }
+    if (!normalizeWhitespace(range.toString()) && !range.getBoundingClientRect().width) {
+        hideSelectionToolbar();
+        return;
+    }
+    _activeSelectionRange = range.cloneRange();
+    selToolbar.hidden = false;
+    positionSelectionToolbar(range);
+}
+
+/**
+ * Float above the selection, clamped inside the pane on all four sides — a
+ * selection near an edge would otherwise push the bar out of reach (the pane
+ * clips overflow).
+ */
+function positionSelectionToolbar(range) {
+    const rect = range.getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) {
+        hideSelectionToolbar();
+        return;
+    }
+    const paneRect = pane.getBoundingClientRect();
+    const barRect = selToolbar.getBoundingClientRect();
+    const margin = 6;
+
+    let left = rect.left + rect.width / 2 - barRect.width / 2;
+    left = Math.max(paneRect.left + margin, Math.min(left, paneRect.right - barRect.width - margin));
+
+    let top = rect.top - barRect.height - margin;
+    if (top < paneRect.top + margin) top = rect.bottom + margin;
+    top = Math.max(paneRect.top + margin, Math.min(top, paneRect.bottom - barRect.height - margin));
+
+    selToolbar.style.left = `${left - paneRect.left}px`;
+    selToolbar.style.top = `${top - paneRect.top}px`;
+}
+
+function hideSelectionToolbar() {
+    _activeSelectionRange = null;
+    if (selToolbar && !selToolbar.hidden) selToolbar.hidden = true;
+}
+
+function onSelectionToolbarClick(event) {
+    const button = event.target.closest('[data-action]');
+    if (!button || !selToolbar.contains(button)) return;
+    const action = button.getAttribute('data-action');
+    const range = _activeSelectionRange;
+    const mdRoot = currentMarkdownRoot();
+    if (!range || !mdRoot) {
+        hideSelectionToolbar();
+        return;
+    }
+
+    if (action === 'speak-selection' || action === 'speak-from-here') {
+        const text = extractBlockText(range, mdRoot, { toEnd: action === 'speak-from-here' });
+        hideSelectionToolbar();
+        if (!text.trim()) return;
+        if (!_onSpeakText) {
+            console.warn('[preview] no speech handler — the view must wire preview.onSpeakText');
+            return;
+        }
+        _onSpeakText(text);
+        return;
+    }
+
+    if (action === 'mark-passage') {
+        const s = _activeSession();
+        const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+        if (!item) return;
+        item.marks = Array.isArray(item.marks) ? item.marks : [];
+        if (item.marks.length >= MAX_MARKS) {
+            flashMarksBarNotice(`Mark limit reached (${MAX_MARKS}) — remove a mark to add another.`);
+            return;
+        }
+        const result = captureMarkFromRange(range, mdRoot);
+        if (result.error) {
+            flashMarksBarNotice(result.error);
+            return;
+        }
+        item.marks.push(result.mark);
+        window.getSelection()?.removeAllRanges();
+        hideSelectionToolbar();
+        syncMarksUi(item);
+    }
+}
+
+// Re-highlight the active document and redraw the bar. The one place mark
+// mutations land, so DOM and bar can never disagree.
+function syncMarksUi(item) {
+    if (!item) return;
+    item.marksContent = item.content;
+    const s = _activeSession();
+    const active = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+    if (item === active) {
+        const mdRoot = currentMarkdownRoot();
+        if (mdRoot) applyMarksToDom(mdRoot, item.marks || []);
+    }
+    renderMarksBar(item);
+}
+
+/**
+ * Apply an item's marks to freshly rendered markdown. When the DOCUMENT TEXT
+ * changed under them (the model rewrote the file via chat_preview_show), a
+ * passage that no longer resolves was already revised away — drop that mark
+ * rather than keep a highlight that can never land again.
+ */
+function applyItemMarks(item, mdRoot) {
+    const marks = Array.isArray(item.marks) ? item.marks : [];
+    if (!marks.length) {
+        renderMarksBar(item);
+        return;
+    }
+    const { resolvedIds, unresolvedIds } = applyMarksToDom(mdRoot, marks);
+    if (unresolvedIds.size) {
+        const revised = item.marksContent !== undefined && item.marksContent !== item.content;
+        if (revised) {
+            item.marks = marks.filter(mark => resolvedIds.has(mark.id));
+            if (item.marks.length) applyMarksToDom(mdRoot, item.marks);
+        } else {
+            console.warn('[preview] marks did not resolve against unchanged content:', [...unresolvedIds]);
+        }
+    }
+    item.marksContent = item.content;
+    renderMarksBar(item);
+}
+
+function renderMarksBar(item) {
+    if (!marksBar) return;
+    const marks = item && Array.isArray(item.marks) ? item.marks : [];
+    if (!marks.length) {
+        marksBar.hidden = true;
+        marksBar.replaceChildren();
+        return;
+    }
+
+    const head = document.createElement('div');
+    head.className = 'preview-marks-head';
+    const title = document.createElement('span');
+    title.className = 'preview-marks-title';
+    title.textContent = `Marked for revision (${marks.length})`;
+    const clearAll = document.createElement('nui-button');
+    clearAll.setAttribute('variant', 'ghost');
+    clearAll.innerHTML = '<button type="button" data-marks-action="clear-all">Clear all</button>';
+    head.append(title, clearAll);
+
+    const list = document.createElement('ul');
+    list.className = 'preview-marks-list';
+    for (const mark of marks) list.appendChild(createMarkRow(mark));
+
+    marksBar.replaceChildren(head, list);
+    marksBar.hidden = false;
+}
+
+function createMarkRow(mark) {
+    const row = document.createElement('li');
+    row.className = 'preview-mark-item';
+    row.setAttribute('data-mark-id', mark.id);
+
+    const jump = document.createElement('nui-button');
+    jump.setAttribute('variant', 'ghost');
+    jump.className = 'preview-mark-jump';
+    const jumpButton = document.createElement('button');
+    jumpButton.type = 'button';
+    jumpButton.setAttribute('data-marks-action', 'jump');
+    jumpButton.title = 'Scroll to the marked passage';
+    if (mark.heading) {
+        const heading = document.createElement('span');
+        heading.className = 'preview-mark-heading';
+        heading.textContent = mark.heading;
+        jumpButton.appendChild(heading);
+    }
+    const quote = document.createElement('span');
+    quote.className = 'preview-mark-quote';
+    quote.textContent = `"${truncateQuote(mark.quote)}"`;
+    jumpButton.appendChild(quote);
+    jump.appendChild(jumpButton);
+
+    const note = document.createElement('nui-input');
+    note.className = 'preview-mark-note';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Optional note...';
+    input.maxLength = MAX_NOTE_CHARS;
+    input.value = mark.note || '';
+    input.setAttribute('aria-label', 'Note for this marked passage');
+    input.setAttribute('data-mark-note', mark.id);
+    note.appendChild(input);
+
+    const remove = document.createElement('nui-button');
+    remove.setAttribute('variant', 'icon');
+    remove.innerHTML = '<button type="button" data-marks-action="remove" aria-label="Remove mark" title="Remove mark"><nui-icon name="close"></nui-icon></button>';
+
+    row.append(jump, note, remove);
+    return row;
+}
+
+function truncateQuote(quote) {
+    const text = typeof quote === 'string' ? quote : '';
+    return text.length > 90 ? text.slice(0, 90).trimEnd() + '…' : text;
+}
+
+function onMarksBarClick(event) {
+    const button = event.target.closest('[data-marks-action]');
+    if (!button || !marksBar.contains(button)) return;
+    const s = _activeSession();
+    const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+    if (!item) return;
+
+    const action = button.getAttribute('data-marks-action');
+    if (action === 'clear-all') {
+        item.marks = [];
+        syncMarksUi(item);
+        return;
+    }
+    const markId = button.closest('.preview-mark-item')?.getAttribute('data-mark-id');
+    if (!markId) return;
+    if (action === 'remove') {
+        item.marks = (item.marks || []).filter(mark => mark.id !== markId);
+        syncMarksUi(item);
+        return;
+    }
+    if (action === 'jump') jumpToMark(item, markId);
+}
+
+function onMarksBarNote(event) {
+    if (event.target?.tagName !== 'NUI-INPUT') return;
+    const input = event.target.querySelector('input[data-mark-note]');
+    if (!input) return;
+    const s = _activeSession();
+    const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+    if (!item) return;
+    const mark = (item.marks || []).find(candidate => candidate.id === input.getAttribute('data-mark-note'));
+    if (!mark) return;
+    const value = typeof event.detail?.value === 'string' ? event.detail.value : input.value;
+    mark.note = value.slice(0, MAX_NOTE_CHARS);
+}
+
+function jumpToMark(item, markId) {
+    const locate = () => content.querySelector(`mark.preview-passage-mark[data-mark-id="${markId}"]`);
+    let target = locate();
+    if (!target && item.language === 'markdown' && hasDeckStructure(item.content) && (item.view || 'document') !== 'document') {
+        // A slide is not the reading surface — jumping means returning to the
+        // document flow, where the passages live.
+        item.view = 'document';
+        localStorage.setItem(VIEW_KEY, item.view);
+        renderActive();
+        target = locate();
+    }
+    if (!target) return;
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    target.classList.add('preview-passage-mark-pulse');
+    setTimeout(() => target.classList.remove('preview-passage-mark-pulse'), 1000);
+}
+
+// A mark is a create action with preconditions (text present, size cap, mark
+// cap); a rejection is shown in place for a few seconds rather than swallowed.
+function flashMarksBarNotice(message) {
+    if (!marksBar) return;
+    let notice = marksBar.querySelector('.preview-marks-notice');
+    if (!notice) {
+        notice = document.createElement('p');
+        notice.className = 'preview-marks-notice';
+        notice.setAttribute('role', 'status');
+    }
+    notice.textContent = message;
+    marksBar.hidden = false;
+    marksBar.insertBefore(notice, marksBar.firstChild);
+    clearTimeout(_marksNoticeTimer);
+    _marksNoticeTimer = setTimeout(() => {
+        notice.remove();
+        const s = _activeSession();
+        renderMarksBar(s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null);
+    }, 5000);
+}
+
+function getActiveMarkIds() {
+    const s = _activeSession();
+    const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+    return item && Array.isArray(item.marks) ? item.marks.map(mark => mark.id) : [];
+}
+
+/**
+ * Drop the marks a send carried. Called by the view only AFTER the send is
+ * acknowledged: marks added while that request was in flight are not in
+ * `markIds`, so they survive untouched. `opts.sessionId` targets the session
+ * that sent — the user may have switched chats while the request was in flight.
+ */
+function consumeMarks(markIds, opts = {}) {
+    if (!Array.isArray(markIds) || markIds.length === 0) return;
+    const targetId = opts.sessionId ?? currentSessionId ?? DEFAULT_SESSION_ID;
+    const s = sessions.get(targetId);
+    if (!s) return;
+    const sent = new Set(markIds);
+    for (const item of s.items.values()) {
+        if (!Array.isArray(item.marks) || item.marks.length === 0) continue;
+        const remaining = item.marks.filter(mark => !sent.has(mark.id));
+        if (remaining.length === item.marks.length) continue;
+        item.marks = remaining;
+        if (targetId === currentSessionId && s.activeId === item.id) syncMarksUi(item);
+    }
+}
+
+// ============================================
 // Knowledge-base notes — research-note links open as an inline dialog
 // ============================================
 //
@@ -867,7 +1505,8 @@ function renderUi(item) {
 // panel, matching the site's own chrome.
 
 function activeItemBase() {
-    const item = activeId ? items.get(activeId) : null;
+    const s = _activeSession();
+    const item = s.activeId ? s.items.get(s.activeId) : null;
     return item ? item.base : null;
 }
 
@@ -973,13 +1612,14 @@ function ensureNoteDialog() {
  */
 async function showNote(url) {
     const host = ensureNoteDialog();
+    const session = _activeSession();   // the fetch lands in the session that opened it
     const seq = ++noteSeq;
     noteUrl = url;
     noteParts.title.textContent = noteTitleFromUrl(url);
     noteParts.body.replaceChildren(noteLine('Loading note…', 'preview-note-loading'));
     if (!host.isOpen()) host.showModal();
 
-    let source = notes.get(url);
+    let source = session.notes.get(url);
     if (source === undefined) {
         try {
             source = await _fetchUrlText(url);
@@ -988,7 +1628,7 @@ async function showNote(url) {
             noteParts.body.replaceChildren(noteLine(`${err.message}\n${url}`, 'preview-note-error'));
             return;
         }
-        notes.set(url, source);
+        session.notes.set(url, source);
     }
     if (seq !== noteSeq) return;
     renderNote(url, source);
@@ -1031,11 +1671,17 @@ export const preview = {
     showUi,
     close,
     reset,
+    setSession,
+    clearSession,
     togglePane,
     openBrowser,
     getContext,
+    getActiveMarkIds,
+    consumeMarks,
     getActivePlainText,
     getState,
     setMcpOriginResolver,
-    set onContentChange(fn) { _onContentChange = fn; }
+    setSpeechHandler,
+    set onContentChange(fn) { _onContentChange = fn; },
+    set onSpeakText(fn) { _onSpeakText = fn; }
 };

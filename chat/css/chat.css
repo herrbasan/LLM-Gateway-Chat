@@ -325,6 +325,8 @@ nui-code pre {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    /* Anchor for the floating selection toolbar, which is clamped to this box. */
+    position: relative;
 }
 /* [hidden] must override display: flex — keep both rules adjacent.
    A future "cleanup" that drops this will break the hide behavior. */
@@ -387,14 +389,19 @@ nui-code pre {
     flex: 1 1 auto;
     overflow: hidden;
     overflow-y: auto;
-    padding: var(--nui-space);
+    /* Comfortable reading measure on all four sides: the preview is a reading
+       surface, and a document pinned to the pane edges reads as a dump. The
+       side padding clamps with the pane so a narrow split keeps a usable
+       line length. */
+    padding: 2rem clamp(1rem, 6%, 2.5rem) 3rem;
     min-height: 0;
     min-width: 0;
 }
 
-/* Preview body: [storage browser | content]. The browser is a compact fixed
-   column; the rendering surface takes whatever is left, so a narrow pane
-   shrinks the content, never the browser (it stays usable for navigation). */
+/* Preview body: [storage browser | splitter | main column]. The browser is a
+   compact resizable column; the rendering surface takes whatever is left, so a
+   narrow pane shrinks the content, never the browser (it stays usable for
+   navigation). */
 .preview-body {
     flex: 1 1 auto;
     min-height: 0;
@@ -403,8 +410,19 @@ nui-code pre {
     flex-direction: row;
 }
 
+/* The reading column: marked-passages bar above the rendering surface, so the
+   bar belongs to the active document and the storage browser stays clean on
+   the left. */
+.preview-main-col {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 .preview-browser {
-    flex: 0 0 15rem;
+    flex: 0 0 var(--preview-browser-width, 15rem);
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -413,6 +431,32 @@ nui-code pre {
     overflow: hidden;
 }
 .preview-browser[hidden] { display: none; }
+
+/* Horizontal splitter: same idiom as the pane resizer (wide hit area, 1px
+   visible line via ::after) rotated for a vertical divider. */
+.preview-browser-resizer {
+    flex: 0 0 8px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 1;
+}
+.preview-browser-resizer::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--border-shade1);
+}
+.preview-browser-resizer[hidden] { display: none; }
+.preview-browser-resizer.dragging::after,
+.preview-browser-resizer:hover::after {
+    background: var(--color-highlight);
+    width: 2px;
+}
 
 .preview-browser-toolbar {
     display: flex;
@@ -441,6 +485,135 @@ nui-code pre {
     color: var(--color-danger, #f44336);
     overflow-wrap: anywhere;
 }
+
+/* Marked-passages bar: one compact row per marked passage (heading + quote,
+   optional note, remove). Scrollable so twenty marks never eat the document. */
+.preview-marks-bar {
+    flex: 0 0 auto;
+    max-height: 10rem;
+    overflow-y: auto;
+    padding: var(--nui-space-half) var(--nui-space);
+    border-bottom: thin solid var(--border-shade1);
+    background: color-mix(in srgb, var(--color-highlight) 8%, var(--color-shade1));
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-space-quarter);
+}
+.preview-marks-bar[hidden] { display: none; }
+
+.preview-marks-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--nui-space-half);
+}
+
+.preview-marks-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.preview-marks-notice {
+    margin: 0;
+    font-size: 0.78rem;
+    color: var(--color-danger, #f44336);
+}
+
+.preview-marks-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-space-quarter);
+}
+
+.preview-mark-item {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-space-quarter);
+    min-width: 0;
+}
+
+.preview-mark-item nui-button {
+    flex: 0 0 auto;
+}
+
+.preview-mark-jump {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.preview-mark-jump > button {
+    display: flex;
+    align-items: baseline;
+    gap: var(--nui-space-quarter);
+    width: 100%;
+    min-width: 0;
+    text-align: left;
+}
+
+.preview-mark-heading {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-highlight);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 8rem;
+}
+
+.preview-mark-quote {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.78rem;
+    color: var(--text-color-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.preview-mark-note {
+    flex: 0 0 8rem;
+    min-width: 6rem;
+}
+
+/* The passage highlight itself: a tint, never a text-color change — marked
+   text must stay as readable as unmarked text. */
+.preview-passage-mark {
+    background: color-mix(in srgb, var(--color-highlight, #f5a623) 26%, transparent);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+@keyframes preview-mark-pulse {
+    0% { background: color-mix(in srgb, var(--color-highlight, #f5a623) 70%, transparent); }
+    100% { background: color-mix(in srgb, var(--color-highlight, #f5a623) 26%, transparent); }
+}
+
+.preview-passage-mark-pulse {
+    animation: preview-mark-pulse 1s ease-out;
+}
+
+/* Floating selection toolbar: compact row over the document, above the
+   rendering surface but below dialogs. */
+.preview-selection-toolbar {
+    position: absolute;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: var(--nui-space-quarter);
+    padding: var(--nui-space-quarter);
+    border: thin solid var(--border-shade1);
+    border-radius: var(--nui-radius, 6px);
+    background: var(--color-shade2);
+    box-shadow: 0 0.25rem 0.875rem color-mix(in srgb, var(--shadow-color, #000) 30%, transparent);
+}
+.preview-selection-toolbar[hidden] { display: none; }
 
 #hosted-app-dialog dialog > main {
     min-height: 0;
@@ -622,6 +795,9 @@ nui-code pre {
     .preview-pane[hidden] { display: none; }
     .preview-pane:not([hidden]) { display: flex; }
     .preview-resizer { display: none !important; }
+    /* The column splitter is a desktop affordance: a docked pane width is the
+       viewport, not a number the user picks. */
+    .preview-browser-resizer { display: none !important; }
     /* Docked (mobile) pane: the browser column shrinks so both halves stay
        usable; selecting a file collapses it (preview.js), which is the only way
        the rendering surface gets full width back on a phone. */
