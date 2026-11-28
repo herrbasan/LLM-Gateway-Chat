@@ -43,6 +43,7 @@ let _onContentChange = null;
 // ============================================
 
 let pane, resizer, content, selectEl, sourceEl, closeBtn, viewBtn, chatMain;
+let browserPanel, browserBtn, treeEl, treeFilter, treeRefresh, treeCollapse;
 let dragCleanup = null;
 
 // ============================================
@@ -56,6 +57,12 @@ const STORAGE_KEY = 'preview-width';
 const VIEW_KEY = 'preview-view';        // last chosen view — 'document' | 'deck'
 const MAX_CONTENT_BYTES = 256 * 1024;  // 256KB hard cap
 const FETCH_TIMEOUT_MS = 15000;        // url-mode fetch cap — never block forever
+
+// Internal storage trees that are not content: hidden from the browser.
+const HIDDEN_STORAGE_DIRS = new Set(['.backups', '.trash']);
+// Mirrors server-side validatePreviewContext — a field over the cap is omitted
+// client-side rather than failing the user's send.
+const CONTEXT_STRING_MAX = 512;
 
 // Resolver for the MCP server origin, injected by chat.js (getMcpServerOrigin).
 // Used to turn relative /storage/... paths into absolute fetch URLs. Topology
@@ -85,10 +92,53 @@ function init() {
     closeBtn = document.getElementById('preview-close-btn');
     viewBtn = document.getElementById('preview-view-btn');
     chatMain = document.querySelector('.chat-main');
+    browserPanel = document.getElementById('preview-browser');
+    browserBtn = document.getElementById('preview-browser-btn');
+    treeEl = document.getElementById('preview-file-tree');
+    treeFilter = document.getElementById('preview-tree-filter');
+    treeRefresh = document.getElementById('preview-tree-refresh');
+    treeCollapse = document.getElementById('preview-tree-collapse');
 
     if (!pane || !resizer || !content || !selectEl || !sourceEl || !closeBtn || !viewBtn || !chatMain) {
         throw new Error('preview.init: required DOM elements not found');
     }
+    if (!browserPanel || !browserBtn || !treeEl || !treeFilter || !treeRefresh || !treeCollapse) {
+        throw new Error('preview.init: storage browser DOM elements not found');
+    }
+
+    // Storage browser: the tree is provider-driven and lazily rooted on first
+    // open, so a chat that never browses issues no listing requests.
+    browserBtn.addEventListener('click', toggleBrowser);
+    treeEl.addEventListener('nui-file-select', (e) => {
+        const entry = e.detail?.entry;
+        if (!entry || entry.kind !== 'file') return;
+        // show() renders a readable error inside #preview-content when the file
+        // is not previewable (binary, issue #57) and then rethrows — swallow it
+        // here, the pane already says what happened.
+        show({ url: '/storage/' + encodeStoragePath(entry.path), title: entry.name, source: entry.path })
+            .catch(err => {
+                console.error('[preview] file open failed:', err);
+                // show() renders its own fetch failure; a resolution failure
+                // (no MCP origin, unreadable URL) happens before it and must
+                // still land on screen, not in the console alone.
+                if (!content.querySelector('.preview-fetch-error')) {
+                    renderFetchError('/storage/' + encodeStoragePath(entry.path), err);
+                }
+            });
+        // A docked (mobile) pane has no room for both columns — browsing ends
+        // when a file is chosen, so the content gets the full width back.
+        if (window.matchMedia('(max-width: 60rem)').matches) browserPanel.hidden = true;
+    });
+    treeFilter.addEventListener('nui-input', (e) => {
+        treeEl.filter = e.detail.value.trim() || null;
+    });
+    treeRefresh.addEventListener('click', () => {
+        if (!browserReady) { ensureBrowserTree().catch(reportBrowserError); return; }
+        treeEl.refresh().catch(reportBrowserError);
+    });
+    treeCollapse.addEventListener('click', () => {
+        if (browserReady) treeEl.collapseAll();
+    });
 
     // Close button
     closeBtn.addEventListener('click', close);
@@ -421,6 +471,133 @@ function close() {
     resizer.hidden = true;
 }
 
+// ============================================
+// Storage file browser — nui-file-tree over the same-origin /storage/ proxy
+// ============================================
+//
+// The browser is a navigation surface, not conversation state: it lists the
+// shared storage box through the backend's authenticated /storage/* proxy (the
+// MCP origin binds localhost on the server host, unreachable from a remote
+// browser). The tree's provider is attached on FIRST open — a chat that never
+// browses costs no listing requests.
+
+let browserReady = false;
+
+function encodeStoragePath(dirPath) {
+    return dirPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+}
+
+async function fetchStorageDir(dirPath) {
+    if (typeof dirPath !== 'string') throw new Error('preview.fetchStorageDir: directory path string required');
+    const encoded = encodeStoragePath(dirPath);
+    const res = await fetch(`/storage/${encoded}`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`storage listing failed (${res.status} ${res.statusText}) for /storage/${encoded}`);
+    const body = await res.json();
+    if (!Array.isArray(body.entries)) {
+        throw new Error(`storage listing for /storage/${encoded} carried no entries array`);
+    }
+    return body.entries
+        .filter(entry => !(entry.type === 'dir' && HIDDEN_STORAGE_DIRS.has(entry.name)))
+        .map(entry => ({
+            name: entry.name,
+            path: dirPath ? `${dirPath}/${entry.name}` : entry.name,
+            kind: entry.type === 'dir' ? 'dir' : 'file'
+        }));
+}
+
+async function ensureBrowserTree() {
+    if (browserReady) return;
+    if (typeof treeEl.setProvider !== 'function' || typeof treeEl.setRoot !== 'function') {
+        throw new Error('preview: nui-file-tree component not loaded');
+    }
+    treeEl.setProvider(fetchStorageDir);
+    await treeEl.setRoot({ name: 'Storage', path: '' });
+    browserReady = true;
+    clearBrowserError();
+}
+
+function reportBrowserError(err) {
+    console.error('[preview] storage browser failed:', err);
+    let errorEl = browserPanel.querySelector('.preview-browser-error');
+    if (!errorEl) {
+        errorEl = document.createElement('p');
+        errorEl.className = 'preview-browser-error';
+        errorEl.setAttribute('role', 'alert');
+        browserPanel.appendChild(errorEl);
+    }
+    errorEl.textContent = err.message;
+}
+
+function clearBrowserError() {
+    browserPanel.querySelector('.preview-browser-error')?.remove();
+}
+
+function openBrowser() {
+    openPane();
+    browserPanel.hidden = false;
+    if (!browserReady) ensureBrowserTree().catch(reportBrowserError);
+}
+
+function toggleBrowser() {
+    if (browserPanel.hidden) openBrowser();
+    else browserPanel.hidden = true;
+}
+
+/**
+ * Header toggle: the pane is reachable at any time, including on a blank chat
+ * where no tool has produced an item yet — in that case the storage browser is
+ * what the pane has to offer, so it opens with the pane.
+ */
+function togglePane() {
+    if (!pane) return;
+    if (pane.hidden) {
+        openPane();
+        if (!activeId) openBrowser();
+    } else {
+        close();
+    }
+}
+
+/**
+ * The live preview state the view sends with its next user turn. Validated and
+ * persisted server-side (conversation-store.validatePreviewContext) and
+ * projected onto that turn only — never into the system prompt.
+ *
+ * @returns {Object|null} null when the pane is closed and nothing is marked
+ */
+function getContext() {
+    if (!pane || pane.hidden) return null;
+    const item = activeId && items.has(activeId) ? items.get(activeId) : null;
+    if (!item) return { paneOpen: true };
+    const ctx = { paneOpen: true };
+    boundedContextString(ctx, 'id', item.id);
+    boundedContextString(ctx, 'path', storagePathOf(item));
+    boundedContextString(ctx, 'title', item.title);
+    ctx.kind = item.kind === 'ui' ? 'ui' : (item.language === 'markdown' ? 'markdown' : 'code');
+    if (item.language === 'markdown') ctx.view = item.view || 'document';
+    // Passage marks are a later milestone; the field is contractual.
+    ctx.marks = [];
+    return ctx;
+}
+
+function boundedContextString(target, key, value) {
+    if (typeof value !== 'string' || !value) return;
+    if (value.length > CONTEXT_STRING_MAX) {
+        console.warn(`[preview] context ${key} exceeds ${CONTEXT_STRING_MAX} chars — omitted`);
+        return;
+    }
+    target[key] = value;
+}
+
+// Normalized storage path when the item has a storage location; content-mode
+// items have none (their `source` is null and `id` carries the identity).
+function storagePathOf(item) {
+    const source = item.source;
+    if (typeof source !== 'string' || !source) return null;
+    const href = browserHref(source);
+    return href.startsWith('/storage/') ? href.slice('/storage/'.length) : href;
+}
+
 /**
  * Reset all state. Called on conversation switch (switchChat).
  * Must be idempotent — runs on initial load and new-chat creation
@@ -439,6 +616,17 @@ function reset() {
     if (content) content.classList.remove('deck-mode', 'ui-mode');
     if (viewBtn) viewBtn.hidden = true;
     if (sourceEl) sourceEl.textContent = '';
+    // The browser is global navigation, not conversation state — but its open
+    // state belongs to the conversation that opened it, so the next chat starts
+    // with the pane collapsed to content only.
+    if (browserPanel) {
+        browserPanel.hidden = true;
+        const filterInput = treeFilter?.querySelector('input');
+        if (filterInput) filterInput.value = '';
+        // Only touch the tree when a filter is actually set: assigning `filter`
+        // triggers a refresh (a listing request) in the component.
+        if (browserReady && treeEl.filter) treeEl.filter = null;
+    }
     close();
     if (selectEl?.setItems) {
         selectEl.setItems([]);
@@ -843,6 +1031,9 @@ export const preview = {
     showUi,
     close,
     reset,
+    togglePane,
+    openBrowser,
+    getContext,
     getActivePlainText,
     getState,
     setMcpOriginResolver,

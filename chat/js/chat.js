@@ -1718,6 +1718,11 @@ async function init() {
     // paths. Topology belongs to the client — chat.js owns getMcpServerOrigin.
     preview.setMcpOriginResolver(getMcpServerOrigin);
 
+    // Header toggle: the preview pane (and its integrated storage browser) is
+    // reachable at any time — no tool call required (#preview milestone 1).
+    const previewToggleBtn = document.getElementById('preview-toggle-btn');
+    if (previewToggleBtn) previewToggleBtn.addEventListener('click', () => preview.togglePane());
+
     // When preview content changes, stop any active TTS — the old audio
     // no longer matches what's on screen. The user can click speak again
     // to generate fresh audio for the new content.
@@ -3444,6 +3449,11 @@ async function sendMessage() {
     const sendBody = { content, attachments, model: sendModel, temperature };
     if (maxTokens && !isNaN(maxTokens)) sendBody.max_tokens = maxTokens;
     if (effort && effort !== 'default') sendBody.reasoning_effort = effort;
+    // What is on the preview surface right now rides THIS turn only; the runner
+    // persists it on the user message and the projection appends it to that
+    // turn's wire content (never the system prompt — KV-cache prefix stays put).
+    const previewContext = preview.getContext();
+    if (previewContext) sendBody.previewContext = previewContext;
 
     const res = await _sendWithOutbox(sendChatId, sendBody);
     if (!res.ok) {

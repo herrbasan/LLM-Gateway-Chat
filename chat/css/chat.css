@@ -389,6 +389,57 @@ nui-code pre {
     overflow-y: auto;
     padding: var(--nui-space);
     min-height: 0;
+    min-width: 0;
+}
+
+/* Preview body: [storage browser | content]. The browser is a compact fixed
+   column; the rendering surface takes whatever is left, so a narrow pane
+   shrinks the content, never the browser (it stays usable for navigation). */
+.preview-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+}
+
+.preview-browser {
+    flex: 0 0 15rem;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border-right: thin solid var(--border-shade1);
+    background: var(--color-shade2);
+    overflow: hidden;
+}
+.preview-browser[hidden] { display: none; }
+
+.preview-browser-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-space-quarter);
+    padding: var(--nui-space-quarter) var(--nui-space-half);
+    border-bottom: thin solid var(--border-shade1);
+    flex: 0 0 auto;
+}
+.preview-browser-toolbar nui-input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.preview-browser nui-file-tree {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+}
+
+.preview-browser-error {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: var(--nui-space-half);
+    font-size: 0.8rem;
+    color: var(--color-danger, #f44336);
+    overflow-wrap: anywhere;
 }
 
 #hosted-app-dialog dialog > main {
@@ -571,10 +622,18 @@ nui-code pre {
     .preview-pane[hidden] { display: none; }
     .preview-pane:not([hidden]) { display: flex; }
     .preview-resizer { display: none !important; }
+    /* Docked (mobile) pane: the browser column shrinks so both halves stay
+       usable; selecting a file collapses it (preview.js), which is the only way
+       the rendering surface gets full width back on a phone. */
+    .preview-browser { flex-basis: 12rem; }
     /* Composer always draws above the preview, even if --composer-height
        momentarily lags behind a growth (e.g. images just attached).
        Scoped to .chat-main to beat the base .chat-input-area z-index:10. */
     .chat-main .chat-input-area { z-index: 25; }
+}
+
+@media (max-width: 40rem) {
+    .preview-browser { flex-basis: 10rem; }
 }
 
 /* On narrow phones, drop the provenance label to give the item dropdown

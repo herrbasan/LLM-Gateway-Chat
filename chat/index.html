@@ -16,6 +16,7 @@
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-rich-text.css">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-list.css">
     <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-slides.css">
+    <link rel="stylesheet" href="../lib/nui_wc2/NUI/css/modules/nui-file-tree.css">
     
 </head>
 <body>
@@ -40,6 +41,11 @@
                 </div>
             </div>
             <div slot="right">
+                <nui-button id="preview-toggle-btn" title="Preview & Storage Browser">
+                    <button type="button" aria-label="Preview & Storage Browser">
+                        <nui-icon name="folder_open"></nui-icon>
+                    </button>
+                </nui-button>
                 <nui-button data-action="admin" id="btn-admin" title="User Management" style="display: none;">
                     <button type="button" aria-label="User Management">
                         <nui-icon name="security"></nui-icon>
@@ -441,9 +447,13 @@
                     <!-- Preview Pane Resizer (drag handle) -->
                     <div class="preview-resizer" id="preview-resizer" hidden></div>
                     
-                    <!-- Preview Pane (LLM-driven second rendering surface) -->
+                    <!-- Preview Pane (LLM-driven second rendering surface, plus the
+                         integrated storage file browser) -->
                     <div class="preview-pane" id="preview-pane" hidden>
                         <header class="preview-header">
+                            <nui-button id="preview-browser-btn" class="icon-only" title="Toggle Storage Browser">
+                                <button type="button" aria-label="Toggle Storage Browser"><nui-icon name="folder_open"></nui-icon></button>
+                            </nui-button>
                             <nui-select id="preview-select" data-label="No items">
                                 <select></select>
                             </nui-select>
@@ -458,7 +468,25 @@
                                 <button type="button" aria-label="Close preview"><nui-icon name="close"></nui-icon></button>
                             </nui-button>
                         </header>
-                        <div class="preview-content" id="preview-content"></div>
+                        <div class="preview-body">
+                            <aside class="preview-browser" id="preview-browser" hidden>
+                                <div class="preview-browser-toolbar">
+                                    <nui-input id="preview-tree-filter">
+                                        <input type="search" placeholder="Filter files..." aria-label="Filter files">
+                                    </nui-input>
+                                    <nui-button id="preview-tree-refresh" class="icon-only" title="Refresh storage listing">
+                                        <button type="button" aria-label="Refresh storage listing"><nui-icon name="sync"></nui-icon></button>
+                                    </nui-button>
+                                    <nui-button id="preview-tree-collapse" class="icon-only" title="Collapse all folders">
+                                        <button type="button" aria-label="Collapse all folders"><nui-icon name="unfold_less"></nui-icon></button>
+                                    </nui-button>
+                                </div>
+                                <nui-file-tree id="preview-file-tree" density="compact" selectable="files">
+                                    <nav aria-label="Storage files"></nav>
+                                </nui-file-tree>
+                            </aside>
+                            <div class="preview-content" id="preview-content"></div>
+                        </div>
                     </div>
                 </div>
             </nui-main>
@@ -596,6 +624,7 @@
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-rich-text.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-list.js" type="module"></script>
     <script src="../lib/nui_wc2/NUI/lib/modules/nui-slides.js" type="module"></script>
+    <script src="../lib/nui_wc2/NUI/lib/modules/nui-file-tree.js" type="module"></script>
     <script src="js/chat.js" type="module"></script>
 
     <!-- NO local [data-action] delegation here. `toggle-sidebar` and

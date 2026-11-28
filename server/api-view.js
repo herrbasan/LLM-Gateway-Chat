@@ -182,6 +182,36 @@ function resolveToolImage(url, publicOrigin, readImageBytes) {
     return resolveImageUrl(url, publicOrigin);
 }
 
+// Live preview state → one compact block appended to the turn that CARRIED it
+// (#preview milestone 1). Input-only, like the timestamp prefix: the block is
+// derived from the stored `previewContext` of that user message and never
+// mutates it, so stored history, the system prompt and every earlier turn stay
+// byte-identical for the provider's KV cache.
+function formatPreviewContextBlock(ctx) {
+    const marks = ctx && Array.isArray(ctx.marks) ? ctx.marks.filter(m => m && typeof m === 'object') : [];
+    if (!ctx || (!ctx.paneOpen && marks.length === 0)) return '';
+    const lines = ['[Preview State]'];
+    const label = ctx.path || ctx.title || ctx.id;
+    if (label) {
+        const attrs = [];
+        if (ctx.kind) attrs.push(ctx.kind);
+        if (ctx.view) attrs.push(`view: ${ctx.view}`);
+        if (ctx.page) attrs.push(`page: ${ctx.page}`);
+        lines.push(attrs.length ? `File: ${label} (${attrs.join(', ')})` : `File: ${label}`);
+    } else {
+        lines.push('Pane: open (storage browser, no file selected)');
+    }
+    if (marks.length) {
+        lines.push(`Marked passages (${marks.length}):`);
+        marks.forEach((mark, i) => {
+            const heading = mark.heading ? `[${mark.heading}] ` : '';
+            const note = mark.note ? ` (Note: ${mark.note})` : '';
+            lines.push(`${i + 1}. ${heading}"${mark.quote}"${note}`);
+        });
+    }
+    return lines.join('\n');
+}
+
 // messages: stored-form array (flat, ordered by idx).
 // options: { systemPrompt, publicOrigin, chunkTransform, retirements, log }
 //   chunkTransform: the per-session retirement flag (name kept for stored-doc
@@ -314,6 +344,10 @@ function buildApiMessages(messages, options = {}) {
             const cleanUserContent = 'content' in tx
                 ? tx.content
                 : mark(withInputSource(withTimestamp(msg.content, msg.createdAt), msg));
+            const previewBlock = formatPreviewContextBlock(msg.previewContext);
+            const userContent = previewBlock
+                ? (cleanUserContent ? `${cleanUserContent}\n\n${previewBlock}` : previewBlock)
+                : cleanUserContent;
 
             if (validAttachments.length > 0) {
                 const gatewayImageUrls = validAttachments
@@ -330,12 +364,12 @@ function buildApiMessages(messages, options = {}) {
                     .filter(e => e !== null);
 
                 if (gatewayImageUrls.length > 0) {
-                    let fullText = cleanUserContent;
+                    let fullText = userContent;
                     if (manifestEntries.length > 0) {
                         const manifestStr = manifestEntries.map(e =>
                             `[attachment ${e.index}: name="${e.name}" mime="${e.mime}" url="${e.url}"]`
                         ).join(' ');
-                        fullText = (cleanUserContent ? cleanUserContent + '\n' : '') + manifestStr;
+                        fullText = (userContent ? userContent + '\n' : '') + manifestStr;
                     }
                     // Auto-vision (runner-produced, stored on the attachment):
                     // a non-vision model receives the MCP vision analysis as
@@ -354,11 +388,11 @@ function buildApiMessages(messages, options = {}) {
                             ...gatewayImageUrls.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } }))
                         ]
                     });
-                } else if (cleanUserContent) {
-                    rawMessages.push({ role: 'user', content: cleanUserContent });
+                } else if (userContent) {
+                    rawMessages.push({ role: 'user', content: userContent });
                 }
-            } else if (cleanUserContent) {
-                rawMessages.push({ role: 'user', content: cleanUserContent });
+            } else if (userContent) {
+                rawMessages.push({ role: 'user', content: userContent });
             }
             continue;
         }
@@ -494,4 +528,4 @@ function buildApiMessages(messages, options = {}) {
     return { messages: merged, retireStats, rawMessages: merged };
 }
 
-module.exports = { buildApiMessages, stripExtraTimestamps, withTimestamp, stripLeadingTs, withInputSource, formatMessageTs, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef, parseBucketPath };
+module.exports = { buildApiMessages, formatPreviewContextBlock, stripExtraTimestamps, withTimestamp, stripLeadingTs, withInputSource, formatMessageTs, LEADING_TS_REGEX, sanitizeToolArgs, resolveImageUrl, parseFileRef, parseBucketPath };

@@ -2332,7 +2332,10 @@ const routes = {
       const { message } = await r.send(body);
       json(res, { message }, 201, req);
     } catch (e) {
-      json(res, { error: e.message }, 404, req);
+      // Invalid previewContext (or any other caller-shaped rejection) is a 400 —
+      // everything else on this route is a missing/unknown conversation.
+      const invalid = e.status === 400 || e.statusCode === 400;
+      json(res, { error: e.message }, invalid ? 400 : 404, req);
     }
   },
   
@@ -2702,7 +2705,7 @@ const server = http.createServer(async (req, res) => {
   // reach that backend is a 503 — never a 401 that blames the caller.
   const authSurface = pathname.startsWith('/api/')
     || pathname.startsWith('/files/')
-    || /^\/(chat)?\/storage\//.test(pathname);
+    || /^\/(?:chat\/)?storage(\/|$)/.test(pathname);
   if (authSurface) {
     try {
       req.auth = await resolveAuth(req);
@@ -2711,6 +2714,29 @@ const server = http.createServer(async (req, res) => {
       json(res, { error: `Authentication backend unavailable: ${err.message}` }, 503);
       return;
     }
+  }
+
+  // Storage proxy (issue #36) — same-origin /storage/* → MCP storage server,
+  // cookie-auth'd. Handled BEFORE the static fallback so it can't be shadowed by
+  // a file on disk, and BEFORE the trailing-slash index normalization below —
+  // `/storage/` is a DIRECTORY LISTING request, not a directory holding an
+  // index.html (that normalization turned it into `/storage/index.html` and the
+  // listing 404'd).
+  //
+  // Accepts an optional /chat prefix: behind nPort the route is stripPath:false,
+  // so the public path /chat/storage/... arrives here verbatim. Both forms, and
+  // the bare `/storage` the file browser may ask for, reach the same handler.
+  const storageMatch = pathname.match(/^\/(?:chat\/)?storage(?:\/(.*))?$/);
+  if (storageMatch && (req.method === 'GET' || req.method === 'HEAD')) {
+    let storagePath;
+    try {
+      storagePath = decodeURIComponent(storageMatch[1] || '');
+    } catch (e) {
+      json(res, { error: 'Malformed storage path' }, 400, req);
+      return;
+    }
+    await proxyStorage(req, res, storagePath);
+    return;
   }
 
   // Redirect root to /chat/ (needed for relative resource paths)
@@ -2766,17 +2792,6 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       json(res, { error: 'File not found' }, 404);
     }
-    return;
-  }
-
-  // Storage proxy (issue #36) — same-origin /storage/* → MCP storage server,
-  // cookie-auth'd. Inserted BEFORE the static fallback so it can't be shadowed
-  // by a file on disk. POST/etc. are not proxied: images are read-only.
-  // Accepts an optional /chat prefix: behind nPort the route is stripPath:false,
-  // so the public path /chat/storage/... arrives here verbatim.
-  const storageMatch = pathname.match(/^\/(chat)?\/storage\/(.*)$/);
-  if (storageMatch && (req.method === 'GET' || req.method === 'HEAD')) {
-    await proxyStorage(req, res, decodeURIComponent(storageMatch[2]));
     return;
   }
 

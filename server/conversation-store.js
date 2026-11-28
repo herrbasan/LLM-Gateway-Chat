@@ -106,12 +106,97 @@ function normalizeStoredMessage(msg = {}) {
     if (msg.usage) message.usage = msg.usage;
     if (msg.context) message.context = msg.context;
     if (msg.tool_calls) message.tool_calls = msg.tool_calls;
+    if (msg.previewContext) message.previewContext = msg.previewContext;
     if (msg.error) message.error = true;
     if (Array.isArray(msg.versions)) {
         message.versions = msg.versions;
         message.currentVersion = msg.currentVersion !== undefined ? msg.currentVersion : msg.versions.length - 1;
     }
     return message;
+}
+
+// Live preview state attached to the USER TURN that was sent (#preview
+// milestone 1). The browser reports what is on screen; the server projects it
+// onto that turn's wire content (api-view.formatPreviewContextBlock) only. It
+// never enters the system prompt or an earlier turn — the KV-cache prefix must
+// stay byte-identical across sends.
+//
+// Validation is fail-fast: a malformed payload is a caller bug and answers 400.
+// The size cap THROWS instead of truncating — a silently cut quote would be a
+// fabricated citation.
+const PREVIEW_CONTEXT_MAX_BYTES = 32768;
+const PREVIEW_CONTEXT_MAX_MARKS = 20;
+const PREVIEW_FIELD_MAX = 512;
+const PREVIEW_MARK_LIMITS = { quote: 4000, heading: 300, note: 1000 };
+
+function previewContextError(message) {
+    const err = new Error(`previewContext: ${message}`);
+    err.status = 400;
+    return err;
+}
+
+// Trimmed optional string, dropped when empty; `required` turns empty into a 400.
+function previewString(source, key, max, { required = false } = {}) {
+    const raw = source[key];
+    if (raw === undefined || raw === null) {
+        if (required) throw previewContextError(`${key} required`);
+        return undefined;
+    }
+    if (typeof raw !== 'string') throw previewContextError(`${key} must be a string`);
+    const value = raw.trim();
+    if (!value) {
+        if (required) throw previewContextError(`${key} must not be empty`);
+        return undefined;
+    }
+    if (value.length > max) throw previewContextError(`${key} exceeds ${max} characters`);
+    return value;
+}
+
+function validatePreviewContext(raw) {
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+        throw previewContextError('must be an object');
+    }
+    if (typeof raw.paneOpen !== 'boolean') {
+        throw previewContextError('paneOpen must be a boolean');
+    }
+
+    const clean = { paneOpen: raw.paneOpen };
+    for (const key of ['id', 'path', 'title', 'kind', 'view']) {
+        const value = previewString(raw, key, PREVIEW_FIELD_MAX);
+        if (value !== undefined) clean[key] = value;
+    }
+
+    if (raw.page !== undefined) {
+        if (!Number.isInteger(raw.page) || raw.page < 1) {
+            throw previewContextError('page must be a positive integer');
+        }
+        clean.page = raw.page;
+    }
+
+    if (raw.marks !== undefined) {
+        if (!Array.isArray(raw.marks)) throw previewContextError('marks must be an array');
+        if (raw.marks.length > PREVIEW_CONTEXT_MAX_MARKS) {
+            throw previewContextError(`marks exceeds ${PREVIEW_CONTEXT_MAX_MARKS} items`);
+        }
+        clean.marks = raw.marks.map((mark, i) => {
+            if (!mark || typeof mark !== 'object' || Array.isArray(mark)) {
+                throw previewContextError(`marks[${i}] must be an object`);
+            }
+            const out = { quote: previewString(mark, 'quote', PREVIEW_MARK_LIMITS.quote, { required: true }) };
+            const heading = previewString(mark, 'heading', PREVIEW_MARK_LIMITS.heading);
+            if (heading !== undefined) out.heading = heading;
+            const note = previewString(mark, 'note', PREVIEW_MARK_LIMITS.note);
+            if (note !== undefined) out.note = note;
+            return out;
+        });
+    }
+
+    const size = JSON.stringify(clean).length;
+    if (size > PREVIEW_CONTEXT_MAX_BYTES) {
+        throw previewContextError(`payload exceeds ${PREVIEW_CONTEXT_MAX_BYTES} bytes (${size})`);
+    }
+    return clean;
 }
 
 // A session and its conversation share `id` (the conversation id), so a legacy
@@ -728,6 +813,7 @@ module.exports = {
     normalizeAttachments,
     densifyAttachments,
     normalizeStoredMessage,
+    validatePreviewContext,
     canonicalizeStorageUrls,
     viewMessage,
     findSessionOrThrow,

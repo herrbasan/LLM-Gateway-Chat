@@ -655,6 +655,9 @@ class Runner {
 
     // ---- send: append user message (single author), queue the run ----
     async send(body) {
+        // Validate BEFORE any write: an invalid preview payload is a caller bug
+        // and must leave the conversation untouched (the route maps it to 400).
+        const previewContext = convStore.validatePreviewContext(body.previewContext);
         const clientId = typeof body.clientId === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(body.clientId)
             ? body.clientId : null;
         // A retry after a lost response must not append the same user turn twice.
@@ -671,7 +674,8 @@ class Runner {
             content: body.content || '',
             attachments: body.attachments,
             model: body.model || this.session.model || null,
-            clientId
+            clientId,
+            ...(previewContext ? { previewContext } : {})
         });
         if (!this.pendingModel) this.pendingModel = message.model || null;
         if (body.model && body.model !== this.session.model) {
