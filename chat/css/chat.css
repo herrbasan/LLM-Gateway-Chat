@@ -701,6 +701,21 @@ nui-code pre {
     flex-shrink: 0; /* Don't let flex container shrink the stage */
 }
 
+/* Tail-loading affordance (Track 2a): the snapshot carries only the last page
+   of a long conversation, so the top of the container offers the rest. Sits as
+   a sibling BEFORE `.vs-stage` — never a virtual-scroll slot. */
+.load-earlier-bar {
+    display: flex;
+    justify-content: center;
+    flex-shrink: 0;
+    padding: var(--nui-space-half, 0.5rem) 0;
+}
+
+.load-earlier-bar nui-button button {
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
 /* Busy overlay — covers the chat-main panel during render + virtual-scroll
    activation so the user never sees the intermediate
    "render all → empty → re-attach visible" sequence.

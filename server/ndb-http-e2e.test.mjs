@@ -22,15 +22,19 @@ import { spawn } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const { createNdbClient, NdbError } = require('./ndb-client');
 const { createV2Client } = require('./nvdb-v2-client');
-const { createNvdbSync } = require('./nvdb-sync');
+const { createNvdbSync, createVectorDrainer } = require('./nvdb-sync');
 const {
     chatCollectionConfig,
     buildMessageV2Docs,
+    buildUserExpectedDocs,
+    userPrincipal,
+    buildChatVectorInput,
     parseChatChunkId,
     expectedDocsFromDocs
 } = require('./nvdb-chat');
 const { documentHashes } = require('./nvdb-v2-hash');
 const { isEmbeddableMessage } = require('./embed');
+const { searchArchive } = require('./internal-tools');
 const store = require('./conversation-store');
 
 const NDB_EXE = process.env.NDB_EXE || 'D:\\DEV\\nDB\\target\\release\\ndb.exe';
@@ -556,6 +560,352 @@ async function main() {
         assert.equal(result.mode, 'rebuild');
         const lineage = await ctx.aliceDb.lineage();
         assert.equal((await ctx.sync.readWatermark('alice')).source_epoch_uuid, lineage.source_epoch_uuid);
+    });
+
+    // ---- 5. nDB v3 read/search surface (peek / searchText / schema) ---------
+
+    await test('peek returns a field projection, a text range and an array slice', async () => {
+        const body = 'abcdefghij' + 'K'.repeat(40) + 'tail';
+        const inserted = await ctx.aliceDb.insert({
+            _type: 'probe', id: 'probe-1', body, items: ['a', 'b', 'c', 'd', 'e']
+        });
+        const peeked = await ctx.aliceDb.peek(inserted.id, {
+            fields: ['body', 'items'],
+            textRanges: [{ path: 'body', offset: 10, limit: 5 }],
+            arraySlices: [{ path: 'items', offset: 1, limit: 2 }]
+        });
+        assert.equal(peeked.id, inserted.id);
+        assert.equal(peeked.seq, inserted.seq);
+        assert.equal(peeked.doc.body, 'KKKKK', 'only the requested character range came back');
+        assert.deepEqual(peeked.doc.items, ['b', 'c'], 'only the requested array slice came back');
+        assert.equal(peeked.ranges.body.offset, 10);
+        assert.equal(peeked.ranges.body.returned, 5);
+        assert.equal(peeked.ranges.body.total, body.length);
+        assert.equal(peeked.ranges.body.has_more, true);
+        assert.equal(peeked.ranges.body.next_offset, 15);
+        assert.equal(peeked.ranges.items.returned, 2);
+    });
+
+    await test('peek with a mismatched expected_seq is a 409 conflict', async () => {
+        const doc = (await ctx.aliceDb.findAll('id', 'probe-1')).pop();
+        const current = await ctx.aliceDb.peek(doc._id, { fields: ['body'] });
+        await assert.rejects(
+            () => ctx.aliceDb.peek(doc._id, { fields: ['body'], expectedSeq: current.seq + 1 }),
+            (err) => {
+                assert.equal(err instanceof NdbError, true);
+                assert.equal(err.status, 409);
+                return true;
+            }
+        );
+        const pinned = await ctx.aliceDb.peek(doc._id, { fields: ['body'], expectedSeq: current.seq });
+        assert.equal(pinned.seq, current.seq, 'the matching seq is accepted');
+    });
+
+    await test('searchText matches text inside messages[].content and pages by cursor', async () => {
+        const page = await ctx.aliceDb.searchText({
+            query: 'cardamom',
+            filter: { _type: 'conversation' },
+            maxScanDocs: 1000,
+            limit: 200
+        });
+        assert.ok(page.data.length >= 1, `expected a matching conversation, got ${page.data.length}`);
+        assert.ok(page.data.every(d => d._type === 'conversation'));
+        const hit = page.data.find(c => (c.messages || []).some(m => String(m.content).includes('cardamom')));
+        assert.ok(hit, 'the conversation holding the cardamom message is the match');
+        assert.equal(typeof page.total, 'number');
+        assert.equal(typeof page.scannedDocs, 'number');
+        assert.equal(page.nextCursor, null);
+
+        const narrowed = await ctx.aliceDb.searchText({
+            query: 'cardamom',
+            textFields: ['messages'],
+            filter: { _type: 'conversation' },
+            limit: 5
+        });
+        assert.ok(narrowed.data.length >= 1, 'text.fields narrows to the messages field without losing the hit');
+        await assert.rejects(() => ctx.aliceDb.searchText({ query: '   ' }), /non-empty/);
+    });
+
+    await test('getSchema + setFieldMapping round-trip', async () => {
+        const before = await ctx.aliceDb.getSchema();
+        assert.ok(Array.isArray(before.field_mapping));
+        const mapping = [
+            ...before.field_mapping.filter(entry => entry.field !== 'title'),
+            { field: 'title', text: true }
+        ];
+        const after = await ctx.aliceDb.setFieldMapping(mapping);
+        const title = after.field_mapping.find(entry => entry.field === 'title');
+        assert.ok(title, 'the mapped field is reported back');
+        assert.equal(title.text, true);
+        const reread = await ctx.aliceDb.getSchema();
+        assert.deepEqual(
+            reread.field_mapping.find(entry => entry.field === 'title'),
+            title,
+            'the mapping is persisted in the schema'
+        );
+        // A declared `text` field NARROWS unfielded text queries to it, so put
+        // the schema back the way this suite found it.
+        const restored = await ctx.aliceDb.setFieldMapping(before.field_mapping);
+        assert.equal(restored.field_mapping.some(entry => entry.field === 'title'), false);
+    });
+
+    // ---- 6. #69: the real vector drain (createVectorDrainer) -----------------
+
+    const drainCalls = { probes: 0 };
+    function makeDrainer({ gate = null, embedBatchImpl = null } = {}) {
+        return createVectorDrainer({
+            buildUserExpectedDocs,
+            userFingerprints: ctx.sync.userFingerprints,
+            acquireEmbedSlot: async () => {},
+            releaseEmbedSlot: () => {},
+            embedBatch: embedBatchImpl || (async (texts) => texts.map(text => unitVector(text))),
+            attachVectorsQuietly: async (instance, attachments) => {
+                await ctx.client.attachVectors(COLLECTION, attachments);
+                return true;
+            },
+            isEmbedAvailable: () => true,
+            buildChatVectorInput,
+            parseChatChunkId,
+            embeddingDims: DIMS,
+            embedModelVersion: MODEL_VERSION,
+            log: () => logSink,
+            onNvdbError: (instance, err, context) => { ctx.drainNvdbError = { context, message: err.message }; },
+            isNvdbUnavailableError: () => false
+        });
+    }
+
+    await test('drainPendingVectors attaches vectors and marks the message embedded (#69)', async () => {
+        const createdAt = '2026-05-01T00:00:00Z';
+        await ctx.aliceDb.insert(sessionDoc('chat_drain', 'Drain', createdAt));
+        await ctx.aliceDb.insert(conversationDoc('chat_drain', 'Drain', [
+            storedMessage('dm0', 0, 'user', 'juniper drain target message', createdAt)
+        ], createdAt));
+        // Lexical sync only (afterSync is null in this suite): docs exist, no vectors.
+        await ctx.sync.reconcileUserNvdb(ctx.aliceInstance);
+
+        const pending = await ctx.client.pendingEmbeddings(COLLECTION, 256);
+        assert.ok(
+            (pending.pending || []).some(item => String(item.id).startsWith(`${ALICE}:chat_drain:`)),
+            'the new message starts life without a vector'
+        );
+
+        const drainer = makeDrainer();
+        await drainer(ctx.aliceInstance, { mode: 'incremental' });
+
+        const stillPending = await ctx.client.pendingEmbeddings(COLLECTION, 256);
+        assert.equal(
+            (stillPending.pending || []).some(item => String(item.id).startsWith(`${ALICE}:chat_drain:`)),
+            false,
+            'every chunk got a vector (no ReferenceError on userFingerprints)'
+        );
+
+        const conv = (await ctx.aliceDb.findAll('id', 'chat_drain')).find(d => d._type === 'conversation');
+        assert.equal(conv.messages[0].embedStatus, 'embedded');
+        assert.ok(conv.messages[0].embedChunks >= 1);
+        assert.equal(ctx.aliceInstance.drainRunning, false, 'the guard is released');
+
+        const fp = await ctx.client.fingerprints(COLLECTION);
+        const drainEntries = (fp.entries || []).filter(e => e.id.startsWith(`${ALICE}:chat_drain:`));
+        assert.ok(drainEntries.length >= 1);
+        assert.ok(drainEntries.every(e => e.has_vector === true));
+    });
+
+    await test('a concurrent drain is blocked by instance.drainRunning before probing', async () => {
+        const createdAt = '2026-05-02T00:00:00Z';
+        await ctx.aliceDb.insert(sessionDoc('chat_gate', 'Gate', createdAt));
+        await ctx.aliceDb.insert(conversationDoc('chat_gate', 'Gate', [
+            storedMessage('gm0', 0, 'user', 'sorrel gated drain message', createdAt)
+        ], createdAt));
+        await ctx.sync.reconcileUserNvdb(ctx.aliceInstance);
+
+        let release;
+        const gate = new Promise(resolve => { release = resolve; });
+        let embedStarted;
+        const embedStartedPromise = new Promise(resolve => { embedStarted = resolve; });
+
+        const slow = makeDrainer({
+            embedBatchImpl: async (texts) => {
+                embedStarted();
+                await gate;
+                return texts.map(text => unitVector(text));
+            }
+        });
+        const first = slow(ctx.aliceInstance, { mode: 'incremental' });
+        assert.equal(ctx.aliceInstance.drainRunning, true, 'the first drain owns the instance synchronously');
+        await embedStartedPromise;
+
+        let probedDuringSecond = 0;
+        const counting = makeDrainer({
+            embedBatchImpl: async (texts) => texts.map(text => unitVector(text))
+        });
+        const originalPending = ctx.client.pendingEmbeddings;
+        ctx.client.pendingEmbeddings = async (...args) => {
+            probedDuringSecond++;
+            return originalPending.call(ctx.client, ...args);
+        };
+        await counting(ctx.aliceInstance, { mode: 'incremental' });
+        ctx.client.pendingEmbeddings = originalPending;
+        assert.equal(probedDuringSecond, 0, 'the second call returned before doing any work');
+
+        release();
+        await first;
+        assert.equal(ctx.aliceInstance.drainRunning, false);
+    });
+
+    // ---- 7. nVDB outage: searchArchive falls back to nDB searchText ---------
+
+    await test('searchArchive falls back to nDB text search while nVDB is unreachable', async () => {
+        const nvdbErrors = [];
+        const offlineClient = {
+            hybridSearch: async () => {
+                throw new Error('nvdb POST /v2/collections/chat/hybrid_search unreachable at http://127.0.0.1:1: fetch failed');
+            },
+            level2: async () => { throw new Error('level2 must not run when hybrid already failed'); }
+        };
+        const data = await searchArchive(
+            { db: ctx.aliceDb, nvdbClient: offlineClient, nvdbCollection: COLLECTION, userId: ALICE },
+            { query: 'cardamom', limit: 10 },
+            {
+                userId: ALICE,
+                nvdbClient: offlineClient,
+                nvdbCollection: COLLECTION,
+                rerankerLoaded: false,
+                embedAvailable: false,
+                onNvdbError: (err) => nvdbErrors.push(err),
+                log: logSink
+            }
+        );
+
+        assert.equal(data.method, 'ndb-text-fallback');
+        assert.equal(data.engine, 'ndb');
+        assert.equal(data.degraded, true);
+        assert.equal(typeof data.truncated, 'boolean');
+        assert.match(data.nvdbError, /unreachable|fetch failed/);
+        assert.equal(nvdbErrors.length, 1, 'the outage reaches the watchdog through onNvdbError');
+        assert.ok(data.results.length >= 1);
+        assert.ok(data.results.some(r => r.message.content.includes('cardamom')));
+        assert.equal(typeof data.results[0].score, 'number');
+        assert.ok(data.results[0].session && data.results[0].session.id);
+    });
+
+    // ---- 8. wiped nVDB: forceVerify rebuilds the affected user slice --------
+
+    await test('a wiped nVDB slice is rebuilt by reconcileUserNvdb({ forceVerify: true })', async () => {
+        const WIPE_USER = 'wipey';
+        const WIPE_COLLECTION = 'chat_wipe';
+        await ctx.ndb.createDb('chat_wipey', { format: 'ram' });
+        const wipeDb = ctx.ndb.db('chat_wipey');
+        const createdAt = '2026-06-01T00:00:00Z';
+        await wipeDb.insert({ ...sessionDoc('chat_w', 'Wipe', createdAt), userId: WIPE_USER });
+        await wipeDb.insert({
+            _type: 'conversation', id: 'chat_w', userId: WIPE_USER, title: 'Wipe', mode: 'direct',
+            model: null, isPublic: false, createdAt, updatedAt: createdAt, messageCount: 1,
+            messages: [storedMessage('wm0', 0, 'user', 'quince unique wiped slice marker', createdAt)]
+        });
+        await ctx.client.createCollection(WIPE_COLLECTION, chatCollectionConfig({ embedDims: DIMS, embedModelVersion: MODEL_VERSION }));
+
+        const wipeInstance = {
+            userId: WIPE_USER,
+            username: WIPE_USER,
+            dbName: 'chat_wipey',
+            db: wipeDb,
+            nvdbClient: ctx.client,
+            nvdbCollection: WIPE_COLLECTION,
+            nvdbChunkOpts: CHUNK_OPTS,
+            reconcileRunning: null
+        };
+
+        const first = await ctx.sync.reconcileUserNvdb(wipeInstance);
+        assert.equal(first.mode, 'rebuild');
+        const before = (await ctx.client.fingerprints(WIPE_COLLECTION)).entries || [];
+        const wipeIds = before.filter(e => e.id.startsWith(`${WIPE_USER}:`)).map(e => e.id);
+        assert.ok(wipeIds.length >= 1);
+
+        // The restart-with-fresh-data shape: identical watermark, empty collection.
+        await ctx.client.deleteIds(WIPE_COLLECTION, wipeIds, { commit: true });
+        const wipedFp = (await ctx.client.fingerprints(WIPE_COLLECTION)).entries || [];
+        assert.equal(wipedFp.filter(e => e.id.startsWith(`${WIPE_USER}:`)).length, 0);
+
+        const noop = await ctx.sync.reconcileUserNvdb(wipeInstance);
+        assert.equal(noop.mode, 'noop', 'the watermark alone cannot see a wipe — this is the bug forceVerify closes');
+
+        const healed = await ctx.sync.reconcileUserNvdb(wipeInstance, { forceVerify: true });
+        assert.equal(healed.mode, 'rebuild');
+
+        const expected = await buildUserExpectedDocs({ userId: WIPE_USER, db: wipeDb, chunkOpts: CHUNK_OPTS });
+        const integrity = await ctx.client.integrityCheck(WIPE_COLLECTION, expected.expected);
+        assert.equal(integrity.clean, true, `integrity must be clean: ${JSON.stringify(integrity)}`);
+
+        const hits = await ctx.client.hybridSearch(WIPE_COLLECTION, {
+            lexical: {
+                text: 'quince',
+                top_k: 10,
+                principals: [userPrincipal(WIPE_USER)],
+                fuzzy_edits: 1,
+                explain: false,
+                group_by_parent: null,
+                filters: {}
+            },
+            query_vector: null,
+            dense: false,
+            lexical_enabled: true,
+            candidate_k: 200,
+            rrf_k: 20,
+            lexical_weight: 0.3,
+            vector_weight: 1.0
+        });
+        assert.ok((hits.hits || []).some(hit => String(hit.hit?.id).startsWith(`${WIPE_USER}:`)), 'nVDB search returns the message again');
+    });
+
+    // ---- 9. 410 snapshot_expired retry --------------------------------------
+
+    await test('rebuildFromSnapshot retries a 410 snapshot_expired, then gives up loudly', async () => {
+        let snapshotCalls = 0;
+        const makeInstance = (username, alwaysFail) => ({
+            userId: username,
+            username,
+            dbName: `chat_${username}`,
+            db: {
+                async fullSnapshot() {
+                    snapshotCalls++;
+                    if (alwaysFail || snapshotCalls < 3) {
+                        throw new NdbError(410, 'snapshot_expired', 'snapshot pin expired', 'GET /snapshot', {});
+                    }
+                    return {
+                        docs: [],
+                        total: 0,
+                        source_epoch_uuid: 'epoch-zeta',
+                        watermark_seq: 5,
+                        snapshot_id: 'snap-zeta'
+                    };
+                },
+                async lineage() {
+                    return { source_epoch_uuid: 'epoch-zeta', last_seq: 5, min_available_seq: 0 };
+                }
+            },
+            nvdbClient: {
+                async fingerprints() { return { entries: [] }; },
+                async upsert() {},
+                async deleteIds() {},
+                async commit() {}
+            },
+            nvdbCollection: COLLECTION,
+            reconcileRunning: null
+        });
+
+        const result = await ctx.sync.reconcileUserNvdb(makeInstance('zeta_soft', false));
+        assert.equal(result.mode, 'rebuild');
+        assert.equal(snapshotCalls, 3, 'two retries after the first expiry');
+
+        snapshotCalls = 0;
+        await assert.rejects(
+            () => ctx.sync.reconcileUserNvdb(makeInstance('zeta_hard', true)),
+            (err) => {
+                assert.equal(err.code, 'snapshot_expired');
+                return true;
+            }
+        );
+        assert.equal(snapshotCalls, 3, 'the third expiry is thrown, not retried forever');
     });
 
     console.log(`\n${passed} passed, ${failures.length} failed`);

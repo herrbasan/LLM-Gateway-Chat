@@ -9,6 +9,15 @@
 // ============================================
 
 const { buildMessageV2Docs, collectMessageChunkIds } = require('./nvdb-chat');
+const { isNvdbUnavailableError } = require('./nvdb-v2-client');
+
+// nVDB is a mirror: an outage during a post-commit re-key must not fail the
+// already-persisted nDB write. Injected by server.js so the outage tracker and
+// the reconnect/dirty bookkeeping stay in one place.
+let ON_NVDB_ERROR = null;
+function init({ onNvdbError } = {}) {
+    if (typeof onNvdbError === 'function') ON_NVDB_ERROR = onNvdbError;
+}
 
 // Derive the compact `_file` nURI ('bucket:file.ext') from an attachment's
 // URL-ish fields. Returns null when nothing is derivable.
@@ -198,8 +207,22 @@ async function syncShiftedTailToNvdb(ctx, session, conv, startIdx, prevMessages)
 
     const newIds = new Set(docs.map(d => d.id));
     const removedIds = oldIds.filter(id => !newIds.has(id));
-    if (removedIds.length > 0) await client.deleteIds(collection, removedIds, { commit: docs.length === 0 });
-    if (docs.length > 0) await client.upsert(collection, docs, { commit: true });
+    try {
+        if (removedIds.length > 0) await client.deleteIds(collection, removedIds, { commit: docs.length === 0 });
+        if (docs.length > 0) await client.upsert(collection, docs, { commit: true });
+    } catch (err) {
+        // The nDB splice/insert is already committed. An nVDB outage leaves the
+        // index stale until reconcile sweeps it; a 4xx contract bug still fails.
+        if (!isNvdbUnavailableError(err)) throw err;
+        if (typeof ON_NVDB_ERROR === 'function') {
+            ON_NVDB_ERROR(ctx.dbInstance, err, 'syncShiftedTailToNvdb');
+        } else {
+            log.warn('nVDB shifted tail re-key skipped (nVDB unavailable)', {
+                sessionId: session.id, from: startIdx, error: err.message
+            }, 'Embed');
+        }
+        return;
+    }
     log.info('nVDB shifted tail re-keyed', { sessionId: session.id, from: startIdx, deleted: removedIds.length, upserted: docs.length }, 'Embed');
 }
 
@@ -426,7 +449,23 @@ async function editUserMessageAndTruncate(ctx, { conversationId, messageId, cont
         for (let i = 0; i < removed.length; i++) {
             ids.push(...collectMessageChunkIds(ctx.user.id, session.id, removed[i], removedStart + i, chunkOpts));
         }
-        if (ids.length > 0) await ctx.dbInstance.nvdbClient.deleteIds(ctx.dbInstance.nvdbCollection || 'chat', ids, { commit: true });
+        if (ids.length > 0) {
+            try {
+                await ctx.dbInstance.nvdbClient.deleteIds(ctx.dbInstance.nvdbCollection || 'chat', ids, { commit: true });
+            } catch (err) {
+                // Same rule as the shifted-tail re-key: the nDB truncate is
+                // committed, so an nVDB outage only leaves stale chunks for the
+                // reconcile sweep to remove.
+                if (!isNvdbUnavailableError(err)) throw err;
+                if (typeof ON_NVDB_ERROR === 'function') {
+                    ON_NVDB_ERROR(ctx.dbInstance, err, 'editUserMessageAndTruncate');
+                } else {
+                    log.warn('nVDB retire of the truncated tail skipped (nVDB unavailable)', {
+                        sessionId: session.id, removed: ids.length, error: err.message
+                    }, 'Embed');
+                }
+            }
+        }
     }
 
     // The edited message is the pending turn again: re-upsert + re-embed it so
@@ -476,14 +515,203 @@ async function editAssistantMessageContent(ctx, { conversationId, messageId, con
     return { edited: target };
 }
 
+// ============================================
+// Tail loading — an attach must never transfer a multi-MB conversation whole.
+// ============================================
+//
+// A long conversation is read as a windowed tail plus backward pages, both
+// served by nDB's `POST /doc/:id/peek` (seq-pinned partial read). `db.get`
+// returns the entire document — one 5.9 MB JSON body per attach — which is
+// exactly what this path exists to avoid.
+
+const TAIL_PAGE_SIZE = 50;
+
+// nDB's `peek_item` returns ONLY the fields named in `fields` when the request
+// also carries `array_slices` (ram_engine.rs — it does NOT fall back to "all
+// top-level fields"). Every top-level conversation field therefore has to be
+// listed here or it silently disappears from the tail document.
+const CONV_META_FIELDS = [
+    '_type', 'id', 'userId', 'title', 'mode', 'model', 'isPublic',
+    'createdAt', 'updatedAt', 'messageCount', 'appEvents'
+];
+
+const STORAGE_SPELLING_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|192\.168\.0\.100):3100\/storage\//gi;
+
+// Every absolute spelling of the storage-box origin becomes the host-less proxy
+// path /storage/..., which this backend serves itself (proxyStorage). Applied
+// in viewMessage — the single choke point where messages leave the server — so
+// views never need topology knowledge.
+function canonicalizeStorageUrls(content, mcpOrigin) {
+    if (typeof content !== 'string' || !content.includes(':3100/storage/') && !(mcpOrigin && content.includes(mcpOrigin + '/storage/'))) return content;
+    let out = content.replace(STORAGE_SPELLING_RE, '/storage/');
+    if (mcpOrigin) {
+        const re = new RegExp(mcpOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/storage/', 'gi');
+        out = out.replace(re, '/storage/');
+    }
+    return out;
+}
+
+// Stored message → view form (contract #1): densified attachments, the
+// {content, timestamp} split, canonical storage URLs. Shallow copy — every
+// field it rewrites is replaced, never mutated in place, so a 5 MB history is
+// never re-serialized through JSON and no caller can reach back into the store.
+// Shared by the Runner snapshot path and GET /api/chats/:id/messages so the
+// two can never format a message differently.
+function viewMessage(m, absIdx, { storageOrigin = null } = {}) {
+    const cloned = { ...m };
+    if (cloned.attachments) cloned.attachments = densifyAttachments(cloned.attachments);
+    // Legacy data may carry a stored prefix (pre-2026-08-31 form, or a model
+    // echo the old @-only strip missed). Accept the same separators api-view does.
+    const match = typeof cloned.content === 'string'
+        ? cloned.content.match(/^\[(\d{4}-\d{2}-\d{2})[@T ](\d{2}:\d{2})(?::\d{2})?\]\s*/)
+        : null;
+    if (match) {
+        cloned.timestamp = new Date(`${match[1]}T${match[2]}:00`).getTime();
+        cloned.content = cloned.content.slice(match[0].length);
+    } else if (cloned.timestamp === undefined) {
+        cloned.timestamp = Date.parse(cloned.createdAt) || null;
+    }
+    cloned.content = canonicalizeStorageUrls(cloned.content, storageOrigin);
+    if (absIdx !== undefined) cloned.idx = absIdx;
+    return cloned;
+}
+
+// The conversation document's nDB id, without transferring its body.
+async function findConversationId(db, conversationId) {
+    const { results } = await db.query({
+        filter: { id: conversationId, _type: 'conversation' },
+        fields: ['_id'],
+        limit: 2
+    });
+    const doc = results.find(d => d._type === 'conversation') || results[0];
+    return doc?._id ?? null;
+}
+
+async function peekMessageSlice(db, convId, offset, limit, withMeta) {
+    const r = await db.peek(convId, {
+        fields: withMeta ? CONV_META_FIELDS : ['_id'],
+        arraySlices: [{ path: 'messages', offset, limit }]
+    });
+    const range = r.ranges?.messages || null;
+    const messages = Array.isArray(r.doc?.messages) ? r.doc.messages : [];
+    return { doc: r.doc, messages, range, seq: r.seq ?? null };
+}
+
+// A page must start on a turn boundary (a user message) or the view cannot
+// group it into exchanges. Walk backward until one is found — unbounded: a
+// 30-message tool chain (or any long assistant/tool run) has to be crossed
+// whole, and a fixed lookback cap would leave the page starting mid-turn.
+async function snapBackToUser(db, convId, messages, baseIdx) {
+    while (baseIdx > 0 && messages.length > 0 && messages[0].role !== 'user') {
+        const prevOffset = Math.max(0, baseIdx - 24);
+        const prevSlice = (await peekMessageSlice(db, convId, prevOffset, baseIdx - prevOffset, false)).messages;
+        let u = -1;
+        for (let i = prevSlice.length - 1; i >= 0; i--) {
+            if (prevSlice[i].role === 'user') { u = i; break; }
+        }
+        if (u >= 0) {
+            messages = prevSlice.slice(u).concat(messages);
+            baseIdx = prevOffset + u;
+            break;
+        }
+        messages = prevSlice.concat(messages);
+        baseIdx = prevOffset;
+    }
+    return { messages, baseIdx };
+}
+
+/**
+ * Load a conversation's tail window (plus the metadata fields) without ever
+ * calling `db.get` on the whole document.
+ *
+ * totalHint = the session's `messageCount` when known: it turns the length
+ * discovery into the same peek that fetches the tail. A hint that lags (a
+ * message appended since the session read) is detected via `has_more` and
+ * corrected with one follow-up peek.
+ */
+async function loadConversationTail(db, convId, { tailSize = TAIL_PAGE_SIZE, totalHint = null } = {}) {
+    const hint = Number.isInteger(totalHint) && totalHint >= 0 ? totalHint : null;
+
+    let offset;
+    let segment;
+    if (hint === null) {
+        // No hint: one `_id`-only peek for the exact length, then the tail.
+        const head = await peekMessageSlice(db, convId, 0, 0, false);
+        const total = head.range?.total ?? 0;
+        offset = Math.max(0, total - tailSize);
+        segment = await peekMessageSlice(db, convId, offset, tailSize, true);
+    } else {
+        offset = Math.max(0, hint - tailSize);
+        segment = await peekMessageSlice(db, convId, offset, tailSize + 8, true);
+        const total = segment.range?.total ?? hint;
+        // The hint can OVERESTIMATE (stale count, trimmed messages), which lands
+        // the first peek at or past the real end and yields an empty or short
+        // slice even though messages exist. Compare against the offset a precise
+        // tail would use — `offset === total` is the boundary a plain
+        // `offset > total` test misses.
+        const wantOffset = Math.max(0, total - tailSize);
+        if (segment.range?.has_more === true || (total > 0 && offset > wantOffset)) {
+            offset = wantOffset;
+            segment = await peekMessageSlice(db, convId, offset, tailSize, true);
+        }
+    }
+
+    const totalMessages = segment.range?.total ?? (offset + segment.messages.length);
+    const snapped = await snapBackToUser(db, convId, segment.messages, offset);
+    return {
+        conv: { ...segment.doc, messages: snapped.messages },
+        seq: segment.seq,
+        baseIdx: snapped.baseIdx,
+        totalMessages,
+        fullLoaded: snapped.baseIdx === 0
+    };
+}
+
+/**
+ * One backward page of a long conversation, snapped to a turn boundary.
+ * `before` is the absolute index the page ends at (exclusive) — the view's
+ * current `baseIdx`.
+ */
+async function loadConversationPage(db, convId, { before, limit = TAIL_PAGE_SIZE } = {}) {
+    if (!Number.isInteger(before) || before < 0) {
+        throw new Error(`loadConversationPage: before must be a non-negative integer (got ${before})`);
+    }
+    const size = Number.isInteger(limit) ? Math.max(1, Math.min(200, limit)) : TAIL_PAGE_SIZE;
+    if (before === 0) return { messages: [], baseIdx: 0, endIdx: 0, totalMessages: 0, hasMore: false, seq: null };
+
+    let offset = Math.max(0, before - size);
+    let segment = await peekMessageSlice(db, convId, offset, before - offset, false);
+    let totalMessages = segment.range?.total ?? (offset + segment.messages.length);
+    if (offset > totalMessages) {
+        // `before` ran past the stored length (the view knew about messages the
+        // document no longer has) — re-read the real tail of the array.
+        offset = Math.max(0, totalMessages - size);
+        segment = await peekMessageSlice(db, convId, offset, Math.max(0, totalMessages - offset), false);
+        totalMessages = segment.range?.total ?? totalMessages;
+    }
+    const snapped = await snapBackToUser(db, convId, segment.messages, offset);
+    return {
+        messages: snapped.messages,
+        baseIdx: snapped.baseIdx,
+        endIdx: Math.min(before, totalMessages),
+        totalMessages,
+        hasMore: snapped.baseIdx > 0,
+        seq: segment.seq
+    };
+}
+
 module.exports = {
+    init,
     deriveFileRef,
     bucketUrl,
     normalizeAttachments,
     densifyAttachments,
     normalizeStoredMessage,
+    canonicalizeStorageUrls,
+    viewMessage,
     findSessionOrThrow,
     findConversationOrThrow,
+    findConversationId,
     findOrCreateConversation,
     loadSessionAndConversation,
     appendConversationMessage,
@@ -491,5 +719,8 @@ module.exports = {
     replaceConversationMessages,
     deleteConversationMessage,
     editUserMessageAndTruncate,
-    editAssistantMessageContent
+    editAssistantMessageContent,
+    TAIL_PAGE_SIZE,
+    loadConversationTail,
+    loadConversationPage
 };

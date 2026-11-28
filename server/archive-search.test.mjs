@@ -562,6 +562,38 @@ await test('isEmbeddableMessage: non-tool and non-empty trimmed content only', (
     assert.equal(isEmbeddableMessage(undefined), false);
 });
 
+await test('nDB fallback survives a 422 scan_budget_exceeded and returns the partial page', async () => {
+    const conversation = {
+        _type: 'conversation', _id: 'ccv', id: 'chatC',
+        messages: [msg('c0', 0, 'user', 'budget alpha hit', '2026-01-01T00:00:00Z')]
+    };
+    let calls = 0;
+    const dbInstance = {
+        db: {
+            async queryAll() {
+                return [{ _type: 'session', id: 'chatC', title: 'Chat C', mode: 'direct', createdAt: '2026-01-01T00:00:00Z' }];
+            },
+            async searchText() {
+                calls++;
+                if (calls === 1) return { data: [conversation], nextCursor: 'page2' };
+                const err = new Error('text scan budget exceeded');
+                err.code = 'scan_budget_exceeded';
+                err.status = 422;
+                throw err;
+            }
+        }
+    };
+
+    const data = await searchArchive(dbInstance, { query: 'budget alpha', limit: 10, search_type: 'keyword' }, {});
+
+    assert.equal(calls, 2, 'the scan stopped at the budget error instead of retrying');
+    assert.equal(data.engine, 'ndb');
+    assert.equal(data.degraded, true);
+    assert.equal(data.truncated, true, 'the abandoned cursor is reported as truncation');
+    assert.equal(data.method, 'ndb-text-fallback');
+    assert.deepEqual(data.results.map(r => r.message.id), ['c0'], 'matches gathered before the budget error are kept');
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {
     for (const f of failures) console.error(`\n--- ${f.name}\n${f.err.stack}`);

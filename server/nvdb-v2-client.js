@@ -15,6 +15,38 @@ class NvdbHttpError extends Error {
     }
 }
 
+// Network/transport faults and 5xx mean "nVDB is down, keep serving from nDB".
+// A 4xx is a contract/payload bug and must keep failing loudly, so it is NOT
+// matched here — masking it would turn a caller mistake into silent degradation.
+const NVDB_UNAVAILABLE_CODES = new Set([
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'EHOSTUNREACH',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'EPIPE',
+    'ABORT_ERR'
+]);
+
+function isNvdbUnavailableError(err) {
+    if (!err) return false;
+    if (err instanceof NvdbHttpError) return Number(err.status) >= 500;
+    if (typeof err.status === 'number' && err.status >= 500) return true;
+    if (typeof err.code === 'string') {
+        if (err.code.startsWith('UND_ERR_')) return true;
+        if (NVDB_UNAVAILABLE_CODES.has(err.code)) return true;
+    }
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') return true;
+    const cause = err.cause;
+    if (cause && typeof cause.code === 'string') {
+        if (cause.code.startsWith('UND_ERR_')) return true;
+        if (NVDB_UNAVAILABLE_CODES.has(cause.code)) return true;
+    }
+    const message = String(err.message || '');
+    return /fetch failed|unreachable at|timed out after|socket hang up/i.test(message);
+}
+
 function createV2Client(baseUrl, { timeoutMs = 30_000 } = {}) {
     if (typeof baseUrl !== 'string' || !baseUrl.trim()) {
         throw new Error('createV2Client: baseUrl is required (e.g. http://127.0.0.1:3510)');
@@ -75,8 +107,10 @@ function createV2Client(baseUrl, { timeoutMs = 30_000 } = {}) {
         baseUrl: root,
 
         /** GET /health -> { ok, engine, collections, reranker_loaded? } */
-        health() {
-            return request('GET', '/health');
+        health({ timeoutMs: t } = {}) {
+            return t === undefined
+                ? request('GET', '/health')
+                : request('GET', '/health', undefined, t);
         },
 
         /** GET /v2/collections -> { collections: [{ name, doc_count, acl_generation, watermark }] } */
@@ -174,4 +208,4 @@ function createV2Client(baseUrl, { timeoutMs = 30_000 } = {}) {
     };
 }
 
-module.exports = { NvdbHttpError, createV2Client };
+module.exports = { NvdbHttpError, createV2Client, isNvdbUnavailableError };

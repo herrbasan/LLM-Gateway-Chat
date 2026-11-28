@@ -9,6 +9,7 @@
 // ============================================
 
 const convStore = require('./conversation-store');
+const { TAIL_PAGE_SIZE } = convStore;
 const { buildApiMessages, parseFileRef, parseBucketPath, LEADING_TS_REGEX } = require('./api-view');
 const { buildSystemPrompt } = require('./system-prompt');
 const { countApiMessages, breakdownApiMessages } = require('./token-count');
@@ -24,21 +25,9 @@ function init(deps) { DEPS = deps; }
 
 // Canonicalize storage URLs in message content (issue #36 architecture):
 // every absolute spelling of the storage box origin becomes the host-less
-// proxy path /storage/..., which the backend itself serves (proxyStorage).
-// Applied at viewMessage — the single choke point where messages leave the
-// server — so views and renderers never see a storage host and need no
-// topology knowledge. Known spellings: the configured MCP origin plus the
-// common LAN/loopback forms on the storage port.
-const STORAGE_SPELLING_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|192\.168\.0\.100):3100\/storage\//gi;
-function canonicalizeStorageUrls(content, mcpOrigin) {
-    if (typeof content !== 'string' || !content.includes(':3100/storage/') && !(mcpOrigin && content.includes(mcpOrigin + '/storage/'))) return content;
-    let out = content.replace(STORAGE_SPELLING_RE, '/storage/');
-    if (mcpOrigin) {
-        const re = new RegExp(mcpOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/storage/', 'gi');
-        out = out.replace(re, '/storage/');
-    }
-    return out;
-}
+// proxy path /storage/... — implemented in conversation-store so the runner
+// and the REST message route share one definition.
+
 
 // chat.progress spec §2.1: poll interval for chat.status while a workshop
 // `chat.send` dispatcher call is in flight.
@@ -258,14 +247,21 @@ class Runner {
         // init() hydrated this runner; the first buildSnapshot reuses that state.
         this._hydratedFresh = false;
         this._storageOriginCache = undefined;
+        // Tail-loading state (Track 2a). `_fullLoaded` false means `conv.messages`
+        // holds only the tail window starting at `_baseIdx` — every path that
+        // needs the whole history goes through ensureFull()/refresh() first.
+        this._fullLoaded = true;
+        this._baseIdx = 0;
+        this._totalMessages = 0;
+        this._convSeq = null;
     }
 
     /**
      * Hydration is a network round-trip now (nDB lives behind `ndb serve`), so
-     * the constructor only stores identity and init() loads the session doc.
+     * the constructor only stores identity and init() hydrates.
      */
     async init() {
-        await this.refresh();
+        await this._hydrate();
         this._storageOriginCache = await this._loadStorageOrigin();
         // Orphaned run? The previous process died mid-chain and left its stamp
         // behind — mark the conversation LOUDLY, then clear the stamp. Without
@@ -281,16 +277,58 @@ class Runner {
         this.scheduleIdle();
     }
 
+    /**
+     * Cold hydration: the session (tiny), the conversation's nDB id (one
+     * `_id`-only query), then a peeked tail. A multi-MB conversation never
+     * crosses the wire whole on attach — `db.get` on the full document is
+     * exactly what this avoids.
+     */
+    async _hydrate() {
+        const db = this.dbInstance.db;
+        const session = await convStore.findSessionOrThrow(db, this.conversationId);
+        this.session = session;
+        const convId = await convStore.findConversationId(db, this.conversationId);
+        if (!convId) {
+            // First write of this conversation — nothing to page through.
+            const conv = await convStore.findOrCreateConversation(db, session, this.user);
+            this.conv = conv;
+            this._fullLoaded = true;
+            this._baseIdx = 0;
+            this._totalMessages = (conv.messages || []).length;
+            this._convSeq = null;
+            return;
+        }
+        const tail = await convStore.loadConversationTail(db, convId, { totalHint: session.messageCount });
+        this.conv = tail.conv;
+        this._fullLoaded = tail.fullLoaded;
+        this._baseIdx = tail.baseIdx;
+        this._totalMessages = tail.totalMessages;
+        this._convSeq = tail.seq;
+    }
+
     ctx() {
         return { user: this.user, dbInstance: this.dbInstance, embedMessageAsync: DEPS.embedMessageAsync, log: DEPS.log() };
     }
     // nDB queries do NOT return live references — the conv/session objects held
     // here go stale when appendConversationMessage (or the old client) writes.
     // Re-read at every state-consuming point. (First acceptance bug, 2026-08-24.)
+    // The FULL load: any mutating or payload-assembling path needs the whole
+    // history, so refresh() always supersedes a partial tail.
     async refresh() {
         const { session, conv } = await convStore.loadSessionAndConversation(this.dbInstance.db, this.conversationId, this.user);
         this.session = session;
         this.conv = conv;
+        this._fullLoaded = true;
+        this._baseIdx = 0;
+        this._totalMessages = (conv.messages || []).length;
+        this._convSeq = null;
+    }
+
+    // A partially loaded runner must load the whole conversation before it can
+    // read, assemble or mutate history. Cheap no-op once full.
+    async ensureFull() {
+        if (this._fullLoaded) return;
+        await this.refresh();
     }
     scheduleIdle() {
         clearTimeout(this.idleTimer);
@@ -467,28 +505,10 @@ class Runner {
     }
 
     // View form (contract #1): densified attachments + {content, timestamp} split.
-    // Shallow copy: every field this projection rewrites (`attachments`,
-    // `content`, `timestamp`) is replaced, never mutated in place, and
-    // densifyAttachments returns new attachment objects — so no caller can
-    // reach back into the stored message, and a 5 MB history is not
-    // re-serialized through JSON per snapshot.
-    viewMessage(m) {
-        const cloned = { ...m };
-        if (cloned.attachments) cloned.attachments = convStore.densifyAttachments(cloned.attachments);
-        // Legacy data may still carry a stored prefix (pre-2026-08-31 form, or a
-        // model echo the old @-only strip missed). Accept the same separators
-        // api-view does, or the view renders the stale prefix above the text.
-        const match = typeof cloned.content === 'string'
-            ? cloned.content.match(/^\[(\d{4}-\d{2}-\d{2})[@T ](\d{2}:\d{2})(?::\d{2})?\]\s*/)
-            : null;
-        if (match) {
-            cloned.timestamp = new Date(`${match[1]}T${match[2]}:00`).getTime();
-            cloned.content = cloned.content.slice(match[0].length);
-        } else if (cloned.timestamp === undefined) {
-            cloned.timestamp = Date.parse(cloned.createdAt) || null;
-        }
-        cloned.content = canonicalizeStorageUrls(cloned.content, this._storageOrigin());
-        return cloned;
+    // Shared with GET /api/chats/:id/messages (conversation-store.viewMessage) so
+    // a paged older message renders exactly like a snapshot one.
+    viewMessage(m, absIdx) {
+        return convStore.viewMessage(m, absIdx, { storageOrigin: this._storageOrigin() });
     }
 
     // Storage-box origin for URL canonicalization — resolved once at init (the
@@ -503,15 +523,33 @@ class Runner {
         return this._storageOriginCache === undefined ? null : this._storageOriginCache;
     }
 
+    // The browser only ever renders a tail window — a 500-message conversation
+    // must not ship 500 messages on every attach. Absolute indexes are preserved
+    // (`baseIdx`) so the view can page older turns from
+    // GET /api/chats/:id/messages without a coordinate change.
+    _snapshotWindow() {
+        const all = this.conv.messages || [];
+        if (!this._fullLoaded) return { slice: all, baseIdx: this._baseIdx, totalMessages: this._totalMessages };
+        const totalMessages = all.length;
+        if (totalMessages <= TAIL_PAGE_SIZE) return { slice: all, baseIdx: 0, totalMessages };
+        let start = Math.max(0, totalMessages - TAIL_PAGE_SIZE);
+        const inflightIdx = this.inFlight?.idx;
+        if (typeof inflightIdx === 'number' && inflightIdx >= 0 && inflightIdx < start) start = inflightIdx;
+        // Same turn-boundary rule as the store: a window must not open mid-turn.
+        while (start > 0 && all[start].role !== 'user') start--;
+        return { slice: all.slice(start), baseIdx: start, totalMessages };
+    }
+
     async buildSnapshot() {
-        // init() just hydrated this runner (one session read + one conversation
-        // read). Re-reading here turned a cold mount into four full conversation
-        // transfers; the flag is consumed once, so every later warm snapshot
-        // still refreshes and sees writes made by other routes.
+        // init() just hydrated this runner; the flag is consumed once, so every
+        // later warm snapshot still re-reads state written by other routes — the
+        // tail while only a tail is loaded, the full document once it is.
         if (this._hydratedFresh) this._hydratedFresh = false;
-        else await this.refresh();
-        const messages = this.conv.messages;
-        const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
+        else if (this._fullLoaded) await this.refresh();
+        else await this._hydrate();
+        const { slice, baseIdx, totalMessages } = this._snapshotWindow();
+        const endsAtTail = baseIdx + slice.length === totalMessages;
+        const lastAssistant = [...slice].reverse().find(m => m.role === 'assistant' && (m.usage || m.context));
         // The pill means "how close am I to the limit" — the on-the-wire payload
         // (post retirement transform), NOT the raw stored history. Run
         // the same assembly a turn would, and count that, so load and live agree.
@@ -537,23 +575,25 @@ class Runner {
             if (this._countCache && this._countCache.key === cacheKey) {
                 used = this._countCache.realUsed;
                 raw = this._countCache.rawUsed;
-            } else if (lastAssistant?.context?.used_tokens != null && messages.lastIndexOf(lastAssistant) === messages.length - 1) {
+            } else if (lastAssistant?.context?.used_tokens != null && endsAtTail && slice.lastIndexOf(lastAssistant) === slice.length - 1) {
                 // Zero-tiktoken attach: the last assistant turn persisted the
                 // exact context shape the view renders, counted from the payload
                 // that turn sent. With nothing appended since, it IS the freshest
                 // reading available — painting it costs no CPU at all.
                 realContext = lastAssistant.context;
-            } else if (approximatePayloadChars(messages) <= SNAPSHOT_COUNT_CHAR_BUDGET) {
+            } else if (this._fullLoaded && approximatePayloadChars(this.conv.messages) <= SNAPSHOT_COUNT_CHAR_BUDGET) {
+                // Never assemble a payload from a partial tail: the count has to
+                // describe the whole history the next turn sends.
                 const { apiMessages, rawMessages } = await this._assemblePayload();
                 used = countApiMessages(apiMessages, this.session.model, tools);
                 raw = rawMessages === apiMessages ? used : countApiMessages(rawMessages, this.session.model, tools);
                 this._countCache = { key: cacheKey, realUsed: used, rawUsed: raw };
             } else {
-                // Large history, no cached count, nothing persisted to reuse:
-                // skip the tiktoken pass and leave the pill without a fresh
-                // reading rather than stall the snapshot. Said out loud so a
-                // missing number is traceable, never a mystery.
-                DEPS.log().debug('Snapshot context count skipped (large history)', { chatId: this.conversationId, messages: messages.length }, 'Runner');
+                // Large history (or only a tail loaded), no cached count, nothing
+                // persisted to reuse: skip the tiktoken pass and leave the pill
+                // without a fresh reading rather than stall the snapshot. Said out
+                // loud so a missing number is traceable, never a mystery.
+                DEPS.log().debug('Snapshot context count skipped (large history)', { chatId: this.conversationId, messages: totalMessages, fullLoaded: this._fullLoaded }, 'Runner');
             }
             // A large unpainted history falls through to the persisted context
             // below — an undercount bounded by the turns since that reading,
@@ -587,7 +627,11 @@ class Runner {
                 // can show WHICH chunks the model retired + read each distillation.
                 retirements: this.session.retirements || {}
             },
-            messages: this.conv.messages.map(m => this.viewMessage(m)),
+            messages: slice.map((m, i) => this.viewMessage(m, baseIdx + i)),
+            baseIdx,
+            totalMessages,
+            hasMore: baseIdx > 0,
+            convSeq: this._convSeq,
             appEvents: Array.isArray(this.conv.appEvents) ? this.conv.appEvents : [],
             inFlight: this.inFlight ? this.inFlightView() : null,
             running: this.running,
@@ -1393,7 +1437,10 @@ class Runner {
                 queryInstruct: DEPS.queryInstruct,
                 relevanceFloor: DEPS.relevanceFloor,
                 embedBatch: DEPS.embedBatch,
-                embedAvailable: DEPS.getEmbedAvailable ? DEPS.getEmbedAvailable() : true
+                embedAvailable: DEPS.getEmbedAvailable ? DEPS.getEmbedAvailable() : true,
+                onNvdbError: DEPS.onNvdbError
+                    ? (err) => DEPS.onNvdbError(this.dbInstance, err, 'searchArchive')
+                    : null
             },
             getRetirements: async () => {
                 await this.refresh();

@@ -18,8 +18,13 @@
  *   PATCH  /v2/dbs/:n/doc/:id             -> { ok, applied, seq, doc }  (transactional ops)
  *   DELETE /v2/dbs/:n/doc/:id             -> { ok, deleted, seq }
  *   POST   /v2/dbs/:n/doc/:id/restore     -> { ok, doc, seq }
+ *   POST   /v2/dbs/:n/doc/:id/peek        -> { ok, id, seq, doc, ranges }  (v3 seq-pinned read)
  *   POST   /v2/dbs/:n/docs/mget           -> { ok, docs: { id: doc }, missing: [id] }
  *   POST   /v2/dbs/:n/query               -> { ok, total, count, results, took_ms }
+ *   POST   /v2/dbs/:n/search              -> { ok, total, count, results, took_ms,
+ *                                              scanned_docs, used_indexes, next_cursor }
+ *   GET    /v2/dbs/:n/schema              -> { ok, schema }
+ *   PUT    /v2/dbs/:n/schema              -> { ok, schema }
  *   POST   /v2/dbs/:n/find                -> { ok, count, results, took_ms }
  *   POST   /v2/dbs/:n/facets              -> { ok, facets }
  *   POST   /v2/dbs/:n/index               -> { ok, index, type }
@@ -254,6 +259,67 @@ function createNdbClient(baseUrl, { token = null, timeoutMs = 30_000 } = {}) {
             async restore(id) {
                 const r = await request('POST', `${base}/doc/${encodeURIComponent(id)}/restore`);
                 return { doc: r.doc, seq: r.seq };
+            },
+
+            /**
+             * POST /doc/:id/peek -> { id, seq, doc, ranges }.
+             * A `seq`-pinned partial read. The engine rejects unknown body keys
+             * (`deny_unknown_fields`), so only the keys the caller actually
+             * asked for are sent.
+             */
+            async peek(id, { fields, textRanges, arraySlices, expectedSeq } = {}) {
+                const body = {};
+                if (fields !== undefined) body.fields = fields;
+                if (textRanges !== undefined) body.text_ranges = textRanges;
+                if (arraySlices !== undefined) body.array_slices = arraySlices;
+                if (expectedSeq !== undefined) body.expected_seq = expectedSeq;
+                const r = await request('POST', `${base}/doc/${encodeURIComponent(id)}/peek`, { json: body });
+                return { id: r.id, seq: r.seq, doc: r.doc, ranges: r.ranges || {} };
+            },
+
+            /**
+             * POST /search -> text-matching page.
+             * `text` is required by the engine; `textFields` narrows the scan to
+             * named fields. Cursor paging (`nextCursor`) is what makes a bounded
+             * scan resumable — v3 (RAM-first) databases only.
+             */
+            async searchText({ query, textFields, filter, sort, sortKeys, fields, limit, offset, cursor, maxScanDocs } = {}) {
+                if (typeof query !== 'string' || !query.trim()) {
+                    throw new TypeError('searchText: query must be a non-empty string');
+                }
+                const body = { text: textFields ? { query, fields: textFields } : { query } };
+                if (filter !== undefined) body.filter = filter;
+                if (sort !== undefined) body.sort = sort;
+                if (sortKeys !== undefined) body.sort_keys = sortKeys;
+                if (fields !== undefined) body.fields = fields;
+                if (limit !== undefined) body.limit = limit;
+                if (offset !== undefined) body.offset = offset;
+                if (cursor !== undefined) body.cursor = cursor;
+                if (maxScanDocs !== undefined) body.max_scan_docs = maxScanDocs;
+                const r = await request('POST', `${base}/search`, { json: body });
+                return {
+                    data: r.results || [],
+                    total: r.total ?? 0,
+                    count: r.count ?? (r.results?.length || 0),
+                    tookMs: r.took_ms ?? 0,
+                    scannedDocs: r.scanned_docs ?? 0,
+                    nextCursor: r.next_cursor || null
+                };
+            },
+
+            /** GET /schema -> { classification_profile, field_mapping, indexes } */
+            async getSchema() {
+                const r = await request('GET', `${base}/schema`);
+                return r.schema;
+            },
+
+            /** PUT /schema -> the replaced schema (`{ field_mapping: [...] }`) */
+            async setFieldMapping(fieldMapping) {
+                if (!Array.isArray(fieldMapping)) {
+                    throw new TypeError('setFieldMapping: fieldMapping must be an array');
+                }
+                const r = await request('PUT', `${base}/schema`, { json: { field_mapping: fieldMapping } });
+                return r.schema;
             },
 
             /**

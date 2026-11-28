@@ -119,6 +119,29 @@ test('runner persists and deduplicates issued app events, then consumes them onl
             const results = await this.findAll(field, value);
             return { count: results.length, results };
         },
+        // Engine peek contract: named fields only (never "all fields"), plus
+        // sliced arrays with range metadata.
+        async peek(id, { fields = null, arraySlices = [] } = {}) {
+            const doc = docs.find(entry => entry._id === id);
+            if (!doc) throw new Error(`not_found: ${id}`);
+            const out = { _id: doc._id };
+            for (const field of fields || []) {
+                if (field === '_id' || doc[field] === undefined) continue;
+                out[field] = structuredClone(doc[field]);
+            }
+            const ranges = {};
+            for (const spec of arraySlices) {
+                const arr = doc[spec.path] || [];
+                const end = Math.min(arr.length, spec.offset + spec.limit);
+                const slice = spec.offset < end ? structuredClone(arr.slice(spec.offset, end)) : [];
+                out[spec.path] = slice;
+                ranges[spec.path] = {
+                    offset: spec.offset, returned: slice.length, total: arr.length,
+                    has_more: spec.offset + slice.length < arr.length, next_offset: spec.offset + slice.length
+                };
+            }
+            return { id: doc._id, seq: 0, doc: out, ranges };
+        },
         async patch(id, ops) {
             const doc = docs.find(entry => entry._id === id);
             for (const op of ops) {

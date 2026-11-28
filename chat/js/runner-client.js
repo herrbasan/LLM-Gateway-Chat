@@ -182,6 +182,13 @@ function editMessage(chatId, messageId, content) {
     return _api('PATCH', `/api/chats/${chatId}/messages/${encodeURIComponent(messageId)}`, { content });
 }
 
+// One backward page of older messages (the snapshot carries only the tail of a
+// long conversation). `beforeIdx` is the absolute index the page ends at.
+// → { status, ok, data: { messages, baseIdx, endIdx, totalMessages, hasMore, seq } }
+function loadOlderMessages(chatId, beforeIdx, limit = 50) {
+    return _api('GET', `/api/chats/${encodeURIComponent(chatId)}/messages?before=${beforeIdx}&limit=${limit}`);
+}
+
 // Attach to the user-level list stream. handlers maps event name → callback(data).
 // Shares the same single EventSource as the per-chat view. Long-lived for the
 // page — the sidebar must track new chats created on another device.
@@ -191,4 +198,4 @@ function attachListEvents(handlers = {}) {
     return { close: () => { listHandlers.delete(handlers); } };
 }
 
-export const runnerClient = { attach, send, abort, retry, deleteMessage, editMessage, attachListEvents, onAuthError, onOfflineChange };
+export const runnerClient = { attach, send, abort, retry, deleteMessage, editMessage, loadOlderMessages, attachListEvents, onAuthError, onOfflineChange };

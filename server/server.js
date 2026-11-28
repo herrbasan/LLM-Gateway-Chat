@@ -7,7 +7,7 @@ const { Readable } = require('stream');
 const { EventEmitter } = require('events');
 
 const { createNdbClient, NdbError } = require('./ndb-client');
-const { createNvdbSync } = require('./nvdb-sync');
+const { createNvdbSync, createVectorDrainer } = require('./nvdb-sync');
 const nLogger = require('../lib/nlogger-cjs');
 const convStore = require('./conversation-store');
 const runner = require('./runner');
@@ -24,7 +24,7 @@ const {
     EMBED_REQUEST_TOKENS: DEFAULT_EMBED_REQUEST_TOKENS,
     EMBED_MAX_CONCURRENCY
 } = require('./embed');
-const { createV2Client, NvdbHttpError } = require('./nvdb-v2-client');
+const { createV2Client, NvdbHttpError, isNvdbUnavailableError } = require('./nvdb-v2-client');
 const { documentHashes } = require('./nvdb-v2-hash');
 const {
     DEFAULT_QUERY_INSTRUCT,
@@ -175,7 +175,27 @@ const activeDbs = new Map();
 // once by initNvdb() before the listener opens, so nothing reads them early.
 let nvdbClient = null;
 let nvdbRerankerLoaded = false;
+// nVDB is a MIRROR of nDB, not the system of record: while it is unreachable
+// every post-commit mirror call degrades (logged, generation-marked) and the
+// watchdog reconciles once it answers again. Searches fall back to nDB text.
+let nvdbOnline = false;
+const NVDB_WATCHDOG_MS = 15_000;
+const NVDB_HEALTH_TIMEOUT_MS = 3_000;
+let nvdbWatchdogRunning = false;
 let modelsProxyCache = null; // { at, data } — 60 s cache for GET /api/models
+
+// A post-commit mirror failure never fails the already-persisted nDB write: it
+// logs, marks nVDB offline when the error means "unreachable", and bumps the
+// instance's dirty generation so the watchdog re-reconciles on recovery.
+function markNvdbFailure(instance, err, context) {
+    L().warn('nVDB unavailable — continuing from nDB', {
+        context,
+        db: instance?.dbName || null,
+        error: err?.message || String(err)
+    }, 'Server');
+    if (isNvdbUnavailableError(err)) nvdbOnline = false;
+    if (instance) instance.nvdbDirtyGen = (instance.nvdbDirtyGen || 0) + 1;
+}
 
 // Idempotent indexes: every hot lookup filter gets a hash index; sorts use a
 // btree so Rust paginates without a full scan. Returns true if any index was
@@ -447,7 +467,12 @@ setInterval(async () => {
             }
             if (item) {
                 instance.pendingQueue.splice(itemIdx, 1);
-                embedMessageAsync(instance, item.msg, item.session, item.convNdbId, item.msgIdx, item.failCount || 0).catch(() => {});
+                embedMessageAsync(instance, item.msg, item.session, item.convNdbId, item.msgIdx, item.failCount || 0)
+                    .catch(err => {
+                        // embedMessageAsync already logged/re-queued the failure;
+                        // only an nVDB outage needs the watchdog's bookkeeping.
+                        if (isNvdbUnavailableError(err)) markNvdbFailure(instance, err, 'embedMessageAsync retry');
+                    });
             }
         }
     }
@@ -534,7 +559,9 @@ function getOrLoadUserDb(user) {
         embedInFlight: 0,
         embedWaiters: [],
         drainRunning: false,
-        reconcileRunning: null
+        reconcileRunning: null,
+        nvdbDirtyGen: 0,
+        nvdbSyncedGen: 0
     };
 
     activeDbs.set(user.id, instance);
@@ -545,6 +572,10 @@ function getOrLoadUserDb(user) {
     // (herrbasan/nVDB#3 keeps them queued).
     if (instance.nvdbClient) {
         setTimeout(() => reconcileUserNvdb(instance).catch(err => {
+            if (isNvdbUnavailableError(err)) {
+                markNvdbFailure(instance, err, 'mount reconcile');
+                return;
+            }
             logger.error('nVDB reconciliation failed', err, { userId: user.id, db: name }, 'Server');
         }), 3000);
     }
@@ -588,143 +619,26 @@ const nvdbSync = createNvdbSync({
 });
 const reconcileUserNvdb = nvdbSync.reconcileUserNvdb;
 
-async function drainPendingVectors(instance, syncResult) {
-    const { nvdbClient: client, userId, db } = instance;
-    const collection = instance.nvdbCollection;
-    const prefix = `${userId}:`;
-
-    if (!embedAvailable) return;
-    const probe = await client.pendingEmbeddings(collection, 256);
-    const hasOwnWork = (probe?.pending || []).some(item => typeof item?.id === 'string' && item.id.startsWith(prefix));
-    if (!hasOwnWork) {
-        logger.info('nVDB sync complete', { userId, db: instance.dbName, mode: syncResult?.mode, pending: 0 }, 'Embed');
-        return;
-    }
-
-    const { byId } = await buildUserExpectedDocs({ userId, db, chunkOpts: NVDB_CHUNK_OPTS });
-    const existing = await userFingerprints(instance);
-
-    if (instance.drainRunning) return;
-    instance.drainRunning = true;
-    try {
-        const expectedChunks = new Map();
-        const attachedCounts = new Map();
-        for (const [id, rec] of byId) {
-            const key = `${rec.session.id}\u0000${rec.msgIdx}`;
-            const cur = expectedChunks.get(key);
-            if (cur) cur.count++;
-            else expectedChunks.set(key, { count: 1, convNdbId: rec.convNdbId, msgId: rec.msg?.id || null, sessionId: rec.session.id, msgIdx: rec.msgIdx });
-            const known = existing.get(id);
-            if (known && known.has_vector === true && known.envelope_hash === rec.envelope_hash) {
-                attachedCounts.set(key, (attachedCounts.get(key) || 0) + 1);
-            }
-        }
-        let lastPendingKey = null;
-
-        for (;;) {
-            if (!embedAvailable) break;
-            const res = await client.pendingEmbeddings(collection, 256);
-            const pending = Array.isArray(res?.pending) ? res.pending : [];
-            // Only this user's items, and only those whose stored text still matches.
-            const work = [];
-            for (const item of pending) {
-                const rec = byId.get(item?.id);
-                if (!rec) continue;
-                if (item.content_hash && item.content_hash !== rec.content_hash) continue;
-                work.push({ id: item.id, content_hash: rec.content_hash, doc: rec.doc });
-            }
-            if (work.length === 0) break;
-            // A batch the service keeps re-reporting never drains (it rejected
-            // some ids) — stop instead of spinning on it.
-            const pendingKey = work.map(w => w.id).join(',');
-            if (pendingKey === lastPendingKey) {
-                logger.warn('nVDB drain made no progress — stopping', { userId, pending: work.length }, 'Embed');
-                break;
-            }
-            lastPendingKey = pendingKey;
-
-            const attachments = [];
-            for (let i = 0; i < work.length; i += 8) {
-                const slice = work.slice(i, i + 8);
-                await acquireEmbedSlot(instance);
-                let vectors;
-                try {
-                    vectors = await embedBatch(slice.map(w => buildChatVectorInput(w.doc)));
-                } finally {
-                    releaseEmbedSlot(instance);
-                }
-                for (let j = 0; j < slice.length; j++) {
-                    const vector = vectors[j];
-                    if (!Array.isArray(vector) || vector.length !== EMBEDDING_DIMS) {
-                        throw new EmbedError('response', `invalid_vector_shape (${slice[j].id})`);
-                    }
-                    attachments.push({
-                        id: slice[j].id,
-                        content_hash: slice[j].content_hash,
-                        model_version: EMBED_MODEL_VERSION,
-                        vector
-                    });
-                }
-                if (attachments.length >= 256) {
-                    if (!(await attachVectorsQuietly(instance, attachments))) return;
-                    countAttached(attachments, attachedCounts);
-                    attachments.length = 0;
-                }
-            }
-            if (attachments.length > 0) {
-                if (!(await attachVectorsQuietly(instance, attachments))) return;
-                countAttached(attachments, attachedCounts);
-            }
-        }
-
-        // A message is only 'embedded' once every one of its chunks has a vector.
-        // Skip writes when nDB already matches so a clean mount stays write-free.
-        const convCache = new Map();
-        const opsByConv = new Map();
-        for (const [key, info] of expectedChunks) {
-            if ((attachedCounts.get(key) || 0) < info.count) continue;
-            if (!info.convNdbId || !info.msgId) continue;
-            let conv = convCache.get(info.sessionId);
-            if (conv === undefined) {
-                conv = (await instance.db.findAll('id', info.sessionId)).find(d => d._type === 'conversation') || null;
-                convCache.set(info.sessionId, conv);
-            }
-            const stored = conv?.messages?.[info.msgIdx];
-            if (!stored || stored.id !== info.msgId) continue;
-            if (stored.embedStatus === 'embedded' && stored.embedChunks === info.count && !stored.embedError) continue;
-            const ops = opsByConv.get(info.convNdbId) || [];
-            ops.push(
-                { op: 'set', path: `messages.${info.msgIdx}.embedStatus`, value: 'embedded' },
-                { op: 'set', path: `messages.${info.msgIdx}.embedChunks`, value: info.count },
-                { op: 'set', path: `messages.${info.msgIdx}.embedError`, value: null }
-            );
-            opsByConv.set(info.convNdbId, ops);
-        }
-        let marked = 0;
-        for (const [convNdbId, ops] of opsByConv) {
-            try {
-                await instance.db.patch(convNdbId, ops);
-                marked += ops.length / 3;
-            } catch (err) {
-                // The message was deleted between the read and the write: the
-                // mark is moot, but the rejection stays visible.
-                logger.warn('Embed status mark skipped', { userId, convNdbId, error: err.message }, 'Embed');
-            }
-        }
-        if (marked > 0) logger.info('nVDB reconciliation marked messages embedded', { userId, marked }, 'Embed');
-    } finally {
-        instance.drainRunning = false;
-    }
-}
-
-function countAttached(attachments, counts) {
-    for (const att of attachments) {
-        const parsed = parseChatChunkId(att.id, undefined);
-        if (!parsed) continue;
-        const key = `${parsed.sessionId}\u0000${parsed.msgIdx}`;
-        counts.set(key, (counts.get(key) || 0) + 1);
-    }
-}
+// The real drain (the one the timers, afterSync and the tests call). It lives
+// in ./nvdb-sync.js so a test can exercise this exact function with stub embed
+// deps — the #69 bug was a bare `userFingerprints` reference in a copy of this
+// loop that only existed here.
+const drainPendingVectors = createVectorDrainer({
+    buildUserExpectedDocs,
+    userFingerprints: nvdbSync.userFingerprints,
+    acquireEmbedSlot,
+    releaseEmbedSlot,
+    embedBatch,
+    attachVectorsQuietly,
+    isEmbedAvailable: () => embedAvailable,
+    buildChatVectorInput,
+    parseChatChunkId,
+    embeddingDims: EMBEDDING_DIMS,
+    embedModelVersion: EMBED_MODEL_VERSION,
+    log: () => L(),
+    onNvdbError: (instance, err, context) => markNvdbFailure(instance, err, context),
+    isNvdbUnavailableError
+});
 
 // Embed event bus — SSE clients subscribe to receive real-time embed status updates
 const embedEvents = new EventEmitter();
@@ -783,6 +697,7 @@ runner.init({
     getNvdbClient: () => nvdbClient,
     nvdbCollection: NVDB_COLLECTION,
     getRerankerLoaded: () => nvdbRerankerLoaded,
+    onNvdbError: (instance, err, context) => markNvdbFailure(instance, err, context),
     queryInstruct: QUERY_INSTRUCT,
     relevanceFloor: RELEVANCE_FLOOR,
     // Multiplexing (issue #19): forward every runner event into the user-level
@@ -794,6 +709,7 @@ runner.init({
     }
 });
 internalTools.init({ log: L, emitListEvent });
+convStore.init({ onNvdbError: (instance, err, context) => markNvdbFailure(instance, err, context) });
 require('./storage-tools').init({ log: L(), storageRoot: MCP_STORAGE_PATH });
 embedEvents.on('status', runner.handleEmbedStatus);
 mcpPool.init({
@@ -1288,6 +1204,7 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
         // nVDB itself is the failing dependency here — retry the whole message
         // (lexical + vector) on the same backoff schedule as an embed failure.
         L().error('nVDB lexical upsert failed', err, { msgId: msg.id, chatId: session.id, idx: msgIdx }, 'Embed');
+        markNvdbFailure(instance, err, 'embedMessageAsync');
         queueEmbedRetry(instance, { msg, session, convNdbId, msgIdx }, _prevFails);
         throw err;
     }
@@ -1336,6 +1253,7 @@ async function embedMessageAsync(instance, msg, session, convNdbId, msgIdx, _pre
                     L().debug('Embed superseded (stale_vector_cas)', { msgId: msg.id, chatId: session.id, idx: msgIdx, chunks: docs.length }, 'Embed');
                     return;
                 }
+                markNvdbFailure(instance, err, 'embedMessageAsync');
                 throw err;
             }
 
@@ -2207,6 +2125,46 @@ const routes = {
     json(res, { session, messages }, 200, req);
   },
   
+  // Backward pagination for long conversations (Track 2a): the snapshot carries
+  // only the tail window, so the view pages older turns from here. One
+  // `_id`-only query for the document id, then a peeked slice — the multi-MB
+  // conversation body never crosses the wire.
+  'GET /api/chats/:id/messages': async (req, res, params) => {
+    const authResult = requireAuth(req, res);
+    if (!authResult) return;
+    const { dbInstance } = authResult;
+    const { db } = dbInstance;
+
+    const url = new URL(req.url, 'http://localhost');
+    const beforeRaw = url.searchParams.get('before');
+    const before = beforeRaw === null || beforeRaw.trim() === '' ? NaN : Number(beforeRaw);
+    if (!Number.isInteger(before) || before < 0) {
+      json(res, { error: 'before must be a non-negative integer' }, 400, req);
+      return;
+    }
+    const limitRaw = url.searchParams.get('limit');
+    const limit = limitRaw === null || limitRaw.trim() === '' ? convStore.TAIL_PAGE_SIZE : Number(limitRaw);
+
+    try {
+      const convId = await convStore.findConversationId(db, params.id);
+      if (!convId) {
+        json(res, { error: 'Conversation not found' }, 404, req);
+        return;
+      }
+      const page = await convStore.loadConversationPage(db, convId, { before, limit });
+      json(res, {
+        messages: page.messages.map((m, i) => convStore.viewMessage(m, page.baseIdx + i)),
+        baseIdx: page.baseIdx,
+        endIdx: page.endIdx,
+        totalMessages: page.totalMessages,
+        hasMore: page.hasMore,
+        seq: page.seq
+      }, 200, req);
+    } catch (e) {
+      json(res, { error: e.message }, 400, req);
+    }
+  },
+
   // Create session
   'POST /api/chats': async (req, res) => {
     const authResult = requireAuth(req, res);
@@ -2573,7 +2531,15 @@ const routes = {
       }
 
       if (idsToDelete.length > 0 && dbInstance.nvdbClient) {
-        await dbInstance.nvdbClient.deleteIds(NVDB_COLLECTION, idsToDelete, { commit: true });
+        try {
+          await dbInstance.nvdbClient.deleteIds(NVDB_COLLECTION, idsToDelete, { commit: true });
+        } catch (err) {
+          // The nDB delete is already done; an nVDB outage must not turn a
+          // successful deletion into a 500. The chunks are orphaned until the
+          // seq-sync delete sweep purges them (reconcile + forceVerify rebuild).
+          if (!isNvdbUnavailableError(err)) throw err;
+          markNvdbFailure(dbInstance, err, 'chatDelete');
+        }
       }
       
       const messages = await db.findAll('sessionId', params.id);
@@ -2613,6 +2579,7 @@ const routes = {
       relevanceFloor: RELEVANCE_FLOOR,
       embedBatch,
       embedAvailable,
+      onNvdbError: (err) => markNvdbFailure(dbInstance, err, 'searchArchive'),
       log: L()
     });
     json(res, data, 200, req);
@@ -2934,27 +2901,106 @@ const server = http.createServer(async (req, res) => {
 // First-ever upgrade handling on this server — see stt-relay.js for the splice.
 server.on('upgrade', (req, socket, head) => stt.handleUpgrade(req, socket, head));
 
-// nVDB v2 is a hard dependency: a missing index or a missing reranker degrades
-// every search to noise, so startup fails loud instead of listening anyway.
-async function initNvdb() {
-    nvdbClient = createV2Client(NVDB_URL, { timeoutMs: 30_000 });
-    const nvdbHealth = await nvdbClient.health();
-    if (!nvdbHealth?.ok) {
-        throw new Error(`nvdb serve unhealthy at ${NVDB_URL}: ${JSON.stringify(nvdbHealth)}`);
+// nVDB v2 is a MIRROR: a missing index or reranker degrades search quality, and
+// an unreachable service degrades to nDB-only — it no longer stops the process.
+// The watchdog below reconnects and reconciles what was written meanwhile.
+async function ensureNvdbCollection({ requireReranker = false } = {}) {
+    const health = await nvdbClient.health({ timeoutMs: NVDB_HEALTH_TIMEOUT_MS });
+    if (!health?.ok) {
+        throw new Error(`nvdb serve unhealthy at ${NVDB_URL}: ${JSON.stringify(health)}`);
     }
-    if (!nvdbHealth.reranker_loaded) {
+    if (requireReranker && !health.reranker_loaded) {
         throw new Error(`nvdb serve at ${NVDB_URL} has reranker_loaded=false — start with --reranker-model`);
     }
-    nvdbRerankerLoaded = true;
+    if (!health.reranker_loaded) {
+        L().warn('nvdb serve has reranker_loaded=false — Level-2 rerank disabled', { url: NVDB_URL }, 'Server');
+    }
+    nvdbRerankerLoaded = Boolean(health.reranker_loaded);
     await nvdbClient.createCollection(NVDB_COLLECTION, chatCollectionConfig({
         embedDims: EMBEDDING_DIMS,
         embedModelVersion: EMBED_MODEL_VERSION
     }));
-    L().info('nVDB v2 connected', { url: NVDB_URL, collection: NVDB_COLLECTION, rerankerLoaded: nvdbRerankerLoaded }, 'Server');
+    return health;
 }
 
-// Start HTTP server — only once nDB v2 answered, users_db is mounted and nVDB v2
-// is ready. Both are hard dependencies; a failure here stops the process.
+async function initNvdb() {
+    nvdbClient = createV2Client(NVDB_URL, { timeoutMs: 30_000 });
+    try {
+        await ensureNvdbCollection({ requireReranker: true });
+        nvdbOnline = true;
+        L().info('nVDB v2 connected', { url: NVDB_URL, collection: NVDB_COLLECTION, rerankerLoaded: nvdbRerankerLoaded }, 'Server');
+    } catch (err) {
+        if (!isNvdbUnavailableError(err)) throw err;
+        nvdbOnline = false;
+        L().error('nVDB unreachable at startup — running in nDB-only degraded mode; watchdog will auto-connect and reconcile', err, {
+            url: NVDB_URL,
+            collection: NVDB_COLLECTION
+        }, 'Server');
+    }
+}
+
+// Single-flight watchdog: reconnect, then repair every mounted user slice on
+// recovery; while online, drain the dirty generations left by failed mirrors.
+setInterval(async () => {
+    if (nvdbWatchdogRunning) return;
+    nvdbWatchdogRunning = true;
+    try {
+        if (!nvdbOnline) {
+            let health;
+            try {
+                health = await nvdbClient?.health({ timeoutMs: NVDB_HEALTH_TIMEOUT_MS });
+            } catch (err) {
+                return; // still down — markNvdbFailure already recorded it
+            }
+            if (!health?.ok) return;
+            // A transient failure here must not kill the interval callback — the
+            // handle stays offline and the next tick retries cleanly.
+            try {
+                await ensureNvdbCollection();
+            } catch (err) {
+                L().warn('nVDB watchdog recovery attempt failed — staying offline, retrying next tick', err, {
+                    url: NVDB_URL,
+                    collection: NVDB_COLLECTION
+                }, 'Server');
+                return;
+            }
+            nvdbOnline = true;
+            L().info('nVDB recovered — reconciling mounted user DBs', { url: NVDB_URL, collection: NVDB_COLLECTION }, 'Server');
+            for (const instance of activeDbs.values()) {
+                if (!instance.nvdbClient) continue;
+                const gen = instance.nvdbDirtyGen;
+                try {
+                    await reconcileUserNvdb(instance, { forceVerify: true });
+                    instance.nvdbSyncedGen = Math.max(instance.nvdbSyncedGen, gen);
+                } catch (err) {
+                    if (isNvdbUnavailableError(err)) markNvdbFailure(instance, err, 'nvdbWatchdog recovery');
+                    else L().error('nVDB recovery reconcile failed', err, { userId: instance.userId, db: instance.dbName }, 'Server');
+                }
+            }
+            return;
+        }
+        for (const instance of activeDbs.values()) {
+            if (!instance.nvdbClient) continue;
+            if (instance.nvdbDirtyGen <= instance.nvdbSyncedGen) continue;
+            if (instance.reconcileRunning) continue;
+            const gen = instance.nvdbDirtyGen;
+            try {
+                await reconcileUserNvdb(instance);
+                instance.nvdbSyncedGen = Math.max(instance.nvdbSyncedGen, gen);
+            } catch (err) {
+                // Bumping the generation on a non-outage error would retry the
+                // same failing reconcile forever; log it and leave the gen alone.
+                if (isNvdbUnavailableError(err)) markNvdbFailure(instance, err, 'nvdbWatchdog');
+                else L().error('nVDB watchdog reconcile failed', err, { userId: instance.userId, db: instance.dbName }, 'Server');
+            }
+        }
+    } finally {
+        nvdbWatchdogRunning = false;
+    }
+}, NVDB_WATCHDOG_MS).unref();
+
+// Start HTTP server — only once nDB v2 answered and users_db is mounted. nVDB is
+// a mirror and may be down (degraded mode + watchdog); nDB is the record.
 startBackend()
   .then(() => initNvdb())
   .then(() => {

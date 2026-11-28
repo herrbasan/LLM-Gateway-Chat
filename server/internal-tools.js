@@ -16,6 +16,7 @@ const { formatMessageTs } = require('./api-view');
 const { preflightPreviewUrl } = require('./preview-content');
 const { openHostedApp } = require('./hosted-apps');
 const { resolveSearchOptions, describeSearchOptions } = require('./nvdb-search-options');
+const { isNvdbUnavailableError } = require('./nvdb-v2-client');
 const {
     DEFAULT_QUERY_INSTRUCT,
     DEFAULT_RELEVANCE_FLOOR,
@@ -80,6 +81,147 @@ function isSearchEligible(msg, explicitRole) {
     return !LEGACY_NON_KNOWLEDGE_ROLES.has(msg.role);
 }
 
+// The nDB-only search lane: when nVDB is unreachable the system of record still
+// holds every message, so `searchText` (nDB v3 text scan) answers instead of the
+// search failing. Bounded by an explicit scan/paging budget — `truncated` says
+// the cursor was abandoned before the corpus was exhausted.
+const NDB_FALLBACK_MAX_PAGES = 50;
+const NDB_FALLBACK_PAGE_DOCS = 200;
+const NDB_FALLBACK_MAX_SCAN_DOCS = 10_000;
+
+function countOccurrences(haystack, needle) {
+    if (!needle) return 0;
+    let count = 0;
+    let at = haystack.indexOf(needle);
+    while (at !== -1) {
+        count++;
+        at = haystack.indexOf(needle, at + needle.length);
+    }
+    return count;
+}
+
+async function searchNdbFallback({ db, query, limit, explicitRole, mode, minTs, maxTs, searchType, nvdbError }) {
+    const lowerQuery = query.toLowerCase();
+    const tokens = lowerQuery.split(/\s+/).filter(Boolean);
+
+    // Session metadata (title/mode/createdAt) lives on the session doc; the
+    // conversation doc supplies the messages. Both are in nDB, so one bounded
+    // projection pass covers it.
+    const sessions = await db.queryAll({
+        filter: { _type: 'session' },
+        fields: ['id', 'title', 'mode', 'createdAt']
+    });
+    const sessionById = new Map(sessions.map(s => [s.id, s]));
+
+    const conversations = [];
+    let cursor;
+    let pages = 0;
+    let truncated = false;
+    for (;;) {
+        let page;
+        try {
+            page = await db.searchText({
+                query,
+                filter: { _type: 'conversation' },
+                maxScanDocs: NDB_FALLBACK_MAX_SCAN_DOCS,
+                limit: NDB_FALLBACK_PAGE_DOCS,
+                cursor
+            });
+        } catch (err) {
+            // The engine's own scan ceiling. The matches gathered so far are real
+            // — return them flagged `truncated` instead of failing the whole search.
+            if (err?.code === 'scan_budget_exceeded' || (err?.status === 422 && /scan_budget/i.test(`${err.code || ''} ${err.message || ''}`))) {
+                LOG.warn('nDB text search hit its scan budget — returning partial results', {
+                    query: query.slice(0, 80),
+                    pages,
+                    documents: conversations.length
+                }, 'Search');
+                truncated = true;
+                break;
+            }
+            throw err;
+        }
+        conversations.push(...page.data);
+        pages++;
+        cursor = page.nextCursor;
+        if (!cursor) break;
+        if (pages >= NDB_FALLBACK_MAX_PAGES || conversations.length >= NDB_FALLBACK_MAX_SCAN_DOCS) {
+            truncated = true;
+            break;
+        }
+    }
+
+    const matches = [];
+    const wantedMode = mode && mode !== 'all' ? normalizeMode(mode) : null;
+    for (const conv of conversations) {
+        const session = sessionById.get(conv.id) || conv;
+        if (wantedMode && normalizeMode(session.mode) !== wantedMode) continue;
+        if (!Array.isArray(conv.messages)) continue;
+        conv.messages.forEach((msg, idx) => {
+            if (!isSearchEligible(msg, explicitRole)) return;
+            if (explicitRole && msg.role !== explicitRole) return;
+            const ts = toUnixSeconds(msg.createdAt);
+            if (minTs !== null && (ts === null || ts < minTs)) return;
+            if (maxTs !== null && (ts === null || ts > maxTs)) return;
+
+            const content = String(msg.content ?? '');
+            const lower = content.toLowerCase();
+            // Every token must appear: a multi-word query is a conjunction here.
+            if (!tokens.every(token => lower.includes(token))) return;
+
+            const phrase = lower.includes(lowerQuery) ? 1 : 0;
+            const hits = tokens.reduce((sum, token) => sum + countOccurrences(lower, token), 0);
+            const recencyMs = Date.parse(msg.createdAt || session.createdAt || '') || 0;
+            matches.push({
+                score: phrase * 10 + hits + recencyMs / 1e13,
+                sessionSort: recencyMs,
+                message: {
+                    id: msg.id,
+                    idx: msg.idx ?? idx,
+                    role: msg.role,
+                    model: msg.model,
+                    content: content.slice(0, 300),
+                    createdAt: msg.createdAt
+                },
+                session: sessionById.get(conv.id)
+                    ? {
+                        id: session.id,
+                        title: session.title,
+                        mode: session.mode,
+                        createdAt: session.createdAt
+                    }
+                    : null
+            });
+        });
+        if (matches.length >= NDB_FALLBACK_MAX_SCAN_DOCS) {
+            truncated = true;
+            break;
+        }
+    }
+
+    matches.sort((a, b) => (b.score - a.score) || (b.sessionSort - a.sessionSort));
+    const results = matches.slice(0, limit).map(({ score, message, session }) => ({ score, message, session }));
+
+    LOG.warn('Search served from nDB text fallback (nVDB unavailable)', {
+        query: query.slice(0, 80),
+        results: results.length,
+        truncated,
+        error: nvdbError?.message
+    }, 'Search');
+
+    return {
+        results,
+        query,
+        search_type: searchType,
+        method: 'ndb-text-fallback',
+        engine: 'ndb',
+        degraded: true,
+        truncated,
+        nvdbError: nvdbError?.message ?? null,
+        rejected: false
+    };
+}
+
 async function searchArchive(dbInstance, body, deps = {}) {
     const { db } = dbInstance;
 
@@ -104,8 +246,29 @@ async function searchArchive(dbInstance, body, deps = {}) {
     const relevanceFloor = deps.relevanceFloor !== undefined ? Number(deps.relevanceFloor) : DEFAULT_RELEVANCE_FLOOR;
     const embedBatch = deps.embedBatch;
     const embedAvailable = deps.embedAvailable !== false;
+    const onNvdbError = typeof deps.onNvdbError === 'function' ? deps.onNvdbError : null;
 
-    if (!nvdbClient) throw new Error('searchArchive: nvdbClient is required');
+    const explicitRole = filterRole && filterRole !== 'all' ? filterRole : null;
+    const minTs = toUnixSeconds(dateFrom);
+    const maxTs = toUnixSeconds(dateTo);
+    const fallback = (nvdbError) => searchNdbFallback({
+        db,
+        query,
+        limit,
+        explicitRole,
+        mode: filterMode,
+        minTs,
+        maxTs,
+        searchType,
+        nvdbError
+    });
+
+    if (!nvdbClient) {
+        // A missing client is a wiring bug in a test, but in production it means
+        // nVDB was never reachable — serve from nDB when the handle supports it.
+        if (typeof db.searchText !== 'function') throw new Error('searchArchive: nvdbClient is required');
+        return await fallback(null);
+    }
     const principals = [userPrincipal(userId)];
 
     let baseSwitches;
@@ -159,7 +322,6 @@ async function searchArchive(dbInstance, body, deps = {}) {
 
     const filters = {};
     const promoted = [];
-    const explicitRole = filterRole && filterRole !== 'all' ? filterRole : null;
     if (explicitRole) {
         promoted.push({ field: 'role', op: 'eq', value: explicitRole });
     }
@@ -168,8 +330,6 @@ async function searchArchive(dbInstance, body, deps = {}) {
     }
     if (promoted.length > 0) filters.promoted = promoted;
 
-    const minTs = toUnixSeconds(dateFrom);
-    const maxTs = toUnixSeconds(dateTo);
     if (minTs !== null || maxTs !== null) {
         filters.created_at = {};
         if (minTs !== null) filters.created_at.min = minTs;
@@ -197,19 +357,37 @@ async function searchArchive(dbInstance, body, deps = {}) {
         lexical_weight: options.lexicalWeight,
         vector_weight: options.vectorWeight
     };
-    const hybridResult = await nvdbClient.hybridSearch(collection, hybridQuery);
+    let hybridResult;
+    let l2 = null;
+    try {
+        hybridResult = await nvdbClient.hybridSearch(collection, hybridQuery);
+        const rawHits = hybridResult?.hits || [];
+        if (options.rerank && rawHits.length > 0) {
+            l2 = await nvdbClient.level2(collection, {
+                query_text: query,
+                principals,
+                hits: rawHits,
+                shortlist: options.shortlist,
+                rerank_weight: options.rerankWeight,
+                relevance_floor: relevanceFloor
+            });
+        }
+    } catch (err) {
+        if (!isNvdbUnavailableError(err)) throw err;
+        LOG.warn('nVDB search unavailable — falling back to nDB text search', {
+            query: query.slice(0, 50),
+            error: err.message
+        }, 'Search');
+        if (onNvdbError) onNvdbError(err);
+        if (typeof db.searchText !== 'function') {
+            throw new Error(`searchArchive: nVDB unavailable (${err.message}) and this nDB handle has no searchText`);
+        }
+        return await fallback(err);
+    }
     const rawHits = hybridResult?.hits || [];
 
     let orderedHits;
-    if (options.rerank && rawHits.length > 0) {
-        const l2 = await nvdbClient.level2(collection, {
-            query_text: query,
-            principals,
-            hits: rawHits,
-            shortlist: options.shortlist,
-            rerank_weight: options.rerankWeight,
-            relevance_floor: relevanceFloor
-        });
+    if (l2) {
         if (l2.rejected) {
             return {
                 results: [],
