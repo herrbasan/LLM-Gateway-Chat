@@ -3586,6 +3586,15 @@ function _vsActivateWhenReady(container, onDone = null) {
     });
 }
 
+// Flex `gap` only sits BETWEEN items, never after the last one. Each slot's
+// height includes `gap` so `state.totalHeight` stays the exact offset for the
+// next appended slot, while the stage height omits that trailing gap — without
+// this, activating virtual scroll shifts the bottom message up by `gap`.
+function _vsSetStageHeight(state) {
+    const h = state.slots.length > 0 ? Math.max(0, state.totalHeight - state.gap) : 0;
+    state.stage.style.height = h + 'px';
+}
+
 function _vsActivate(container) {
     const messages = Array.from(container.querySelectorAll('.chat-message'));
     if (messages.length === 0) {
@@ -3639,7 +3648,7 @@ function _vsActivate(container) {
     // Create the stage — a positioned container with explicit height
     const stage = document.createElement('div');
     stage.className = 'vs-stage';
-    stage.style.height = totalHeight + 'px';
+    stage.style.height = (slots.length > 0 ? Math.max(0, totalHeight - gap) : 0) + 'px';
 
     // Move all elements into the stage, positioned absolutely.
     // Preserve original horizontal alignment from CSS classes:
@@ -3808,7 +3817,7 @@ function _vsRecalculate(container) {
 
     // Update stage height
     state.totalHeight = offset;
-    state.stage.style.height = offset + 'px';
+    _vsSetStageHeight(state);
 
     // Heights are now valid for this width
     state.measuredWidth = container.clientWidth;
@@ -3949,7 +3958,7 @@ function _vsOnFrame(container) {
             offset += s.height;
         }
         state.totalHeight = offset;
-        state.stage.style.height = offset + 'px';
+        _vsSetStageHeight(state);
         // WI-3: compensate for height changes above the viewport so content
         // under the user's eyes doesn't shift. Uses the scrollTop read at the
         // top of the frame (read phase), not a fresh read mid-write — and adds
@@ -4053,7 +4062,7 @@ function _vsAppendMessage(container, el) {
     state.slots.push({ el, height, offset, spacing });
     state.attached.add(el);
     state.totalHeight = offset + height;
-    state.stage.style.height = state.totalHeight + 'px';
+    _vsSetStageHeight(state);
 
     // WI-2: wake the loop — the new element may grow (streaming) or settle
     // (web components finishing render).
@@ -4090,7 +4099,7 @@ function _vsRemoveElement(container, el) {
         offset += s.height;
     }
     state.totalHeight = offset;
-    state.stage.style.height = offset + 'px';
+    _vsSetStageHeight(state);
     _vsUpdateVisible(container);
 }
 
@@ -4157,7 +4166,7 @@ function _vsRemoveExchangeDom(clickedEl, exchangeId) {
         offset += s.height;
     }
     state.totalHeight = offset;
-    state.stage.style.height = offset + 'px';
+    _vsSetStageHeight(state);
 
     // WI-3: keep viewport content stationary when deleting above the viewport.
     if (removedAbove > 0) container.scrollTop = scrollTop - removedAbove;
