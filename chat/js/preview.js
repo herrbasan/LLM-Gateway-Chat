@@ -104,7 +104,7 @@ let _marksNoticeTimer = null;
 
 let pane, resizer, content, selectEl, sourceEl, closeBtn, viewBtn, chatMain;
 let browserPanel, browserBtn, treeEl, treeFilter, treeRefresh, treeCollapse;
-let marksBar, selToolbar, previewBody, browserResizer;
+let marksBar, marksDialog, marksDialogContent, selToolbar, previewBody, browserResizer;
 let dragCleanup = null;
 let browserDragCleanup = null;
 
@@ -178,6 +178,8 @@ function init() {
     previewBody = document.querySelector('.preview-body');
     browserResizer = document.getElementById('preview-browser-resizer');
     marksBar = document.getElementById('preview-marks-bar');
+    marksDialog = document.getElementById('preview-marks-dialog');
+    marksDialogContent = document.getElementById('preview-marks-dialog-content');
     selToolbar = document.getElementById('preview-selection-toolbar');
 
     if (!pane || !resizer || !content || !selectEl || !sourceEl || !closeBtn || !viewBtn || !chatMain) {
@@ -186,7 +188,7 @@ function init() {
     if (!browserPanel || !browserBtn || !treeEl || !treeFilter || !treeRefresh || !treeCollapse) {
         throw new Error('preview.init: storage browser DOM elements not found');
     }
-    if (!previewBody || !browserResizer || !marksBar || !selToolbar) {
+    if (!previewBody || !browserResizer || !marksBar || !marksDialog || !marksDialogContent || !selToolbar) {
         throw new Error('preview.init: preview layout elements not found');
     }
 
@@ -320,7 +322,8 @@ function init() {
         if (e.key === 'Escape') hideSelectionToolbar();
     });
     marksBar.addEventListener('click', onMarksBarClick);
-    marksBar.addEventListener('nui-input', onMarksBarNote);
+    marksDialogContent.addEventListener('click', onMarksBarClick);
+    marksDialogContent.addEventListener('nui-input', onMarksBarNote);
     syncBrowserResizer();
 }
 
@@ -792,6 +795,7 @@ function close() {
     if (!pane) return;
     _activeSession().paneOpen = false;
     hideSelectionToolbar();
+    closeMarksDialog();
     pane.hidden = true;
     resizer.hidden = true;
 }
@@ -964,6 +968,7 @@ function reset() {
     currentSessionId = null;
     _renderedContent = null;
     closeNoteDialog();
+    closeMarksDialog();
     if (content) content.replaceChildren();
     if (content) content.classList.remove('deck-mode', 'ui-mode', 'media-mode', 'html-mode');
     if (viewBtn) viewBtn.hidden = true;
@@ -1001,6 +1006,7 @@ function clearSession(sessionId) {
     if (sessionId !== currentSessionId) return;
     _renderedContent = null;
     closeNoteDialog();
+    closeMarksDialog();
     if (content) content.replaceChildren();
     if (content) content.classList.remove('deck-mode', 'ui-mode', 'media-mode', 'html-mode');
     if (viewBtn) viewBtn.hidden = true;
@@ -1030,6 +1036,7 @@ function setSession(sessionId) {
     // Leaving: nothing of the outgoing chat may stay on the shared surface.
     hideSelectionToolbar();
     closeNoteDialog();
+    closeMarksDialog();
     noteSeq++;                       // a note fetch in flight must not land in the next conversation
 
     currentSessionId = sessionId;
@@ -1603,114 +1610,160 @@ function applyItemMarks(item, mdRoot) {
     renderMarksBar(item);
 }
 
+function activeMarkedItem() {
+    const s = _activeSession();
+    return s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+}
+
 function renderMarksBar(item) {
     if (!marksBar) return;
     const marks = item && Array.isArray(item.marks) ? item.marks : [];
     if (!marks.length) {
         marksBar.hidden = true;
         marksBar.replaceChildren();
+        closeMarksDialog();
         return;
     }
 
-    const head = document.createElement('div');
-    head.className = 'preview-marks-head';
-    const title = document.createElement('span');
-    title.className = 'preview-marks-title';
-    title.textContent = `Marks (${marks.length})`;
-    const clearAll = document.createElement('nui-button');
-    clearAll.setAttribute('variant', 'ghost');
-    clearAll.setAttribute('size', 'small');
-    clearAll.innerHTML = '<button type="button" data-marks-action="clear-all">Clear all</button>';
-    head.append(title, clearAll);
-
-    const list = document.createElement('ul');
-    list.className = 'preview-marks-list';
-    for (const mark of marks) list.appendChild(createMarkRow(mark));
-
-    marksBar.replaceChildren(head, list);
+    const indicator = document.createElement('nui-button');
+    indicator.className = 'preview-marks-indicator';
+    indicator.setAttribute('variant', 'outline');
+    indicator.setAttribute('size', 'small');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('data-marks-action', 'open-dialog');
+    button.title = 'Review marked passages and revision instructions';
+    const icon = document.createElement('nui-icon');
+    icon.setAttribute('name', 'edit_note');
+    button.append(icon, document.createTextNode(`${marks.length} mark${marks.length === 1 ? '' : 's'}`));
+    indicator.appendChild(button);
+    marksBar.replaceChildren(indicator);
     marksBar.hidden = false;
+
+    if (marksDialog?.isOpen()) renderMarksDialog(item);
 }
 
-function createMarkRow(mark) {
-    const row = document.createElement('li');
-    row.className = 'preview-mark-item';
-    row.setAttribute('data-mark-id', mark.id);
+function openMarksDialog() {
+    const item = activeMarkedItem();
+    if (!item?.marks?.length || !marksDialog) return;
+    renderMarksDialog(item);
+    if (!marksDialog.isOpen()) marksDialog.showModal();
+}
 
+function closeMarksDialog() {
+    if (marksDialog?.isOpen()) marksDialog.close('done');
+    if (marksDialogContent) marksDialogContent.replaceChildren();
+}
+
+function renderMarksDialog(item) {
+    if (!marksDialogContent || !item?.marks?.length) return;
+    const toolbar = document.createElement('div');
+    toolbar.className = 'preview-marks-dialog-toolbar';
+    const intro = document.createElement('p');
+    intro.textContent = 'These passages and instructions are sent with your next message. Add only the context the model needs to revise them.';
+    const actions = document.createElement('div');
+    actions.className = 'preview-marks-dialog-actions';
+    const clearAll = document.createElement('nui-button');
+    clearAll.setAttribute('variant', 'outline');
+    clearAll.innerHTML = '<button type="button" data-marks-action="clear-all">Clear all</button>';
+    const closeButton = document.createElement('nui-button');
+    closeButton.innerHTML = '<button type="button" data-action="dialog-close@#preview-marks-dialog">Close</button>';
+    actions.append(clearAll, closeButton);
+    toolbar.append(intro, actions);
+
+    const list = document.createElement('div');
+    list.className = 'preview-marks-dialog-list';
+    item.marks.forEach((mark, index) => list.appendChild(createMarkDialogCard(mark, index)));
+    marksDialogContent.replaceChildren(toolbar, list);
+}
+
+function createMarkDialogCard(mark, index) {
+    const card = document.createElement('section');
+    card.className = 'preview-mark-card';
+    card.setAttribute('data-mark-id', mark.id);
+
+    const head = document.createElement('header');
+    head.className = 'preview-mark-card-head';
+    const title = document.createElement('div');
+    title.className = 'preview-mark-card-title';
+    const ordinal = document.createElement('span');
+    ordinal.className = 'preview-mark-card-ordinal';
+    ordinal.textContent = `Passage ${index + 1}`;
+    const heading = document.createElement('h3');
+    heading.textContent = mark.heading || 'No preceding heading';
+    title.append(ordinal, heading);
+
+    const cardActions = document.createElement('div');
+    cardActions.className = 'preview-mark-card-actions';
     const jump = document.createElement('nui-button');
     jump.setAttribute('variant', 'ghost');
     jump.setAttribute('size', 'small');
-    jump.className = 'preview-mark-jump';
-    const jumpButton = document.createElement('button');
-    jumpButton.type = 'button';
-    jumpButton.setAttribute('data-marks-action', 'jump');
-    jumpButton.title = mark.heading ? `${mark.heading}\n${mark.quote}` : mark.quote;
-    if (mark.heading) {
-        const heading = document.createElement('span');
-        heading.className = 'preview-mark-heading';
-        heading.textContent = mark.heading;
-        jumpButton.appendChild(heading);
-    }
-    const quote = document.createElement('span');
-    quote.className = 'preview-mark-quote';
-    quote.textContent = `"${truncateQuote(mark.quote)}"`;
-    jumpButton.appendChild(quote);
-    jump.appendChild(jumpButton);
-
-    const note = document.createElement('nui-input');
-    note.className = 'preview-mark-note';
-    note.setAttribute('size', 'small');
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.placeholder = 'Optional note...';
-    input.maxLength = MAX_NOTE_CHARS;
-    input.value = mark.note || '';
-    input.setAttribute('aria-label', 'Note for this marked passage');
-    input.setAttribute('data-mark-note', mark.id);
-    note.appendChild(input);
-
+    jump.innerHTML = '<button type="button" data-marks-action="jump"><nui-icon name="my_location"></nui-icon>Jump to passage</button>';
     const remove = document.createElement('nui-button');
-    remove.setAttribute('variant', 'icon');
+    remove.setAttribute('variant', 'ghost');
     remove.setAttribute('size', 'small');
-    remove.innerHTML = '<button type="button" data-marks-action="remove" aria-label="Remove mark" title="Remove mark"><nui-icon name="close"></nui-icon></button>';
+    remove.innerHTML = '<button type="button" data-marks-action="remove"><nui-icon name="delete"></nui-icon>Remove</button>';
+    cardActions.append(jump, remove);
+    head.append(title, cardActions);
 
-    row.append(jump, note, remove);
-    return row;
-}
+    const quote = document.createElement('blockquote');
+    quote.className = 'preview-mark-card-quote';
+    quote.textContent = mark.quote;
 
-function truncateQuote(quote) {
-    const text = typeof quote === 'string' ? quote : '';
-    return text.length > 60 ? text.slice(0, 60).trimEnd() + '…' : text;
+    const noteLabel = document.createElement('label');
+    noteLabel.className = 'preview-mark-card-note-label';
+    const textareaId = `preview-mark-note-${mark.id}`;
+    noteLabel.setAttribute('for', textareaId);
+    noteLabel.textContent = 'Revision instruction (optional)';
+    const note = document.createElement('nui-textarea');
+    note.className = 'preview-mark-card-note';
+    const textarea = document.createElement('textarea');
+    textarea.id = textareaId;
+    textarea.rows = 3;
+    textarea.maxLength = MAX_NOTE_CHARS;
+    textarea.placeholder = 'What should the model change, keep, or clarify?';
+    textarea.value = mark.note || '';
+    textarea.setAttribute('data-mark-note', mark.id);
+    note.appendChild(textarea);
+
+    card.append(head, quote, noteLabel, note);
+    return card;
 }
 
 function onMarksBarClick(event) {
     const button = event.target.closest('[data-marks-action]');
-    if (!button || !marksBar.contains(button)) return;
-    const s = _activeSession();
-    const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+    if (!button || (!marksBar.contains(button) && !marksDialogContent.contains(button))) return;
+    const item = activeMarkedItem();
     if (!item) return;
 
     const action = button.getAttribute('data-marks-action');
+    if (action === 'open-dialog') {
+        openMarksDialog();
+        return;
+    }
     if (action === 'clear-all') {
         item.marks = [];
         syncMarksUi(item);
         return;
     }
-    const markId = button.closest('.preview-mark-item')?.getAttribute('data-mark-id');
+    const markId = button.closest('[data-mark-id]')?.getAttribute('data-mark-id');
     if (!markId) return;
     if (action === 'remove') {
         item.marks = (item.marks || []).filter(mark => mark.id !== markId);
         syncMarksUi(item);
         return;
     }
-    if (action === 'jump') jumpToMark(item, markId);
+    if (action === 'jump') {
+        closeMarksDialog();
+        jumpToMark(item, markId);
+    }
 }
 
 function onMarksBarNote(event) {
-    if (event.target?.tagName !== 'NUI-INPUT') return;
-    const input = event.target.querySelector('input[data-mark-note]');
+    if (event.target?.tagName !== 'NUI-INPUT' && event.target?.tagName !== 'NUI-TEXTAREA') return;
+    const input = event.target.querySelector('input[data-mark-note], textarea[data-mark-note]');
     if (!input) return;
-    const s = _activeSession();
-    const item = s.activeId && s.items.has(s.activeId) ? s.items.get(s.activeId) : null;
+    const item = activeMarkedItem();
     if (!item) return;
     const mark = (item.marks || []).find(candidate => candidate.id === input.getAttribute('data-mark-note'));
     if (!mark) return;

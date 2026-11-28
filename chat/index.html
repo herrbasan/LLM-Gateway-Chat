@@ -458,6 +458,7 @@
                                 <select></select>
                             </nui-select>
                             <span class="preview-source" id="preview-source"></span>
+                            <div id="preview-marks-bar" class="preview-marks-bar" hidden></div>
                             <nui-button id="preview-view-btn" class="icon-only" title="Slide view" hidden>
                                 <button type="button" aria-label="Slide view"><nui-icon name="fullscreen"></nui-icon></button>
                             </nui-button>
@@ -487,7 +488,6 @@
                             </aside>
                             <div id="preview-browser-resizer" class="preview-browser-resizer" hidden></div>
                             <div class="preview-main-col">
-                                <div id="preview-marks-bar" class="preview-marks-bar" hidden></div>
                                 <div class="preview-content" id="preview-content"></div>
                             </div>
                         </div>
@@ -510,6 +510,11 @@
             </nui-main>
         </nui-content>
     </nui-app>
+
+    <!-- Marked-passage editor: the header only carries a count indicator. -->
+    <nui-dialog id="preview-marks-dialog" mode="page" title="Marked passages" style="--space-page-maxwidth: 1100px;">
+        <div id="preview-marks-dialog-content" class="preview-marks-dialog-content"></div>
+    </nui-dialog>
 
     <!-- Login Dialog -->
     <nui-dialog id="login-dialog">
